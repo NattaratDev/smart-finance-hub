@@ -2943,7 +2943,6 @@ function thaiFiscalYear(value) {
   if (isNaN(d)) return null;
   return d.getFullYear() + (d.getMonth() >= 9 ? 1 : 0) + 543;
 }
-const sarabanReg = (d) => d.reg_no ? `${d.reg_no}/${d.reg_year}` : '-';
 const sarabanFY = (d) => d.reg_year || thaiFiscalYear(d.doc_date || d.created_at);
 function sarabanFileMeta(name = '', mime = '') {
   const ext = String(name).split('.').pop().toLowerCase();
@@ -2956,6 +2955,8 @@ function sarabanFileMeta(name = '', mime = '') {
   return { icon: 'file', color: '#64748B', kind: 'other' };
 }
 const sarabanDownloadUrl = (f) => sb.storage.from(STORAGE_BUCKET).getPublicUrl(f.file_path, { download: f.file_name }).data.publicUrl;
+/** เลขที่หนังสือบังคับกรอกสำหรับหนังสือราชการ คำสั่ง/ประกาศ บันทึก/หนังสือเวียน (ระเบียบ คู่มือ แบบฟอร์ม ไม่บังคับ) */
+const sarabanNeedsDocNo = (c) => !!c && !['regulation', 'manual'].includes(c.group_key);
 const sarabanCanInternal = () => isLoggedIn() && hasPermission('saraban.view');
 const sarabanCan = (d, action) => isLoggedIn() && hasPermission('saraban.' + action) && canEditRecord(d, 'saraban.view_all');
 const urgencyBadge = (u) => u && u !== 'normal' ? `<span class="badge ${SARABAN_URGENCY[u].cls}">${ic('zap', 'w-3 h-3')} ${SARABAN_URGENCY[u].label}</span>` : '';
@@ -3004,7 +3005,7 @@ function sarabanCard(d) {
       <span class="w-11 h-11 rounded-2xl grid place-items-center shrink-0" style="background:${hexToRgba(c.color, .15)};color:${c.color}">${ic(c.icon || 'file-text', 'w-5 h-5')}</span>
       <div class="min-w-0 flex-1">
         <button type="button" class="text-left font-medium text-slate-800 leading-snug line-clamp-2 hover:text-brand-600" data-act="view" data-id="${d.id}">${esc(d.title)}</button>
-        <div class="text-xs text-slate-400 mt-1">${d.reg_no ? `ทะเบียน ${sarabanReg(d)} · ` : ''}${d.doc_no ? esc(d.doc_no) + ' · ' : ''}${formatThaiDate(d.doc_date || d.created_at)}</div>
+        <div class="text-xs text-slate-400 mt-1">${d.doc_no ? `<b class="font-medium text-slate-500">${esc(d.doc_no)}</b> · ` : ''}${esc(d.from_org || '')}${d.doc_date ? ' · ' + formatThaiDate(d.doc_date) : ''}</div>
       </div>
     </div>
     <div class="flex flex-wrap gap-1.5 mt-3">${catBadge(c)}${urgencyBadge(d.urgency)}${isLoggedIn() ? accessBadge(d.access_level) : ''}</div>
@@ -3044,13 +3045,13 @@ async function renderSaraban(el, mod) {
 
   const table = createDataTable($('#sbTable', el), {
     pageSize: 10, filters,
-    searchKeys: ['title', 'doc_no', 'from_org', 'to_org', 'keywords', 'summary', 'reg_label', 'cat.name'],
-    searchPlaceholder: 'ค้นหาเรื่อง, เลขที่หนังสือ, เลขทะเบียน, จาก/ถึง, คำค้น...',
+    searchKeys: ['title', 'doc_no', 'from_org', 'to_org', 'keywords', 'summary', 'cat.name'],
+    searchPlaceholder: 'ค้นหาชื่อเรื่อง, เลขที่หนังสือ, เจ้าของหนังสือ, คำค้น...',
     columns: [
-      { key: 'reg_no', label: 'ทะเบียน / เลขที่', class: 'whitespace-nowrap', render: d => `<div class="font-medium text-slate-700">${sarabanReg(d)}</div><div class="text-xs text-slate-400">${esc(d.doc_no || '-')}</div>` },
-      { key: 'title', label: 'เรื่อง', render: d => `<button type="button" class="text-left font-medium text-slate-700 hover:text-brand-600 line-clamp-2 max-w-md" data-act="view" data-id="${d.id}">${esc(d.title)}</button>
+      { key: 'doc_no', label: 'เลขที่หนังสือ', class: 'whitespace-nowrap', render: d => `<span class="font-medium text-slate-700">${esc(d.doc_no || '-')}</span>` },
+      { key: 'title', label: 'ชื่อเรื่อง', render: d => `<button type="button" class="text-left font-medium text-slate-700 hover:text-brand-600 line-clamp-2 max-w-md" data-act="view" data-id="${d.id}">${esc(d.title)}</button>
           <div class="flex flex-wrap gap-1 mt-1">${catBadge(d.cat)}${urgencyBadge(d.urgency)}${internal ? accessBadge(d.access_level) : ''}</div>` },
-      { key: 'from_org', label: 'จาก / ถึง', render: d => `<div class="text-xs text-slate-500 max-w-[14rem]"><div class="truncate">จาก: ${esc(d.from_org || '-')}</div><div class="truncate">ถึง: ${esc(d.to_org || '-')}</div></div>` },
+      { key: 'from_org', label: 'เจ้าของหนังสือ', render: d => `<div class="text-sm text-slate-600 max-w-[14rem] line-clamp-2">${esc(d.from_org || '-')}</div>` },
       { key: 'doc_date', label: 'ลงวันที่', class: 'whitespace-nowrap', render: d => `<span class="text-slate-600">${formatThaiDate(d.doc_date)}</span>` },
       { key: 'file_count', label: 'ไฟล์', render: d => `<span class="badge bg-slate-100 text-slate-500">${ic('paperclip', 'w-3 h-3')} ${d.file_count || 0}</span>` },
     ],
@@ -3066,7 +3067,6 @@ async function renderSaraban(el, mod) {
         style="${on ? `background:${g.color};border-color:${g.color}` : ''}">${ic(g.icon, 'w-4 h-4')} ${esc(g.name)}
         <span class="rounded-full px-1.5 text-xs ${on ? 'bg-white/25' : 'bg-slate-100 text-slate-500'}">${count(g.key)}</span></button>`;
     }).join('');
-    Saraban.docs.forEach(d => { d.reg_label = sarabanReg(d); });
     table.setRows(Saraban.docs.filter(d => !Saraban.group || d.cat?.group_key === Saraban.group));
     refreshIcons();
   };
@@ -3089,8 +3089,8 @@ async function renderSaraban(el, mod) {
         if (!requirePermission('saraban.export')) return;
         const rows = table.getFiltered();
         downloadCSV(`saraban_${toInputDate()}`,
-          ['เลขทะเบียน', 'เลขที่หนังสือ', 'ประเภท', 'กลุ่มเอกสาร', 'เรื่อง', 'จาก', 'ถึง', 'ลงวันที่', 'วันที่รับ', 'ความเร่งด่วน', 'ระดับการเข้าถึง', 'จำนวนไฟล์', 'ดาวน์โหลด', 'หน่วยงาน'],
-          rows.map(x => [sarabanReg(x), x.doc_no, x.cat?.name, x.cat?.group_name, x.title, x.from_org, x.to_org, x.doc_date ? formatThaiDate(x.doc_date) : '', x.received_date ? formatThaiDate(x.received_date) : '',
+          ['เลขที่หนังสือ', 'ประเภท', 'กลุ่มเอกสาร', 'ชื่อเรื่อง', 'เจ้าของหนังสือ', 'ถึง/เรียน', 'ลงวันที่', 'วันที่รับ', 'ความเร่งด่วน', 'ระดับการเข้าถึง', 'จำนวนไฟล์', 'ดาวน์โหลด', 'หน่วยงาน'],
+          rows.map(x => [x.doc_no, x.cat?.name, x.cat?.group_name, x.title, x.from_org, x.to_org, x.doc_date ? formatThaiDate(x.doc_date) : '', x.received_date ? formatThaiDate(x.received_date) : '',
             SARABAN_URGENCY[x.urgency]?.label, SARABAN_ACCESS[x.access_level]?.label, x.file_count || 0, x.download_count || 0, x.org_name]));
         logAudit('export', 'saraban_documents', null, { count: rows.length });
         break;
@@ -3115,11 +3115,10 @@ async function openSarabanDetail(d) {
       <div class="flex flex-wrap gap-1.5 mb-4">${catBadge(c)}${urgencyBadge(d.urgency)}${isLoggedIn() ? accessBadge(d.access_level) : ''}</div>
       <div class="grid lg:grid-cols-5 gap-5">
         <dl class="lg:col-span-2 text-sm">
-          ${row('เลขทะเบียน', d.reg_no ? `${sarabanReg(d)} <span class="text-xs text-slate-400">(ปีงบประมาณ ${d.reg_year})</span>` : '')}
           ${row('เลขที่หนังสือ', esc(d.doc_no || ''))}
+          ${row('เจ้าของหนังสือ', esc(d.from_org || ''))}
           ${row('ลงวันที่', d.doc_date ? formatThaiDate(d.doc_date, { long: true }) : '')}
           ${row('วันที่รับ', d.received_date ? formatThaiDate(d.received_date, { long: true }) : '')}
-          ${row('จาก', esc(d.from_org || ''))}
           ${row('ถึง/เรียน', esc(d.to_org || ''))}
           ${row('ความเร่งด่วน', SARABAN_URGENCY[d.urgency]?.label)}
           ${row('หน่วยงานเจ้าของ', esc(d.org_name || ''))}
@@ -3180,34 +3179,7 @@ function openSarabanForm(d, onSaved) {
   const m = openModal({
     title: d ? 'แก้ไขเอกสาร' : 'เพิ่มเอกสาร', icon: d ? 'file-pen' : 'file-plus', size: 'xl',
     body: `<form id="sbForm" class="space-y-4">
-      <div class="grid sm:grid-cols-3 gap-4">
-        <div class="sm:col-span-2"><label class="label">ประเภทเอกสาร *</label>
-          <select name="category_id" class="input" required>${groups.map(g => `<optgroup label="${esc(g)}">${cats.filter(c => c.group_name === g).map(c => `<option value="${c.id}" ${(d?.category_id || cats[0]?.id) === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select></div>
-        <div><label class="label">เลขทะเบียน</label>${d
-          ? `<div class="flex items-center gap-2"><input name="reg_no" type="number" min="1" class="input" value="${d.reg_no ?? ''}" placeholder="-"><span class="text-sm text-slate-400 whitespace-nowrap">/ ${d.reg_year || '-'}</span></div>`
-          : `<div id="sbRegHint" class="input bg-slate-50 text-slate-500 text-xs leading-5"></div>`}</div>
-      </div>
-      <div class="grid sm:grid-cols-3 gap-4">
-        <div><label class="label">เลขที่หนังสือ</label><input name="doc_no" class="input" value="${esc(d?.doc_no || '')}" placeholder="เช่น สท 52301/1520"></div>
-        <div><label class="label">ลงวันที่</label><input name="doc_date" type="date" class="input" value="${d?.doc_date || (d ? '' : toInputDate())}"></div>
-        <div id="sbRecvWrap"><label class="label">วันที่รับ</label><input name="received_date" type="date" class="input" value="${d?.received_date || ''}"></div>
-      </div>
-      <div><label class="label">เรื่อง *</label><textarea name="title" class="input" rows="2" required maxlength="500">${esc(d?.title || '')}</textarea></div>
-      <div class="grid sm:grid-cols-2 gap-4">
-        <div><label class="label">จาก</label><input name="from_org" class="input" value="${esc(d?.from_org || '')}"></div>
-        <div><label class="label">ถึง/เรียน</label><input name="to_org" class="input" value="${esc(d?.to_org || '')}"></div>
-      </div>
-      <div class="grid sm:grid-cols-2 gap-4">
-        <div><label class="label">ความเร่งด่วน</label><select name="urgency" class="input">${Object.entries(SARABAN_URGENCY).map(([k, v]) => `<option value="${k}" ${(d?.urgency || 'normal') === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></div>
-        ${isSuperAdmin() ? `<div><label class="label">หน่วยงานเจ้าของ</label><select name="org_id" class="input" id="sbOrgSel"><option value="${esc(d?.org_id || me.org_id || '')}">กำลังโหลด...</option></select></div>` : '<div></div>'}
-      </div>
-      <div><label class="label">ระดับการเข้าถึง</label>
-        <div class="grid sm:grid-cols-3 gap-2">${Object.entries(SARABAN_ACCESS).map(([k, v]) => `<label class="flex items-start gap-2.5 rounded-2xl border border-slate-200 p-3 cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-brand-50/60">
-          <input type="radio" name="access_level" value="${k}" class="mt-1 accent-brand-500" ${(d?.access_level || 'internal') === k ? 'checked' : ''}>
-          <span><span class="flex items-center gap-1 text-sm font-medium text-slate-700">${ic(v.icon, 'w-3.5 h-3.5')} ${v.label}</span><span class="text-xs text-slate-400">${v.hint}</span></span></label>`).join('')}</div></div>
-      <div><label class="label">สาระสำคัญ</label><textarea name="summary" class="input" rows="3">${esc(d?.summary || '')}</textarea></div>
-      <div><label class="label">คำค้น (คั่นด้วย ,)</label><input name="keywords" class="input" value="${esc(d?.keywords || '')}" placeholder="เช่น งบประมาณ, 2570"></div>
-      <div><label class="label">ไฟล์แนบ (สูงสุด ${SARABAN_MAX_FILES} ไฟล์ · ไฟล์ละไม่เกิน 20 MB)</label>
+      <div><label class="label">ไฟล์เอกสาร * <span class="font-normal text-slate-400">(สูงสุด ${SARABAN_MAX_FILES} ไฟล์ · ไฟล์ละไม่เกิน 20 MB)</span></label>
         <div class="rounded-2xl border-2 border-dashed border-brand-200 bg-brand-50/50 p-3">
           <ul id="sbFileList" class="space-y-2 mb-3"></ul>
           <input type="file" id="sbFileInput" class="hidden" multiple accept="${SARABAN_ACCEPT}">
@@ -3216,6 +3188,34 @@ function openSarabanForm(d, onSaved) {
             <span class="text-xs text-slate-400">PDF, Word, Excel, PowerPoint, รูปภาพ, ZIP · รูปภาพจะถูกบีบอัดเป็น WebP อัตโนมัติ</span>
           </div>
         </div></div>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label">ประเภทเอกสาร *</label>
+          <select name="category_id" class="input" required>${groups.map(g => `<optgroup label="${esc(g)}">${cats.filter(c => c.group_name === g).map(c => `<option value="${c.id}" ${(d?.category_id || cats[0]?.id) === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select></div>
+        <div><label class="label">เลขที่หนังสือ <span id="sbDocNoReq">*</span></label><input name="doc_no" class="input" value="${esc(d?.doc_no || '')}" placeholder="เช่น สท 52301/1520"></div>
+      </div>
+      <div><label class="label">เจ้าของหนังสือ *</label><input name="from_org" class="input" value="${esc(d?.from_org || '')}" placeholder="หน่วยงาน/ผู้ออกหนังสือ เช่น กรมส่งเสริมการปกครองท้องถิ่น" list="sbOwnerList" required>
+        <datalist id="sbOwnerList">${[...new Set(Saraban.docs.map(x => x.from_org).filter(Boolean))].map(o => `<option value="${esc(o)}">`).join('')}</datalist></div>
+      <div><label class="label">ชื่อเรื่อง *</label><textarea name="title" class="input" rows="2" required maxlength="500">${esc(d?.title || '')}</textarea></div>
+      <div><label class="label">ระดับการเข้าถึง</label>
+        <div class="grid sm:grid-cols-3 gap-2">${Object.entries(SARABAN_ACCESS).map(([k, v]) => `<label class="flex items-start gap-2.5 rounded-2xl border border-slate-200 p-3 cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-brand-50/60">
+          <input type="radio" name="access_level" value="${k}" class="mt-1 accent-brand-500" ${(d?.access_level || 'internal') === k ? 'checked' : ''}>
+          <span><span class="flex items-center gap-1 text-sm font-medium text-slate-700">${ic(v.icon, 'w-3.5 h-3.5')} ${v.label}</span><span class="text-xs text-slate-400">${v.hint}</span></span></label>`).join('')}</div></div>
+      <details class="rounded-2xl border border-slate-100 bg-slate-50/60 px-4 py-3" ${d && (d.doc_date || d.received_date || d.to_org || d.summary || d.keywords || d.urgency !== 'normal') ? 'open' : ''}>
+        <summary class="text-sm font-medium text-slate-600 flex items-center gap-2">${ic('chevron-down', 'w-4 h-4')} ข้อมูลเพิ่มเติม (ไม่บังคับ)</summary>
+        <div class="space-y-4 mt-4">
+          <div class="grid sm:grid-cols-3 gap-4">
+            <div><label class="label">ลงวันที่</label><input name="doc_date" type="date" class="input" value="${d?.doc_date || ''}"></div>
+            <div id="sbRecvWrap"><label class="label">วันที่รับ</label><input name="received_date" type="date" class="input" value="${d?.received_date || ''}"></div>
+            <div><label class="label">ความเร่งด่วน</label><select name="urgency" class="input">${Object.entries(SARABAN_URGENCY).map(([k, v]) => `<option value="${k}" ${(d?.urgency || 'normal') === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></div>
+          </div>
+          <div class="grid sm:grid-cols-2 gap-4">
+            <div><label class="label">ถึง/เรียน</label><input name="to_org" class="input" value="${esc(d?.to_org || '')}"></div>
+            ${isSuperAdmin() ? `<div><label class="label">หน่วยงานที่จัดเก็บ</label><select name="org_id" class="input" id="sbOrgSel"><option value="${esc(d?.org_id || me.org_id || '')}">กำลังโหลด...</option></select></div>` : ''}
+          </div>
+          <div><label class="label">สาระสำคัญ</label><textarea name="summary" class="input" rows="3">${esc(d?.summary || '')}</textarea></div>
+          <div><label class="label">คำค้น (คั่นด้วย ,)</label><input name="keywords" class="input" value="${esc(d?.keywords || '')}" placeholder="เช่น งบประมาณ, 2570"></div>
+        </div>
+      </details>
     </form>`,
     footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button><button class="btn btn-primary" type="submit" form="sbForm">${ic('save')} บันทึก</button>`,
   });
@@ -3224,11 +3224,7 @@ function openSarabanForm(d, onSaved) {
   const updateCatUi = () => {
     const c = catOf();
     $('#sbRecvWrap', m.el).classList.toggle('hidden', c?.cat_key !== 'incoming');
-    const hint = $('#sbRegHint', m.el);
-    if (hint) hint.innerHTML = c?.auto_number
-      ? `${ic('hash', 'w-3.5 h-3.5 inline')} ออกเลขอัตโนมัติ<br>ปีงบประมาณ ${thaiFiscalYear(form.received_date.value || form.doc_date.value || new Date())}`
-      : 'ไม่ออกเลขทะเบียน';
-    refreshIcons();
+    $('#sbDocNoReq', m.el).textContent = sarabanNeedsDocNo(c) ? '*' : '(ถ้ามี)';
   };
   const drawFiles = () => {
     const live = existing.filter(f => !f.removed);
@@ -3243,8 +3239,6 @@ function openSarabanForm(d, onSaved) {
     refreshIcons();
   };
   form.category_id.onchange = updateCatUi;
-  form.doc_date.onchange = updateCatUi;
-  form.received_date.onchange = updateCatUi;
   $('#sbChoose', m.el).onclick = () => $('#sbFileInput', m.el).click();
   $('#sbFileInput', m.el).onchange = async (e) => {
     const chosen = [...e.target.files];
@@ -3264,6 +3258,8 @@ function openSarabanForm(d, onSaved) {
         finally { showLoader(false); }
       } else pending.push({ name: f.name, size: f.size, upload: f });
     }
+    // ช่วยกรอกชื่อเรื่องจากชื่อไฟล์แรก (ถ้ายังว่าง)
+    if (!form.title.value.trim() && pending.length) form.title.value = pending[0].name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
     drawFiles();
   };
   m.el.addEventListener('click', (e) => {
@@ -3280,12 +3276,20 @@ function openSarabanForm(d, onSaved) {
     e.preventDefault();
     if (!requirePermission(d ? 'saraban.update' : 'saraban.create')) return;
     const title = form.title.value.trim();
-    if (!title) return showToast('กรุณากรอกเรื่อง', 'warning');
+    const docNo = form.doc_no.value.trim(), owner = form.from_org.value.trim();
+    if (!docNo && sarabanNeedsDocNo(catOf())) return showToast('กรุณากรอกเลขที่หนังสือ', 'warning');
+    if (!owner) return showToast('กรุณากรอกเจ้าของหนังสือ', 'warning');
+    if (!title) return showToast('กรุณากรอกชื่อเรื่อง', 'warning');
+    if (existing.filter(f => !f.removed).length + pending.length === 0) return showToast('กรุณาแนบไฟล์เอกสารอย่างน้อย 1 ไฟล์', 'warning');
     const c = catOf();
+    // เตือนเมื่อเลขที่หนังสือซ้ำกับเอกสารประเภทเดียวกัน (กันนำเข้าซ้ำ)
+    const dup = docNo && Saraban.docs.find(x => x.id !== d?.id && x.category_id === c.id && (x.doc_no || '').replace(/\s+/g, '') === docNo.replace(/\s+/g, ''));
+    if (dup && !(await confirmModal({ title: 'เลขที่หนังสือซ้ำ', danger: false, icon: 'copy', confirmText: 'บันทึกต่อ',
+      message: `มี${esc(c.name)}เลขที่ <b>${esc(docNo)}</b> อยู่แล้ว:<br><span class="text-sm text-slate-500">${esc(dup.title)}</span><br>ต้องการบันทึกเพิ่มอีกฉบับหรือไม่?` }))) return;
     const payload = {
-      category_id: c.id, doc_no: form.doc_no.value.trim() || null, doc_date: form.doc_date.value || null,
+      category_id: c.id, doc_no: docNo || null, doc_date: form.doc_date.value || null,
       received_date: c.cat_key === 'incoming' ? (form.received_date.value || null) : null,
-      title, from_org: form.from_org.value.trim() || null, to_org: form.to_org.value.trim() || null,
+      title, from_org: owner, to_org: form.to_org.value.trim() || null,
       urgency: form.urgency.value, access_level: form.access_level.value,
       summary: form.summary.value.trim() || null,
       keywords: form.keywords.value.split(',').map(x => x.trim()).filter(Boolean).join(', ') || null,
@@ -3293,9 +3297,7 @@ function openSarabanForm(d, onSaved) {
     const orgId = isSuperAdmin() && form.org_id ? (form.org_id.value || null) : (d?.org_id || me.org_id);
     if (d) {
       payload.org_id = orgId;
-      const rn = form.reg_no.value.trim();
-      payload.reg_no = rn ? parseInt(rn, 10) : null;
-      if (d.category_id !== c.id) payload.reg_year = d.reg_year;   // คงปีงบประมาณเดิม
+      payload.reg_year = thaiFiscalYear(payload.received_date || payload.doc_date || d.created_at);   // ปีงบประมาณใช้กรองเอกสาร
     }
     // 1) อัปโหลดไฟล์ใหม่ก่อน
     const uploaded = [];
@@ -3333,9 +3335,9 @@ function openSarabanForm(d, onSaved) {
       if (dr.ok) removed.forEach(f => deleteFile(f.file_path));   // ลบไฟล์เก่าใน Storage
     }
     await logAudit(d ? 'update' : 'create', 'saraban_documents', doc.id, {
-      title, reg: doc.reg_no ? `${doc.reg_no}/${doc.reg_year}` : null, files_added: uploaded.length, files_removed: removed.length,
+      title, doc_no: docNo, files_added: uploaded.length, files_removed: removed.length,
     });
-    showToast(d ? 'บันทึกการแก้ไขเรียบร้อย' : `เพิ่มเอกสารเรียบร้อย${doc.reg_no ? ` (เลขทะเบียน ${doc.reg_no}/${doc.reg_year})` : ''}`, 'success', 4500);
+    showToast(d ? 'บันทึกการแก้ไขเรียบร้อย' : `เพิ่มเอกสาร${docNo ? ' ' + docNo : ''} เรียบร้อย`, 'success', 4500);
     form.reset();
     m.close();
     onSaved && onSaved();
@@ -3345,12 +3347,12 @@ function openSarabanForm(d, onSaved) {
 async function deleteSaraban(d, onDone) {
   if (!requirePermission('saraban.delete')) return;
   if (!sarabanCan(d, 'delete')) return showToast('ลบได้เฉพาะเอกสารที่ตนเองบันทึก', 'error');
-  const ok = await confirmModal({ title: 'ลบเอกสาร', message: `ต้องการลบเอกสาร <b>${esc(d.title)}</b>${d.reg_no ? ` (ทะเบียน ${sarabanReg(d)})` : ''} ใช่หรือไม่?<br><span class="text-xs text-slate-400">ไฟล์แนบ ${d.file_count || 0} ไฟล์ใน Storage จะถูกลบด้วย</span>`, confirmText: 'ลบเอกสาร' });
+  const ok = await confirmModal({ title: 'ลบเอกสาร', message: `ต้องการลบเอกสาร <b>${esc(d.title)}</b>${d.doc_no ? ` (เลขที่ ${esc(d.doc_no)})` : ''} ใช่หรือไม่?<br><span class="text-xs text-slate-400">ไฟล์แนบ ${d.file_count || 0} ไฟล์ใน Storage จะถูกลบด้วย</span>`, confirmText: 'ลบเอกสาร' });
   if (!ok) return;
   const r = await db(s => s.from('saraban_documents').delete().eq('id', d.id), { loaderText: 'กำลังลบ...', success: 'ลบเอกสารเรียบร้อย', error: 'ลบเอกสารไม่สำเร็จ' });
   if (!r.ok) return;
   (d.files || []).forEach(f => deleteFile(f.file_path));
-  await logAudit('delete', 'saraban_documents', d.id, { title: d.title, reg: d.reg_no ? sarabanReg(d) : null, files: (d.files || []).length });
+  await logAudit('delete', 'saraban_documents', d.id, { title: d.title, doc_no: d.doc_no, files: (d.files || []).length });
   onDone && onDone();
 }
 
@@ -3359,15 +3361,14 @@ function openSarabanTypes(onDone) {
   const groups = [...new Map(Saraban.cats.map(c => [c.group_key, c.group_name])).entries()];
   const m = openModal({
     title: 'ประเภทเอกสาร', icon: 'tags', size: 'xl',
-    body: `<p class="text-sm text-slate-500 mb-3">กำหนดประเภทเอกสาร กลุ่ม ไอคอน สี และการออกเลขทะเบียนอัตโนมัติ (นับใหม่ทุกปีงบประมาณ แยกตามหน่วยงานและประเภท)</p>
+    body: `<p class="text-sm text-slate-500 mb-3">กำหนดชื่อประเภทเอกสาร กลุ่ม ไอคอน และสี · ประเภทที่มีเอกสารแล้วให้ปิด "ใช้งาน" แทนการลบ</p>
       <div class="overflow-x-auto rounded-2xl border border-slate-100"><table class="sfh-table w-full text-sm"><thead class="bg-slate-50 text-slate-500"><tr>
-        <th>ประเภท</th><th>กลุ่ม</th><th>ไอคอน</th><th>สี</th><th class="text-center">ออกเลขอัตโนมัติ</th><th class="text-center">ใช้งาน</th><th></th></tr></thead>
+        <th>ประเภท</th><th>กลุ่ม</th><th>ไอคอน</th><th>สี</th><th class="text-center">ใช้งาน</th><th></th></tr></thead>
       <tbody class="divide-y divide-slate-100">${Saraban.cats.map(c => `<tr data-cat="${c.id}">
         <td><input class="input !py-1.5 min-w-[9rem]" data-f="name" value="${esc(c.name)}"></td>
         <td class="text-slate-500 whitespace-nowrap">${esc(c.group_name)}</td>
         <td><div class="flex items-center gap-2"><span class="w-8 h-8 rounded-lg grid place-items-center" style="background:${hexToRgba(c.color, .15)};color:${c.color}">${ic(c.icon, 'w-4 h-4')}</span><input class="input !py-1.5 font-mono w-36" data-f="icon" value="${esc(c.icon)}"></div></td>
         <td><input type="color" class="h-9 w-12 rounded-lg border border-slate-200 p-0.5" data-f="color" value="${esc(c.color)}"></td>
-        <td class="text-center"><label class="switch"><input type="checkbox" data-f="auto_number" ${c.auto_number ? 'checked' : ''}><span class="slider"></span></label></td>
         <td class="text-center"><label class="switch"><input type="checkbox" data-f="is_active" ${c.is_active ? 'checked' : ''}><span class="slider"></span></label></td>
         <td class="text-right whitespace-nowrap"><button class="btn btn-soft btn-sm" data-save-cat="${c.id}">${ic('save', 'w-3.5 h-3.5')} บันทึก</button>
           <button class="btn-icon hover:!text-blush-500" data-del-cat="${c.id}" title="ลบ">${ic('trash-2')}</button></td></tr>`).join('')}</tbody></table></div>
@@ -3386,7 +3387,7 @@ function openSarabanTypes(onDone) {
     if (s) {
       if (!requirePermission('saraban.manage_types')) return;
       const tr = s.closest('tr'); const v = (f) => $(`[data-f="${f}"]`, tr);
-      const payload = { name: v('name').value.trim(), icon: v('icon').value.trim() || 'file-text', color: v('color').value, auto_number: v('auto_number').checked, is_active: v('is_active').checked };
+      const payload = { name: v('name').value.trim(), icon: v('icon').value.trim() || 'file-text', color: v('color').value, is_active: v('is_active').checked };
       if (!payload.name) return showToast('กรุณากรอกชื่อประเภท', 'warning');
       const r = await db(q => q.from('saraban_categories').update(payload).eq('id', s.dataset.saveCat), { success: 'บันทึกประเภทเอกสารแล้ว', error: 'บันทึกไม่สำเร็จ' });
       if (r.ok) { Object.assign(Saraban.cats.find(c => c.id === s.dataset.saveCat), payload); logAudit('update', 'saraban_categories', s.dataset.saveCat, payload); }

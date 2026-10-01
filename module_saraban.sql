@@ -7,7 +7,8 @@
 --
 --  สารบัญ
 --   1) ตาราง: saraban_categories, saraban_documents, saraban_files
---   2) ฟังก์ชัน/Trigger: ปีงบประมาณ, ออกเลขทะเบียนอัตโนมัติ, นับการเข้าชม/ดาวน์โหลด
+--   2) ฟังก์ชัน/Trigger: ปีงบประมาณ (ใช้กรองเอกสาร), นับการเข้าชม/ดาวน์โหลด
+--   * ไม่ออกเลขทะเบียนอัตโนมัติ – ผู้ใช้กรอก "เลขที่หนังสือ" ตามเอกสารจริงที่นำเข้า
 --   3) ลงทะเบียนโมดูล + Permission + สิทธิ์ของ Role + เมนู
 --   4) ข้อมูลตัวอย่าง (ประเภทเอกสาร 9 ประเภท, เอกสาร 15 รายการ)
 --   5) View สาธารณะ (Guest อ่านจาก View เท่านั้น)
@@ -29,7 +30,6 @@ create table if not exists public.saraban_categories (
   group_name   text not null,
   icon         text not null default 'file-text',
   color        text not null default '#5AA9E6',
-  auto_number  boolean not null default false,   -- ออกเลขทะเบียนรับ/ส่งอัตโนมัติ (รายปีงบประมาณ)
   sort_order   int not null default 100,
   is_active    boolean not null default true,
   created_by   uuid,
@@ -42,13 +42,12 @@ create table if not exists public.saraban_documents (
   id              uuid primary key default gen_random_uuid(),
   org_id          uuid references public.organizations(id) on delete set null,
   category_id     uuid not null references public.saraban_categories(id) on delete restrict,
-  reg_no          int,                 -- เลขทะเบียนรับ/ส่ง (ออกอัตโนมัติถ้าประเภทกำหนด auto_number)
-  reg_year        int,                 -- ปีงบประมาณ พ.ศ. ของเลขทะเบียน
-  doc_no          text,                -- เลขที่หนังสือ เช่น สท 52301/1520
+  reg_year        int,                 -- ปีงบประมาณ พ.ศ. (คำนวณอัตโนมัติ ใช้กรองเอกสาร)
+  doc_no          text,                -- เลขที่หนังสือ (ตามเอกสารจริง) เช่น สท 52301/1520
   doc_date        date,                -- ลงวันที่
   received_date   date,                -- วันที่รับ (หนังสือเข้า)
-  title           text not null,       -- เรื่อง
-  from_org        text,                -- จาก
+  title           text not null,       -- ชื่อเรื่อง
+  from_org        text,                -- เจ้าของหนังสือ (หน่วยงาน/ผู้ออกหนังสือ)
   to_org          text,                -- ถึง/เรียน
   summary         text,                -- สาระสำคัญ
   keywords        text,                -- คำค้น (คั่นด้วย ,)
@@ -66,9 +65,14 @@ create index if not exists idx_saraban_docs_org      on public.saraban_documents
 create index if not exists idx_saraban_docs_cat      on public.saraban_documents(category_id);
 create index if not exists idx_saraban_docs_access   on public.saraban_documents(access_level);
 create index if not exists idx_saraban_docs_created  on public.saraban_documents(created_at desc);
-create unique index if not exists ux_saraban_reg
-  on public.saraban_documents (coalesce(org_id, '00000000-0000-0000-0000-000000000000'::uuid), category_id, reg_year, reg_no)
-  where reg_no is not null;
+create index if not exists idx_saraban_docs_docno    on public.saraban_documents(doc_no);
+
+-- อัปเกรดจากรุ่นแรก (ที่เคยออกเลขทะเบียนอัตโนมัติ) – ถ้าไม่มีคอลัมน์เหล่านี้จะข้ามไป
+drop view if exists public.v_public_saraban_files;
+drop view if exists public.v_public_saraban;
+drop index if exists public.ux_saraban_reg;
+alter table public.saraban_documents  drop column if exists reg_no;
+alter table public.saraban_categories drop column if exists auto_number;
 
 -- 1.3 ไฟล์แนบ (1 เอกสารมีได้หลายไฟล์)
 create table if not exists public.saraban_files (
@@ -98,26 +102,13 @@ returns int language sql immutable set search_path = public as $$
   select (extract(year from p_date)::int + case when extract(month from p_date) >= 10 then 1 else 0 end) + 543;
 $$;
 
--- 2.2 ก่อนบันทึก: กำหนดปีงบประมาณ + ออกเลขทะเบียนอัตโนมัติ + updated_at
+-- 2.2 ก่อนบันทึก: กำหนดปีงบประมาณ (ถ้ายังไม่ระบุ) + updated_at
 create or replace function public.sfh_saraban_before_write()
 returns trigger language plpgsql set search_path = public as $$
-declare v_auto boolean;
 begin
   if new.reg_year is null then
     new.reg_year := public.sfh_fiscal_year(coalesce(new.received_date, new.doc_date,
                                                     (coalesce(new.created_at, now()) at time zone 'Asia/Bangkok')::date));
-  end if;
-  if tg_op = 'INSERT' and new.reg_no is null then
-    select auto_number into v_auto from public.saraban_categories where id = new.category_id;
-    if coalesce(v_auto, false) then
-      -- ล็อกกันเลขซ้ำเมื่อบันทึกพร้อมกันหลายคน
-      perform pg_advisory_xact_lock(hashtext(coalesce(new.org_id::text, '-') || new.category_id::text || new.reg_year::text));
-      select coalesce(max(reg_no), 0) + 1 into new.reg_no
-        from public.saraban_documents
-       where org_id is not distinct from new.org_id
-         and category_id = new.category_id
-         and reg_year = new.reg_year;
-    end if;
   end if;
   -- ไม่เปลี่ยน updated_at เมื่ออัปเดตเฉพาะตัวนับเข้าชม/ดาวน์โหลด
   if tg_op = 'UPDATE' and new.view_count is not distinct from old.view_count
@@ -159,8 +150,11 @@ insert into public.modules (module_key, name, description, icon, color, status, 
  ('saraban', 'งานสารบรรณอิเล็กทรอนิกส์ (e-Saraban)',
   'คลังเอกสารดิจิทัลสำหรับจัดเก็บและค้นหาเอกสารราชการ ได้แก่ หนังสือเข้า หนังสือส่ง คำสั่ง/ประกาศ ระเบียบ บันทึกข้อความ/หนังสือเวียน และคู่มือ/แบบฟอร์ม',
   'archive', '#F0A04B', 'active', true, false, false, 9, '1.0.0',
-  '["ทะเบียนหนังสือเข้า-ส่ง ออกเลขรับ/ส่งอัตโนมัติตามปีงบประมาณ","แนบไฟล์ได้หลายไฟล์ (PDF, Word, Excel, รูปภาพ)","ค้นหาและกรองตามประเภท ปี ความเร่งด่วน","ประชาชนดาวน์โหลดเอกสารสาธารณะได้"]'::jsonb)
+  '["อัปโหลดเอกสารพร้อมเลขที่หนังสือ เจ้าของหนังสือ และชื่อเรื่อง","แนบไฟล์ได้หลายไฟล์ (PDF, Word, Excel, รูปภาพ)","ค้นหาและกรองตามประเภท ปีงบประมาณ ความเร่งด่วน","ประชาชนดาวน์โหลดเอกสารสาธารณะได้"]'::jsonb)
 on conflict (module_key) do nothing;
+update public.modules
+   set planned_features = '["อัปโหลดเอกสารพร้อมเลขที่หนังสือ เจ้าของหนังสือ และชื่อเรื่อง","แนบไฟล์ได้หลายไฟล์ (PDF, Word, Excel, รูปภาพ)","ค้นหาและกรองตามประเภท ปีงบประมาณ ความเร่งด่วน","ประชาชนดาวน์โหลดเอกสารสาธารณะได้"]'::jsonb
+ where module_key = 'saraban' and planned_features::text like '%ออกเลข%';
 
 insert into public.permissions (perm_key, module_key, action, name, description, org_admin_grantable, sort_order) values
  ('saraban.view_public',  'saraban', 'view_public',  'ดู/ดาวน์โหลดเอกสารสาธารณะ',          'ใช้กับ Role guest เพื่อเปิดคลังเอกสารให้บุคคลทั่วไป', true, 35),
@@ -209,19 +203,19 @@ on conflict (menu_key) do nothing;
 -- =====================================================================
 -- 4) ข้อมูลตัวอย่าง
 -- =====================================================================
-insert into public.saraban_categories (cat_key, name, group_key, group_name, icon, color, auto_number, sort_order) values
- ('incoming',     'หนังสือเข้า',      'official',   'หนังสือราชการ',              'mail-open',     '#5AA9E6', true,  1),
- ('outgoing',     'หนังสือส่ง',       'official',   'หนังสือราชการ',              'send',          '#3B8FD4', true,  2),
- ('order',        'คำสั่ง',           'order',      'คำสั่ง/ประกาศ',              'stamp',         '#EC7FA5', true,  3),
- ('announcement', 'ประกาศ',          'order',      'คำสั่ง/ประกาศ',              'megaphone',     '#D95C8A', true,  4),
- ('regulation',   'ระเบียบ',          'regulation', 'ระเบียบ',                    'scale',         '#A694E8', false, 5),
- ('memo',         'บันทึกข้อความ',     'memo',       'บันทึกข้อความ/หนังสือเวียน', 'notebook-pen',  '#F0A04B', true,  6),
- ('circular',     'หนังสือเวียน',      'memo',       'บันทึกข้อความ/หนังสือเวียน', 'repeat',        '#C9951F', true,  7),
- ('manual',       'คู่มือ',            'manual',     'คู่มือ/แบบฟอร์ม',             'book-open',     '#5CC49A', false, 8),
- ('form',         'แบบฟอร์ม',         'manual',     'คู่มือ/แบบฟอร์ม',             'clipboard-list','#3AA57C', false, 9)
+insert into public.saraban_categories (cat_key, name, group_key, group_name, icon, color, sort_order) values
+ ('incoming',     'หนังสือเข้า',      'official',   'หนังสือราชการ',              'mail-open',     '#5AA9E6', 1),
+ ('outgoing',     'หนังสือส่ง',       'official',   'หนังสือราชการ',              'send',          '#3B8FD4', 2),
+ ('order',        'คำสั่ง',           'order',      'คำสั่ง/ประกาศ',              'stamp',         '#EC7FA5', 3),
+ ('announcement', 'ประกาศ',          'order',      'คำสั่ง/ประกาศ',              'megaphone',     '#D95C8A', 4),
+ ('regulation',   'ระเบียบ',          'regulation', 'ระเบียบ',                    'scale',         '#A694E8', 5),
+ ('memo',         'บันทึกข้อความ',     'memo',       'บันทึกข้อความ/หนังสือเวียน', 'notebook-pen',  '#F0A04B', 6),
+ ('circular',     'หนังสือเวียน',      'memo',       'บันทึกข้อความ/หนังสือเวียน', 'repeat',        '#C9951F', 7),
+ ('manual',       'คู่มือ',            'manual',     'คู่มือ/แบบฟอร์ม',             'book-open',     '#5CC49A', 8),
+ ('form',         'แบบฟอร์ม',         'manual',     'คู่มือ/แบบฟอร์ม',             'clipboard-list','#3AA57C', 9)
 on conflict (cat_key) do nothing;
 
--- เอกสารตัวอย่าง (เลขทะเบียนออกอัตโนมัติจาก Trigger)
+-- เอกสารตัวอย่าง (เลขที่หนังสือตามเอกสารจริง)
 insert into public.saraban_documents (id, org_id, category_id, doc_no, doc_date, received_date, title, from_org, to_org, summary, keywords, urgency, access_level, created_by, created_at)
 select v.id::uuid, v.org::uuid, c.id, v.doc_no, v.doc_date::date, v.recv::date, v.title, v.from_org, v.to_org, v.summary, v.kw, v.urg, v.acc, v.by::uuid, v.created::timestamptz
   from (values
@@ -249,7 +243,7 @@ select v.id::uuid, v.org::uuid, c.id, v.doc_no, v.doc_date::date, v.recv::date, 
     'คำสั่งเทศบาลเมืองศรีสัชนาลัย เรื่อง แต่งตั้งคณะกรรมการตรวจรับพัสดุ ประจำปีงบประมาณ พ.ศ. 2570', 'นายกเทศมนตรีเมืองศรีสัชนาลัย', 'พนักงานเทศบาลทุกส่วนราชการ',
     'แต่งตั้งคณะกรรมการตรวจรับพัสดุสำหรับการจัดซื้อจัดจ้างในปีงบประมาณ พ.ศ. 2570', 'คำสั่ง,พัสดุ,ตรวจรับ', 'normal', 'public',
     'bbbbbbbb-0000-0000-0000-000000000002', '2026-09-01 15:00:00+07'),
-   ('dddddddd-0000-0000-0000-000000000007', '11111111-1111-1111-1111-111111111111', 'announcement', null, '2026-09-28', null,
+   ('dddddddd-0000-0000-0000-000000000007', '11111111-1111-1111-1111-111111111111', 'announcement', 'ประกาศ ลว. 28 ก.ย. 2569', '2026-09-28', null,
     'ประกาศเทศบาลเมืองศรีสัชนาลัย เรื่อง กำหนดระยะเวลาการยื่นแบบและชำระภาษีป้าย ประจำปี 2570', 'นายกเทศมนตรีเมืองศรีสัชนาลัย', 'ประชาชนทั่วไป',
     'ผู้มีหน้าที่เสียภาษีป้ายยื่นแบบ ภ.ป.1 ได้ตั้งแต่เดือนมกราคม ถึงมีนาคม 2570 ณ กองคลัง', 'ภาษีป้าย,ภ.ป.1,2570', 'normal', 'public',
     'bbbbbbbb-0000-0000-0000-000000000002', '2026-09-28 09:00:00+07'),
@@ -290,6 +284,10 @@ select v.id::uuid, v.org::uuid, c.id, v.doc_no, v.doc_date::date, v.recv::date, 
  order by v.created
 on conflict (id) do nothing;
 
+-- อัปเกรดจากรุ่นแรก: ประกาศตัวอย่างเดิมไม่มีเลขที่
+update public.saraban_documents set doc_no = 'ประกาศ ลว. 28 ก.ย. 2569'
+ where id = 'dddddddd-0000-0000-0000-000000000007' and doc_no is null;
+
 
 -- =====================================================================
 -- 5) View สาธารณะ (เฉพาะเอกสาร access_level = 'public')
@@ -297,7 +295,7 @@ on conflict (id) do nothing;
 drop view if exists public.v_public_saraban_files;
 drop view if exists public.v_public_saraban;
 create view public.v_public_saraban with (security_invoker = on) as
-select d.id, d.reg_no, d.reg_year, d.doc_no, d.doc_date, d.received_date, d.title, d.from_org, d.to_org,
+select d.id, d.reg_year, d.doc_no, d.doc_date, d.received_date, d.title, d.from_org, d.to_org,
        d.summary, d.keywords, d.urgency, d.view_count, d.download_count, d.created_at,
        c.cat_key, c.name as category_name, c.group_key, c.group_name, c.icon as category_icon, c.color as category_color,
        o.name as org_name, o.short_name as org_short_name,
