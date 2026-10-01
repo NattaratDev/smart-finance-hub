@@ -220,6 +220,19 @@ create table if not exists public.announcements (
 create index if not exists idx_announcements_pub on public.announcements(published_at desc);
 create index if not exists idx_announcements_org on public.announcements(org_id);
 
+-- 1.13 Session token (ออกให้ตอน Login ใช้ยืนยันตัวตนกับข้อมูลอ่อนไหว เช่น เงินเดือน)
+--      เก็บเฉพาะค่า hash (sha256) ของ token · เปิด RLS แต่ไม่มี Policy → หน้าเว็บอ่านตรงไม่ได้
+create table if not exists public.sfh_sessions (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references public.users(id) on delete cascade,
+  token_hash  text not null unique,
+  expires_at  timestamptz not null,
+  revoked_at  timestamptz,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create index if not exists idx_sfh_sessions_user on public.sfh_sessions(user_id);
+
 
 -- =====================================================================
 -- 2) TRIGGER กลาง
@@ -338,8 +351,26 @@ drop function if exists public.sfh_login(text, text);
 drop function if exists public.sfh_set_password(uuid, text);
 drop function if exists public.sfh_change_password(uuid, text, text);
 drop function if exists public.sfh_refresh_session(uuid);
+drop function if exists public.sfh_refresh_session(uuid, text);
+drop function if exists public.sfh_logout(text);
+drop function if exists public.sfh_session_user(text);
 drop function if exists public.sfh_guest_menus();
 drop function if exists public.sfh_user_payload(uuid);
+
+-- 3.0 (ภายใน) แปลง session token → user_id (null ถ้าหมดอายุ/ถูกยกเลิก/บัญชีถูกปิด)
+create function public.sfh_session_user(p_token text)
+returns uuid
+language sql stable security definer
+set search_path = public, extensions
+as $$
+  select s.user_id
+    from public.sfh_sessions s
+    join public.users u on u.id = s.user_id
+   where s.token_hash = encode(digest(coalesce(p_token, ''), 'sha256'), 'hex')
+     and s.revoked_at is null
+     and s.expires_at > now()
+     and u.is_active;
+$$;
 
 -- 3.1 (ภายใน) ข้อมูลผู้ใช้ + role + permission ไม่มี hash
 create function public.sfh_user_payload(p_user_id uuid)
@@ -380,6 +411,7 @@ declare
   v_user       public.users%rowtype;
   v_hash       text;
   v_org_active boolean;
+  v_token      text;
 begin
   select * into v_user from public.users where username = lower(trim(coalesce(p_username, '')));
 
@@ -416,11 +448,18 @@ begin
   insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, created_by)
   values (v_user.org_id, v_user.id, v_user.username, 'login', 'users', v_user.id::text, v_user.id);
 
-  return jsonb_build_object('success', true, 'message', 'เข้าสู่ระบบสำเร็จ') || public.sfh_user_payload(v_user.id);
+  -- ออก session token (อายุ 8 ชั่วโมง) – เก็บเฉพาะ hash ในฐานข้อมูล
+  v_token := encode(gen_random_bytes(32), 'hex');
+  insert into public.sfh_sessions(user_id, token_hash, expires_at)
+  values (v_user.id, encode(digest(v_token, 'sha256'), 'hex'), now() + interval '8 hours');
+  delete from public.sfh_sessions where expires_at < now() - interval '7 days';
+
+  return jsonb_build_object('success', true, 'message', 'เข้าสู่ระบบสำเร็จ', 'token', v_token)
+         || public.sfh_user_payload(v_user.id);
 end $$;
 
--- 3.3 ตรวจ session ซ้ำเมื่อเปิดหน้าเว็บใหม่ (is_active + permission ล่าสุด)
-create function public.sfh_refresh_session(p_user_id uuid)
+-- 3.3 ตรวจ session ซ้ำเมื่อเปิดหน้าเว็บใหม่ (token + is_active + permission ล่าสุด)
+create function public.sfh_refresh_session(p_user_id uuid, p_token text default null)
 returns jsonb
 language plpgsql security definer
 set search_path = public, extensions
@@ -438,8 +477,21 @@ begin
   if not v_active or not v_org_active then
     return jsonb_build_object('success', false, 'message', 'บัญชีของท่านถูกปิดการใช้งาน');
   end if;
+  if public.sfh_session_user(p_token) is distinct from p_user_id then
+    return jsonb_build_object('success', false, 'message', 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+  end if;
   return jsonb_build_object('success', true) || public.sfh_user_payload(p_user_id);
 end $$;
+
+-- 3.3.1 ออกจากระบบ: ยกเลิก token
+create function public.sfh_logout(p_token text)
+returns void
+language sql security definer
+set search_path = public, extensions
+as $$
+  update public.sfh_sessions set revoked_at = now(), updated_at = now()
+   where token_hash = encode(digest(coalesce(p_token, ''), 'sha256'), 'hex') and revoked_at is null;
+$$;
 
 -- 3.4 ตั้งรหัสผ่าน (ใช้ตอนสร้างผู้ใช้ / รีเซ็ตรหัสผ่าน)
 create function public.sfh_set_password(p_user_id uuid, p_new_password text)
@@ -825,13 +877,19 @@ begin
 end $$;
 revoke all on public.user_credentials from anon, authenticated;
 
+-- sfh_sessions : เช่นเดียวกัน (เข้าถึงผ่านฟังก์ชัน SECURITY DEFINER เท่านั้น)
+alter table public.sfh_sessions enable row level security;
+revoke all on public.sfh_sessions from anon, authenticated;
+
 -- View สาธารณะ
 grant select on public.v_public_announcements, public.v_public_stats, public.v_public_settings to anon, authenticated;
 
 -- ฟังก์ชัน RPC
 revoke execute on function public.sfh_user_payload(uuid) from public, anon, authenticated;
+revoke execute on function public.sfh_session_user(text) from public, anon, authenticated;
 grant execute on function public.sfh_login(text, text)                   to anon, authenticated;
-grant execute on function public.sfh_refresh_session(uuid)               to anon, authenticated;
+grant execute on function public.sfh_refresh_session(uuid, text)         to anon, authenticated;
+grant execute on function public.sfh_logout(text)                        to anon, authenticated;
 grant execute on function public.sfh_set_password(uuid, text)            to anon, authenticated;
 grant execute on function public.sfh_change_password(uuid, text, text)   to anon, authenticated;
 grant execute on function public.sfh_guest_menus()                       to anon, authenticated;
@@ -869,6 +927,9 @@ create policy "sfh_files_delete" on storage.objects for delete to anon, authenti
 --       และ Policy USING (true) ทำให้ใครก็ตามที่มี ANON KEY (ซึ่งเปิดเผยอยู่ในหน้าเว็บ)
 --       อ่าน/เพิ่ม/แก้/ลบข้อมูลได้โดยตรงผ่าน REST API การซ่อนปุ่มในหน้าเว็บจึงไม่ใช่ความปลอดภัยจริง
 --       รวมถึง sfh_set_password ที่ใครรู้ user_id ก็ตั้งรหัสใหม่ได้
+--
+-- มีแล้ว: ตาราง sfh_sessions + session token จาก sfh_login (ใช้กับโมดูลสลิปเงินเดือนที่ปิดการเข้าถึงตรงแล้ว)
+--         โมดูลอื่นสามารถย้ายไปใช้รูปแบบเดียวกันได้ (ดู module_payroll.sql เป็นตัวอย่าง)
 --
 -- ถ้าจะใช้งานจริงต้องปรับอย่างน้อย:
 --  1) ใช้ Supabase Auth (หรือออก JWT ของตนเองที่มี claim user_id / org_id / role)

@@ -523,7 +523,10 @@ function canEditRecord(rec, viewAllPerm = null) {
 
 function readSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; } }
 function saveSession(payload) {
-  const s = { user: payload.user, role: payload.role, organization: payload.organization || null, permissions: payload.permissions || [], saved_at: new Date().toISOString() };
+  const prev = State.session || readSession();
+  const s = { user: payload.user, role: payload.role, organization: payload.organization || null, permissions: payload.permissions || [],
+    token: payload.token || prev?.token || null,   // session token จาก sfh_login (ใช้กับข้อมูลอ่อนไหว)
+    saved_at: new Date().toISOString() };
   State.session = s;
   State.perms = new Set(s.permissions);
   try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch { /* ignore */ }
@@ -531,6 +534,28 @@ function saveSession(payload) {
 function clearSession() {
   State.session = null; State.perms = new Set();
   try { localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
+/** เซสชันหมดอายุ → ล้าง session แล้วพาไปหน้า Login (ไม่รีโหลดหน้า) */
+async function sessionExpired(msg = 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่') {
+  clearSession();
+  await reloadNavigation();
+  showToast(msg, 'warning', 6000);
+  navigate('login');
+}
+/**
+ * rpcSecure(fn, params, options) – เรียกฟังก์ชันฐานข้อมูลที่ตรวจ session token (ใช้กับข้อมูลอ่อนไหว เช่น เงินเดือน)
+ * ส่ง p_token ให้อัตโนมัติ · token หมดอายุ → พาไปหน้า Login · ไม่มีสิทธิ์ → แจ้งเตือน
+ */
+async function rpcSecure(fn, params = {}, { loader = true, loaderText = 'กำลังโหลดข้อมูล...', error = 'เกิดข้อผิดพลาด', success = '' } = {}) {
+  const token = State.session?.token;
+  if (!token) { await sessionExpired(); return { ok: false, data: null, error: new Error('SESSION_EXPIRED') }; }
+  const r = await db(s => s.rpc(fn, { p_token: token, ...params }), { loader, loaderText, silent: true });
+  if (r.ok) { if (success) showToast(success, 'success'); return r; }
+  const msg = String(r.error?.message || '');
+  if (/SESSION_EXPIRED/.test(msg)) await sessionExpired();
+  else if (/^FORBIDDEN/.test(msg)) showToast('คุณไม่มีสิทธิ์ทำรายการนี้', 'error');
+  else showToast(`${error}: ${dbErrorMessage(r.error)}`, 'error', 6500);
+  return r;
 }
 
 /* ===== CORE: รูปภาพ (บีบอัด / อัปโหลด / ลบ) ===== */
@@ -1226,6 +1251,7 @@ async function logout() {
   const ok = await confirmModal({ title: 'ออกจากระบบ', message: 'ต้องการออกจากระบบใช่หรือไม่?', confirmText: 'ออกจากระบบ', icon: 'log-out', confirmIcon: 'log-out', danger: true });
   if (!ok) return;
   await logAudit('logout', 'users', currentUser()?.id);
+  if (State.session?.token && sb) { try { await sb.rpc('sfh_logout', { p_token: State.session.token }); } catch { /* ignore */ } }
   clearSession();
   State.allMenus = []; State.modules = [];
   await reloadNavigation();
@@ -1236,7 +1262,12 @@ async function logout() {
 async function verifySession({ silent = false } = {}) {
   const saved = State.session || readSession();
   if (!saved?.user?.id || !sb) return false;
-  const r = await db(s => s.rpc('sfh_refresh_session', { p_user_id: saved.user.id }), { loader: !silent, loaderText: 'กำลังตรวจสอบบัญชี...', silent: true });
+  if (!saved.token) {   // session รุ่นเก่า (ก่อนมี token) → ให้เข้าสู่ระบบใหม่
+    clearSession();
+    showToast('ระบบปรับปรุงความปลอดภัย กรุณาเข้าสู่ระบบใหม่อีกครั้ง', 'info', 6000);
+    return false;
+  }
+  const r = await db(s => s.rpc('sfh_refresh_session', { p_user_id: saved.user.id, p_token: saved.token }), { loader: !silent, loaderText: 'กำลังตรวจสอบบัญชี...', silent: true });
   State.lastSessionCheck = Date.now();
   if (!r.ok) { State.session = saved; State.perms = new Set(saved.permissions || []); return true; } // เครือข่ายขัดข้อง → ใช้ session เดิมชั่วคราว
   if (!r.data?.success) {
@@ -3436,8 +3467,802 @@ function openSarabanTypes(onDone) {
 
 
 /* ===== MODULE: payroll (สลิปเงินเดือน) ===== */
-// Phase 1: ยังไม่พัฒนา → ใช้ renderComingSoon
-// ฟังก์ชันกลางที่เตรียมไว้: formatMoney(), bahtText(), formatThaiDate(), downloadCSV()
+// นำเข้า Excel (งด.2) → ระบบอ่านและตรวจสอบ → แปลงเป็นสลิป → ค้นหา/ดูตัวอย่าง → พิมพ์ A4 หรือบันทึก PDF
+// ความปลอดภัย: ข้อมูลเงินเดือนอ่าน/เขียนผ่าน rpcSecure('sfh_payroll_*') เท่านั้น (ตรวจ session token + สิทธิ์ที่ฐานข้อมูล)
+//              ตาราง payroll_* ปิดการเข้าถึงตรงจาก anon key (ดู module_payroll.sql)
+
+/* ----- ตัวอ่านไฟล์ Excel เงินเดือน (รายงาน งด.2 "รายละเอียดผู้มีสิทธิรับเงินแนบท้ายประกอบ") -----
+   ใช้ได้ทั้งในเบราว์เซอร์และ Node (ส่ง XLSX เข้ามา) – ไม่มีการส่งไฟล์ขึ้นเซิร์ฟเวอร์ */
+const PayrollParser = (() => {
+  const MONTHS = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+  const txt = (v) => (v == null ? '' : String(v).replace(/\s+/g, ' ').trim());
+  // Excel ตัดชื่อชีตที่ 31 ตัวอักษร → เติมชื่องานมาตรฐาน (จำแนกตามแผนงานของ อปท.) ให้เต็ม
+  const KNOWN_UNITS = [
+    'งานบริหารทั่วไป', 'งานบริหารงานคลัง', 'งานวางแผนสถิติและวิชาการ', 'งานควบคุมภายในและการตรวจสอบภายใน',
+    'งานบริหารทั่วไปเกี่ยวกับการรักษาความสงบภายใน', 'งานป้องกันภัยฝ่ายพลเรือนและระงับอัคคีภัย', 'งานเทศกิจ',
+    'งานบริหารทั่วไปเกี่ยวกับการศึกษา', 'งานระดับก่อนวัยเรียนและประถมศึกษา', 'งานระดับมัธยมศึกษา', 'งานศึกษาไม่กำหนดระดับ',
+    'งานบริหารทั่วไปเกี่ยวกับสาธารณสุข', 'งานโรงพยาบาล', 'งานบริการสาธารณสุขและงานสาธารณสุขอื่น', 'งานศูนย์บริการสาธารณสุข',
+    'งานบริหารทั่วไปเกี่ยวกับสังคมสงเคราะห์', 'งานสวัสดิการสังคมและสังคมสงเคราะห์',
+    'งานบริหารทั่วไปเกี่ยวกับเคหะและชุมชน', 'งานไฟฟ้าถนน', 'งานสวนสาธารณะ', 'งานกำจัดขยะมูลฝอยและสิ่งปฏิกูล', 'งานบำบัดน้ำเสีย',
+    'งานบริหารทั่วไปเกี่ยวกับสร้างความเข้มแข็งของชุมชน', 'งานส่งเสริมและสนับสนุนความเข้มแข็งชุมชน',
+    'งานบริหารทั่วไปเกี่ยวกับศาสนาวัฒนธรรมและนันทนาการ', 'งานกีฬาและนันทนาการ', 'งานศาสนาวัฒนธรรมท้องถิ่น',
+    'งานบริหารทั่วไปเกี่ยวกับอุตสาหกรรมและการโยธา', 'งานก่อสร้างโครงสร้างพื้นฐาน', 'งานบริหารทั่วไปเกี่ยวกับการเกษตร',
+    'งานส่งเสริมการเกษตร', 'งานอนุรักษ์แหล่งน้ำและป่าไม้', 'งานกิจการประปา', 'งานตลาดสด', 'งานโรงฆ่าสัตว์', 'งานสถานธนานุบาล', 'งานสถานีขนส่ง',
+  ];
+  const fullUnit = (sheetName) => {
+    const s = txt(sheetName);
+    if (s.length < 28) return s;
+    return KNOWN_UNITS.find(u => u.startsWith(s) && u.length > s.length) || s;
+  };
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const fmt = (n) => r2(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  /** แปลงค่าในเซลล์เป็นตัวเลข: ว่าง / "-" = 0, "1,234.50" = 1234.5 */
+  function num(v) {
+    if (v == null || v === '') return { ok: true, v: 0 };
+    if (typeof v === 'number') return { ok: isFinite(v), v: isFinite(v) ? v : 0 };
+    let s = String(v).replace(/[,\s฿]/g, '').replace(/บาท$/, '');
+    if (s === '' || /^[-–—.]+$/.test(s)) return { ok: true, v: 0 };
+    if (/^\(.*\)$/.test(s)) s = '-' + s.slice(1, -1);
+    const n = Number(s);
+    return isFinite(n) ? { ok: true, v: n } : { ok: false, v: 0 };
+  }
+  function detectPeriod(rows) {
+    for (const r of rows.slice(0, 15)) for (const c of r || []) {
+      const m = /ประจำเดือน\s*([ก-๙]+)\s*(?:พ\s*\.?\s*ศ\s*\.?)?\s*(\d{4})/.exec(txt(c));
+      if (m) { const mi = MONTHS.indexOf(m[1]); if (mi >= 0) return { month: mi + 1, year: +m[2] }; }
+    }
+    return null;
+  }
+  function detectOrg(rows) {
+    let title = '', amphoe = '', province = '';
+    for (const r of rows.slice(0, 10)) for (const c of r || []) {
+      const t = txt(c);
+      if (!title && /^(เทศบาล|องค์การบริหารส่วน|อบต\.?|อบจ\.?)/.test(t)) title = t;
+      let m = /^อ(?:\.|ำเภอ)\s*(.+)$/.exec(t); if (m && !amphoe) amphoe = 'อำเภอ' + m[1].trim();
+      m = /^จ(?:\.|ังหวัด)\s*(.+)$/.exec(t); if (m && !province) province = 'จังหวัด' + m[1].trim();
+    }
+    return { title, subtitle: [amphoe, province].filter(Boolean).join(' ') };
+  }
+  function parseSheet(ws, sheetName, XLSX) {
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
+    const h = rows.findIndex(r => r && r.some(c => /ชื่อ\s*-?\s*สกุล/.test(txt(c))));
+    if (h < 0) return { name: sheetName, skipped: true, reason: 'ไม่พบหัวตาราง "ชื่อ - สกุล"', people: [], issues: [] };
+    const top = rows[h] || [], sub = rows[h + 1] || [];
+    const width = Math.max(...rows.slice(h, h + 60).map(r => (r ? r.length : 0)));
+    const findCol = (re) => { for (let c = 0; c < width; c++) if (re.test(txt(top[c]))) return c; return -1; };
+    const cName = findCol(/ชื่อ\s*-?\s*สกุล/), cType = findCol(/ประเภท/), cUnit = findCol(/หน่วยงาน/);
+    const cInc = findCol(/^รายการรับ/), cDed = findCol(/^รายการหัก/), cNet = findCol(/รับสุทธิ/);
+    if (cInc < 0 || cNet < 0) return { name: sheetName, skipped: true, reason: 'ไม่พบคอลัมน์ "รายการรับ" หรือ "รับสุทธิ"', people: [], issues: [] };
+    const cols = { income: [], deduction: [], totalIncome: -1, totalDeduction: -1, net: cNet };
+    for (let c = cInc; c < (cDed >= 0 ? cDed : cNet); c++) {
+      const t = txt(sub[c]); if (!t) continue;
+      if (/รวมรายการรับ/.test(t)) cols.totalIncome = c; else cols.income.push({ c, name: t });
+    }
+    if (cDed >= 0) for (let c = cDed; c < cNet; c++) {
+      const t = txt(sub[c]); if (!t) continue;
+      if (/รวมรายการหัก/.test(t)) cols.totalDeduction = c; else cols.deduction.push({ c, name: t });
+    }
+    const allCols = [...cols.income, ...cols.deduction,
+      ...(cols.totalIncome >= 0 ? [{ c: cols.totalIncome, name: 'รวมรายการรับ' }] : []),
+      ...(cols.totalDeduction >= 0 ? [{ c: cols.totalDeduction, name: 'รวมรายการหัก' }] : []),
+      { c: cols.net, name: 'รับสุทธิ' }];
+    const colSums = Object.fromEntries(allCols.map(x => [x.c, 0]));
+    const people = [], issues = [];
+    const sheetUnit = fullUnit(sheetName);
+    let totalsRow = null;
+    for (let i = h + 2; i < rows.length; i++) {
+      const r = rows[i] || [];
+      if (/รวมทั้งสิ้น/.test(r.map(txt).join(' '))) { totalsRow = r; break; }
+      const name = txt(r[cName]);
+      const anyNum = allCols.some(x => num(r[x.c]).v !== 0);
+      if (!name && !anyNum) continue;
+      const bad = [];
+      const read = (x) => { const p = num(r[x.c]); if (!p.ok) bad.push(x.name); colSums[x.c] += p.v; return r2(p.v); };
+      const incomes = cols.income.map(x => ({ name: x.name, amount: read(x) }));
+      const deductions = cols.deduction.map(x => ({ name: x.name, amount: read(x) }));
+      const fileInc = cols.totalIncome >= 0 ? read({ c: cols.totalIncome, name: 'รวมรายการรับ' }) : null;
+      const fileDed = cols.totalDeduction >= 0 ? read({ c: cols.totalDeduction, name: 'รวมรายการหัก' }) : null;
+      const fileNet = read({ c: cols.net, name: 'รับสุทธิ' });
+      const sumInc = r2(incomes.reduce((a, x) => a + x.amount, 0));
+      const sumDed = r2(deductions.reduce((a, x) => a + x.amount, 0));
+      const p = {
+        sheet: sheetName, row: i + 1, full_name: name, employee_type: txt(r[cType]), unit_name: sheetUnit, sub_unit: cUnit >= 0 ? txt(r[cUnit]) : '',
+        incomes: incomes.filter(x => x.amount !== 0), deductions: deductions.filter(x => x.amount !== 0),
+        total_income: sumInc, total_deduction: sumDed, net_amount: r2(sumInc - sumDed), errors: [], warnings: [],
+      };
+      if (!name) p.errors.push('ไม่มีชื่อ-สกุล');
+      if (bad.length) p.errors.push(`ตัวเลขไม่ถูกต้องในช่อง: ${bad.join(', ')}`);
+      if ([...incomes, ...deductions].some(x => x.amount < 0)) p.errors.push('มีจำนวนเงินติดลบ');
+      if (fileInc != null && Math.abs(fileInc - sumInc) > 0.009) p.errors.push(`รวมรายการรับในไฟล์ ${fmt(fileInc)} ≠ ผลรวมรายการรับ ${fmt(sumInc)}`);
+      if (fileDed != null && Math.abs(fileDed - sumDed) > 0.009) p.errors.push(`รวมรายการหักในไฟล์ ${fmt(fileDed)} ≠ ผลรวมรายการหัก ${fmt(sumDed)}`);
+      if (Math.abs(fileNet - p.net_amount) > 0.009) p.errors.push(`รับสุทธิในไฟล์ ${fmt(fileNet)} ≠ รวมรับ − รวมหัก ${fmt(p.net_amount)}`);
+      if (p.net_amount <= 0) p.warnings.push('รับสุทธิเป็นศูนย์หรือติดลบ');
+      people.push(p);
+    }
+    let totalsOk = !!totalsRow;
+    if (!totalsRow) issues.push({ level: 'warning', msg: 'ไม่พบแถว "รวมทั้งสิ้น" จึงตรวจยอดรวมของชีตไม่ได้' });
+    else for (const x of allCols) {
+      const f = num(totalsRow[x.c]);
+      if (!f.ok) { totalsOk = false; issues.push({ level: 'warning', msg: `อ่านยอดในแถวรวมทั้งสิ้นคอลัมน์ "${x.name}" ไม่ได้ จึงตรวจยอดรวมคอลัมน์นี้ไม่ได้` }); }
+      else if (Math.abs(r2(f.v) - r2(colSums[x.c])) > 0.009) issues.push({ level: 'error', msg: `ยอดรวมคอลัมน์ "${x.name}" ของทุกคน (${fmt(colSums[x.c])}) ไม่ตรงกับแถวรวมทั้งสิ้น (${fmt(f.v)})` });
+    }
+    return {
+      name: sheetName, skipped: false, people, issues, checkedTotals: totalsOk, unit: sheetUnit,
+      incomeItems: cols.income.map(x => x.name), deductionItems: cols.deduction.map(x => x.name),
+      totals: { income: r2(people.reduce((a, p) => a + p.total_income, 0)), deduction: r2(people.reduce((a, p) => a + p.total_deduction, 0)), net: r2(people.reduce((a, p) => a + p.net_amount, 0)) },
+    };
+  }
+  /** อ่านทั้งไฟล์ → { group, period, org, sheets, people, counts } */
+  function parseWorkbook(wb, fileName, XLSX) {
+    const firstRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
+    const sheets = wb.SheetNames.map(n => parseSheet(wb.Sheets[n], n, XLSX));
+    const people = sheets.flatMap(s => s.people);
+    const allText = firstRows.slice(0, 10).flat().map(txt).join(' ');
+    const group = /การเมือง/.test(fileName + ' ' + allText) ? 'political' : /ประจำ/.test(fileName + ' ' + allText) ? 'regular' : '';
+    // ชื่อซ้ำในไฟล์เดียวกัน
+    const key = (p) => `${p.full_name}|${p.employee_type}`;
+    const seen = {};
+    people.forEach(p => { (seen[key(p)] ||= []).push(p); });
+    Object.values(seen).filter(list => list.length > 1 && list[0].full_name).forEach(list =>
+      list.forEach(p => p.warnings.push(`ชื่อซ้ำในไฟล์ ${list.length} แถว (${list.map(x => `${x.sheet} แถว ${x.row}`).join(', ')})`)));
+    const fileIssues = [];
+    if (!people.length) fileIssues.push({ level: 'error', msg: 'ไม่พบรายชื่อผู้รับเงินในไฟล์' });
+    sheets.filter(s => s.skipped).forEach(s => fileIssues.push({ level: 'warning', msg: `ข้ามชีต "${s.name}": ${s.reason}` }));
+    return {
+      fileName, group, period: detectPeriod(firstRows), org: detectOrg(firstRows), sheets, people, fileIssues,
+      counts: {
+        people: people.length,
+        errors: people.reduce((a, p) => a + p.errors.length, 0) + sheets.reduce((a, s) => a + s.issues.filter(i => i.level === 'error').length, 0) + fileIssues.filter(i => i.level === 'error').length,
+        warnings: people.reduce((a, p) => a + p.warnings.length, 0) + sheets.reduce((a, s) => a + s.issues.filter(i => i.level === 'warning').length, 0) + fileIssues.filter(i => i.level === 'warning').length,
+      },
+      totals: {
+        income: r2(people.reduce((a, p) => a + p.total_income, 0)),
+        deduction: r2(people.reduce((a, p) => a + p.total_deduction, 0)),
+        net: r2(people.reduce((a, p) => a + p.net_amount, 0)),
+      },
+    };
+  }
+  return { parseWorkbook, num, detectPeriod, MONTHS };
+})();
+/* ---------- ค่าคงที่ / สถานะของโมดูล ---------- */
+Object.assign(TABLE_LABELS, { payroll_periods: 'งวดเงินเดือน', payroll_slips: 'สลิปเงินเดือน' });
+Object.assign(ACTION_META, {
+  import: { label: 'นำเข้าข้อมูล', icon: 'file-up', cls: 'bg-brand-100 text-brand-600' },
+  publish: { label: 'เผยแพร่งวด', icon: 'send', cls: 'bg-mint-100 text-mint-600' },
+  unpublish: { label: 'ย้อนกลับเป็นร่าง', icon: 'undo-2', cls: 'bg-cream-100 text-cream-600' },
+  close: { label: 'ปิดงวด', icon: 'lock', cls: 'bg-slate-100 text-slate-600' },
+  reopen: { label: 'เปิดงวดอีกครั้ง', icon: 'lock-open', cls: 'bg-cream-100 text-cream-600' },
+  print: { label: 'พิมพ์สลิป', icon: 'printer', cls: 'bg-lilac-100 text-lilac-600' },
+});
+const PAYROLL_GROUPS = { regular: 'ฝ่ายประจำ', political: 'ฝ่ายการเมือง' };
+const PAYROLL_STATUS = {
+  draft: { label: 'ร่าง', icon: 'pencil-line', cls: 'bg-cream-100 text-cream-600 border border-cream-200' },
+  published: { label: 'เผยแพร่แล้ว', icon: 'send', cls: 'bg-mint-100 text-mint-600 border border-mint-200' },
+  closed: { label: 'ปิดงวดแล้ว', icon: 'lock', cls: 'bg-slate-100 text-slate-600 border border-slate-200' },
+};
+const SHEETJS_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+const PAYROLL_SIGNER_KEY = 'sfh_payroll_signer';
+const Payroll = { periods: [], period: null, slips: [], selected: new Set(), imports: [], table: null };
+
+const payrollPeriodText = (p) => `ประจำเดือน ${TH_MONTHS[(p.period_month || 1) - 1]} พ.ศ. ${p.period_year}`;
+const payrollStatusBadge = (s) => { const m = PAYROLL_STATUS[s] || PAYROLL_STATUS.draft; return `<span class="badge ${m.cls}">${ic(m.icon, 'w-3 h-3')} ${m.label}</span>`; };
+const payrollGroupBadge = (g) => `<span class="badge ${g === 'political' ? 'bg-blush-100 text-blush-500' : 'bg-brand-100 text-brand-600'}">${ic(g === 'political' ? 'landmark' : 'briefcase', 'w-3 h-3')} ${PAYROLL_GROUPS[g] || 'ไม่ระบุกลุ่ม'}</span>`;
+const payrollIsSuper = () => isSuperAdmin();
+
+/** โหลด SheetJS เฉพาะตอนนำเข้าไฟล์ (ไม่ทำให้หน้าเว็บช้า) */
+function loadSheetJS() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = SHEETJS_URL; s.async = true;
+    s.onload = () => (window.XLSX ? resolve(window.XLSX) : reject(new Error('โหลดตัวอ่าน Excel ไม่สำเร็จ')));
+    s.onerror = () => reject(new Error('โหลดตัวอ่าน Excel ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ต'));
+    document.head.appendChild(s);
+  });
+}
+
+/* ---------- รูปแบบสลิป (A4 1 คน/หน้า) ---------- */
+const PAYROLL_EMBLEM = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="47" fill="#fff" stroke="#1e3a5f" stroke-width="3.5"/>
+  <circle cx="50" cy="50" r="40" fill="none" stroke="#b8952e" stroke-width="1.6"/><polygon points="22,52 50,30 78,52" fill="#1e3a5f"/>
+  <rect x="28" y="52" width="44" height="22" fill="#3b6491"/><rect x="33" y="56" width="5" height="16" fill="#fff"/><rect x="43" y="56" width="5" height="16" fill="#fff"/>
+  <rect x="53" y="56" width="5" height="16" fill="#fff"/><rect x="63" y="56" width="5" height="16" fill="#fff"/><rect x="24" y="74" width="52" height="4" fill="#1e3a5f"/>
+  <circle cx="50" cy="41" r="4" fill="#b8952e"/></svg>`;
+const PAYROLL_CSS = `
+  .ps-page { position:relative; width:210mm; height:297mm; background:#fff; overflow:hidden; color:#111827;
+    font-family:'Sarabun','Kanit',sans-serif; font-size:13.5px; line-height:1.5; padding:19mm 20mm 16mm; box-sizing:border-box; }
+  .ps-page * { box-sizing:border-box; }
+  .ps-wm { position:absolute; inset:0; display:grid; place-items:center; pointer-events:none; }
+  .ps-wm > * { width:90mm; height:90mm; opacity:.05; object-fit:contain; }
+  .ps-head { position:relative; text-align:center; }
+  .ps-logo { width:17mm; height:17mm; margin:0 auto 1.5mm; display:block; object-fit:contain; }
+  .ps-logo svg, .ps-wm svg { width:100%; height:100%; display:block; }
+  .ps-org { margin:0; font-size:17px; font-weight:700; }
+  .ps-sub { margin:0; font-size:13px; color:#4b5563; }
+  .ps-title { position:relative; text-align:center; margin:3.5mm 0 0; font-size:15.5px; font-weight:700; color:#1e3a5f; }
+  .ps-period { position:relative; text-align:center; font-size:13.5px; }
+  .ps-rule { position:relative; border:0; border-top:1px solid #111827; margin:3mm 0 0; }
+  .ps-rule + .ps-rule { border-top-width:.5px; margin-top:.6mm; }
+  .ps-info { position:relative; display:grid; grid-template-columns:auto 1fr auto 1fr; gap:1.3mm 3.2mm; margin:3.7mm 0 4.2mm; }
+  .ps-info .k { color:#4b5563; white-space:nowrap; } .ps-info .v { font-weight:600; }
+  .ps-tables { position:relative; display:grid; grid-template-columns:.82fr 1.18fr; border:1px solid #9ca3af; }
+  .ps-tables > table + table { border-left:1px solid #9ca3af; }
+  .ps-tables table { width:100%; border-collapse:collapse; height:100%; }
+  .ps-tables th { font-weight:600; padding:1.3mm 2.6mm; background:#f3f6fa; border-bottom:1px solid #9ca3af; text-align:left; }
+  .ps-tables td { padding:.8mm 2.6mm; border-bottom:.5px solid #d1d5db; vertical-align:top; }
+  .ps-tables tbody tr:last-child td { border-bottom:0; }
+  .ps-tables .r { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .ps-tables tfoot td { font-weight:700; border-top:1px solid #9ca3af; border-bottom:0; padding:1.3mm 2.6mm; background:rgba(243,246,250,.6); }
+  .ps-tables tbody::after { content:''; display:table-row; height:100%; }
+  .ps-tables .empty td { color:#9ca3af; text-align:center; }
+  .ps-net { position:relative; display:grid; grid-template-columns:auto 1fr auto; align-items:baseline; gap:3mm;
+    border:1px solid #9ca3af; border-top:0; padding:1.8mm 2.6mm; background:#f3f6fa; }
+  .ps-net .lbl { font-weight:700; } .ps-net .txt { color:#4b5563; font-size:13px; }
+  .ps-net .amt { font-weight:700; font-size:15px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .ps-remark { position:relative; margin-top:2mm; font-size:12px; color:#4b5563; }
+  .ps-sign-area { position:relative; display:flex; justify-content:flex-end; margin-top:9mm; }
+  .ps-sign { text-align:center; min-width:58mm; font-size:12.5px; line-height:1.55; }
+  .ps-sign .muted { color:#4b5563; }
+  .ps-foot { position:absolute; left:20mm; right:20mm; bottom:9.5mm; display:flex; justify-content:space-between;
+    font-size:10.5px; color:#9ca3af; border-top:.5px solid #d1d5db; padding-top:1.6mm; }
+  .ps-compact .ps-tables td { padding:.35mm 2.6mm; } .ps-compact .ps-info { margin:2.6mm 0 3mm; } .ps-compact .ps-sign-area { margin-top:6mm; }
+  .ps-compact2 { font-size:12.5px; } .ps-compact2 .ps-tables td { padding:.15mm 2.4mm; line-height:1.35; }
+  .ps-preview { position:relative; overflow:hidden; margin:0 auto; background:#e5e9ef; border-radius:12px; }
+  .ps-preview .ps-page { position:absolute; top:0; left:0; transform-origin:top left; box-shadow:0 8px 24px -12px rgba(0,0,0,.35); }
+  #psPrintRoot { position:fixed; left:-10000px; top:0; }
+  .pr-drop { transition:all .2s; } .pr-drop.drag { border-color:#5AA9E6; background:#F2F9FF; transform:scale(1.01); }
+  @media print {
+    body.ps-printing { background:#fff !important; padding:0 !important; }
+    body.ps-printing > *:not(#psPrintRoot) { display:none !important; }
+    body.ps-printing #psPrintRoot { position:static; left:auto; }
+    body.ps-printing .ps-page { height:296.6mm; page-break-after:always; break-after:page; }
+    body.ps-printing .ps-page:last-child { page-break-after:auto; break-after:auto; }
+    @page { size:A4 portrait; margin:0; }
+  }`;
+function payrollEnsureStyle() {
+  if ($('#payroll-style')) return;
+  const st = document.createElement('style'); st.id = 'payroll-style'; st.textContent = PAYROLL_CSS; document.head.appendChild(st);
+  if (!$('link[data-sarabun]')) {
+    const l = document.createElement('link'); l.rel = 'stylesheet'; l.dataset.sarabun = '1';
+    l.href = 'https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap'; document.head.appendChild(l);
+  }
+}
+// โลโก้จาก "ตั้งค่าระบบ" (ถ้าโหลดไม่ได้ให้ซ่อนไป ไม่ให้สลิปมีกล่องข้อความแปลกปลอม) · ไม่มีโลโก้ → ใช้ตราสัญลักษณ์จำลอง
+const payrollLogoHtml = (cls) => State.settings.logo_url
+  ? `<img src="${esc(State.settings.logo_url)}" alt="" class="${cls}" onerror="this.style.visibility='hidden'">`
+  : `<div class="${cls}">${PAYROLL_EMBLEM}</div>`;
+/** สร้าง HTML สลิป 1 หน้า A4 */
+function payrollSlipHtml(s, meta, signer, idx = 0, total = 1) {
+  const rows = (list) => (list && list.length)
+    ? list.map(x => `<tr><td>${esc(x.name)}</td><td class="r">${formatMoney(x.amount, { unit: false })}</td></tr>`).join('')
+    : '<tr class="empty"><td colspan="2">– ไม่มีรายการ –</td></tr>';
+  const unit = [s.unit_name, s.sub_unit].filter(Boolean).join(' / ');
+  return `<section class="ps-page">
+    <div class="ps-wm">${State.settings.logo_url ? `<img src="${esc(State.settings.logo_url)}" alt="" onerror="this.style.display='none'">` : PAYROLL_EMBLEM}</div>
+    <div class="ps-head">${payrollLogoHtml('ps-logo')}
+      <h1 class="ps-org">${esc(meta.org_title || State.settings.org_name || '')}</h1>
+      ${meta.org_subtitle ? `<p class="ps-sub">${esc(meta.org_subtitle)}</p>` : ''}</div>
+    <div class="ps-title">สลิปเงินเดือน</div>
+    <div class="ps-period">${payrollPeriodText(meta)}</div>
+    <hr class="ps-rule"><hr class="ps-rule">
+    <div class="ps-info">
+      <div class="k">ชื่อ-สกุล</div><div class="v">${esc(s.full_name)}</div>
+      <div class="k">ประเภท</div><div class="v">${esc(s.employee_type || '-')}</div>
+      <div class="k">หน่วยงาน</div><div class="v">${esc(unit || '-')}</div>
+      <div class="k">สังกัด</div><div class="v">${esc(PAYROLL_GROUPS[meta.staff_group] || '-')}</div>
+    </div>
+    <div class="ps-tables">
+      <table><thead><tr><th>รายการรับ</th><th class="r">จำนวนเงิน (บาท)</th></tr></thead>
+        <tbody>${rows(s.incomes)}</tbody><tfoot><tr><td>รวมรายการรับ</td><td class="r">${formatMoney(s.total_income, { unit: false })}</td></tr></tfoot></table>
+      <table><thead><tr><th>รายการหัก</th><th class="r">จำนวนเงิน (บาท)</th></tr></thead>
+        <tbody>${rows(s.deductions)}</tbody><tfoot><tr><td>รวมรายการหัก</td><td class="r">${formatMoney(s.total_deduction, { unit: false })}</td></tr></tfoot></table>
+    </div>
+    <div class="ps-net"><span class="lbl">รับสุทธิ</span><span class="txt">(${bahtText(s.net_amount)})</span><span class="amt">${formatMoney(s.net_amount)}</span></div>
+    <div class="ps-remark">หมายเหตุ: เอกสารนี้ใช้เป็นหลักฐานแสดงรายการรับ-จ่ายเงินเดือนประจำเดือน</div>
+    <div class="ps-sign-area"><div class="ps-sign">
+      <div class="muted">ลงชื่อ ........................................................</div>
+      <div>(${esc(signer?.name || '........................................................')})</div>
+      ${signer?.position ? `<div class="muted">${esc(signer.position)}</div>` : ''}</div></div>
+    <div class="ps-foot"><span>ออกโดยระบบ Smart Finance Hub · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })}</span><span>หน้า ${idx + 1}/${total}</span></div>
+  </section>`;
+}
+/** วัดจริงหลังแสดงผล: ถ้าเนื้อหาชนส่วนท้าย → ย่อ 1-2 ระดับ */
+function payrollFitPages(root) {
+  $$('.ps-page', root).forEach(pg => {
+    const over = () => { const s = $('.ps-sign-area', pg), f = $('.ps-foot', pg); return s.offsetTop + s.offsetHeight > f.offsetTop - 6; };
+    if (over()) pg.classList.add('ps-compact');
+    if (over()) pg.classList.add('ps-compact2');
+  });
+}
+function payrollMeta(src) {
+  return { org_title: src.org_title, org_subtitle: src.org_subtitle, period_year: src.period_year, period_month: src.period_month, staff_group: src.staff_group };
+}
+
+/* ---------- ผู้ลงนาม (ค่าเริ่มต้นจากตั้งค่าหน่วยงาน · แก้ได้ก่อนพิมพ์) ---------- */
+async function payrollSignerDefaults() {
+  try { const local = JSON.parse(localStorage.getItem(PAYROLL_SIGNER_KEY) || 'null'); if (local?.name) return local; } catch { /* ignore */ }
+  const org = currentUser()?.org_id;
+  if (!org) return { name: '', position: '' };
+  const r = await db(s => s.from('system_settings').select('id, setting_key, setting_value').eq('org_id', org).in('setting_key', ['signer_name', 'signer_position']), { loader: false, silent: true });
+  const m = Object.fromEntries((r.data || []).map(x => [x.setting_key, x.setting_value]));
+  return { name: m.signer_name || '', position: m.signer_position || '' };
+}
+async function payrollSaveSignerDefault(sig) {
+  const org = currentUser()?.org_id;
+  if (hasPermission('settings.org') && org) {
+    const r = await db(s => s.from('system_settings').select('id, setting_key').eq('org_id', org).in('setting_key', ['signer_name', 'signer_position']), { loader: false, silent: true });
+    const rows = r.data || [];
+    for (const [key, value] of [['signer_name', sig.name], ['signer_position', sig.position]]) {
+      const ex = rows.find(x => x.setting_key === key);
+      await db(s => ex ? s.from('system_settings').update({ setting_value: value }).eq('id', ex.id)
+        : s.from('system_settings').insert({ org_id: org, setting_key: key, setting_value: value, is_public: false, created_by: currentUser().id }), { loader: false, silent: true });
+    }
+    try { localStorage.removeItem(PAYROLL_SIGNER_KEY); } catch { /* ignore */ }
+    logAudit('update_settings', 'system_settings', org, { scope: 'organization', keys: ['signer_name', 'signer_position'], from: 'payroll' });
+    showToast('บันทึกผู้ลงนามเป็นค่าเริ่มต้นของหน่วยงานแล้ว', 'success');
+  } else {
+    try { localStorage.setItem(PAYROLL_SIGNER_KEY, JSON.stringify(sig)); } catch { /* ignore */ }
+    showToast('จำผู้ลงนามไว้สำหรับเครื่องนี้แล้ว', 'success');
+  }
+}
+
+/* ---------- พิมพ์ / ดูตัวอย่าง ---------- */
+async function payrollPrint(slips, meta, signer) {
+  payrollEnsureStyle();
+  let root = $('#psPrintRoot');
+  if (!root) { root = document.createElement('div'); root.id = 'psPrintRoot'; document.body.appendChild(root); }
+  root.innerHTML = slips.map((s, i) => payrollSlipHtml(s, meta, signer, i, slips.length)).join('');
+  showLoader(true, `กำลังเตรียมสลิป ${slips.length} หน้า...`);
+  try {
+    await Promise.all($$('img', root).map(img => (img.complete ? Promise.resolve() : new Promise(r => { img.onload = img.onerror = r; }))));
+    if (document.fonts?.ready) await document.fonts.ready;
+    payrollFitPages(root);
+  } finally { showLoader(false); }
+  document.body.classList.add('ps-printing');
+  const done = () => { document.body.classList.remove('ps-printing'); root.innerHTML = ''; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 150);
+}
+function openPayrollSlipPreview(slip, meta, { canPrint = false, periodId = null } = {}) {
+  payrollEnsureStyle();
+  let ro = null;
+  const m = openModal({
+    title: `สลิปเงินเดือน · ${esc(slip.full_name)}`, icon: 'receipt-text', size: 'xl',
+    onClose: () => ro && ro.disconnect(),
+    body: `<div class="ps-preview" data-ps-wrap>${payrollSlipHtml(slip, meta, { name: '(ชื่อผู้ลงนาม)', position: '' })}</div>
+      <p class="text-xs text-slate-400 text-center mt-2">ตัวอย่างขนาดย่อของกระดาษ A4 · ชื่อผู้ลงนามกำหนดได้ตอนสั่งพิมพ์</p>
+      ${(slip.warnings || []).length ? `<div class="mt-3 rounded-2xl bg-cream-50 border border-cream-200 p-3 text-sm text-slate-600">${ic('alert-triangle', 'w-4 h-4 inline text-cream-500')} ${slip.warnings.map(esc).join(' · ')}</div>` : ''}`,
+    footer: `<button class="btn btn-ghost" data-close>ปิด</button>${canPrint ? `<button class="btn btn-primary" data-ps-print>${ic('printer')} พิมพ์ใบนี้</button>` : ''}`,
+  });
+  const wrap = $('[data-ps-wrap]', m.el), pg = $('.ps-page', wrap);
+  // ย่อหน้า A4 ให้พอดีกล่อง – วัดใหม่ทุกครั้งที่กล่องเปลี่ยนขนาด (รวมตอนเพิ่งแสดงผล)
+  const fit = () => {
+    if (!wrap.clientWidth) return;   // ยังไม่แสดงผล → รอ ResizeObserver เรียกใหม่
+    const sc = Math.min(1, wrap.clientWidth / pg.offsetWidth);
+    pg.style.transform = `scale(${sc})`; wrap.style.height = `${pg.offsetHeight * sc}px`;
+    pg.style.left = `${Math.max(0, (wrap.clientWidth - pg.offsetWidth * sc) / 2)}px`;
+  };
+  wrap.style.height = '60vh';      // ความสูงชั่วคราวก่อนวัดได้
+  payrollFitPages(wrap); fit();
+  if (window.ResizeObserver) { ro = new ResizeObserver(fit); ro.observe(wrap); }
+  const pb = $('[data-ps-print]', m.el);
+  if (pb) pb.onclick = () => { m.close(); openPayrollPrintDialog([slip], meta, periodId, `สลิปของ ${slip.full_name}`); };
+}
+async function openPayrollPrintDialog(slips, meta, periodId, label) {
+  if (!requirePermission('payroll.print')) return;
+  if (!slips.length) return showToast('ไม่มีสลิปที่จะพิมพ์', 'warning');
+  const def = await payrollSignerDefaults();
+  const m = openModal({
+    title: 'พิมพ์สลิปเงินเดือน', icon: 'printer', size: 'md',
+    body: `<div class="rounded-2xl bg-brand-50 border border-brand-100 p-3 mb-4 text-sm text-slate-600">
+        ${ic('files', 'w-4 h-4 inline text-brand-500')} <b>${esc(label)}</b> · ${formatNumber(slips.length)} สลิป (${formatNumber(slips.length)} หน้า A4)<br>
+        <span class="text-xs text-slate-500">${payrollPeriodText(meta)} · ${PAYROLL_GROUPS[meta.staff_group] || ''}</span></div>
+      <form id="psSignForm" class="space-y-3">
+        <div><label class="label">ชื่อผู้ลงนาม</label><input name="sname" class="input" value="${esc(def.name)}" placeholder="เช่น นางสาวตัวอย่าง ใจดี"></div>
+        <div><label class="label">ตำแหน่งผู้ลงนาม</label><input name="spos" class="input" value="${esc(def.position)}" placeholder="เช่น ผู้อำนวยการกองคลัง"></div>
+        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" name="sdef" class="accent-brand-500 w-4 h-4">
+          ใช้เป็นค่าเริ่มต้น${hasPermission('settings.org') ? 'ของหน่วยงาน' : 'บนเครื่องนี้'}</label>
+      </form>
+      <div class="mt-4 rounded-2xl bg-slate-50 p-3 text-xs text-slate-500 leading-relaxed">${ic('info', 'w-3.5 h-3.5 inline')}
+        หน้าต่างพิมพ์จะเปิดขึ้น: เลือกเครื่องพิมพ์ หรือเลือก <b>"บันทึกเป็น PDF"</b> · กระดาษ A4 แนวตั้ง · ระยะขอบ "ไม่มี" · ปิด "ส่วนหัวและส่วนท้าย"</div>`,
+    footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button><button class="btn btn-primary" type="submit" form="psSignForm">${ic('printer')} พิมพ์ / บันทึก PDF</button>`,
+  });
+  $('#psSignForm', m.el).onsubmit = async (e) => {
+    e.preventDefault();
+    if (!requirePermission('payroll.print')) return;
+    const f = e.target;
+    const signer = { name: f.sname.value.trim(), position: f.spos.value.trim() };
+    if (f.sdef.checked) await payrollSaveSignerDefault(signer);
+    m.close();
+    if (periodId) rpcSecure('sfh_payroll_log', { p_period_id: periodId, p_kind: 'print', p_count: slips.length, p_signer_name: signer.name || null, p_signer_position: signer.position || null }, { loader: false });
+    await payrollPrint(slips, meta, signer);
+  };
+}
+function payrollExportCsv(slips, period) {
+  if (!requirePermission('payroll.export')) return;
+  const names = (key) => { const out = []; slips.forEach(s => (s[key] || []).forEach(x => { if (!out.includes(x.name)) out.push(x.name); })); return out; };
+  const inc = names('incomes'), ded = names('deductions');
+  const amt = (list, n) => { const x = (list || []).find(y => y.name === n); return x ? x.amount : 0; };
+  downloadCSV(`payroll_${period.period_year}-${String(period.period_month).padStart(2, '0')}_${period.staff_group}`,
+    ['ลำดับ', 'ชื่อ-สกุล', 'ประเภท', 'หน่วยงาน', ...inc, 'รวมรายการรับ', ...ded, 'รวมรายการหัก', 'รับสุทธิ'],
+    slips.map((s, i) => [i + 1, s.full_name, s.employee_type, [s.unit_name, s.sub_unit].filter(Boolean).join(' / '),
+      ...inc.map(n => amt(s.incomes, n)), s.total_income, ...ded.map(n => amt(s.deductions, n)), s.total_deduction, s.net_amount]));
+  rpcSecure('sfh_payroll_log', { p_period_id: period.id, p_kind: 'export', p_count: slips.length, p_signer_name: null, p_signer_position: null }, { loader: false });
+}
+
+/* ---------- หน้าหลักของโมดูล ---------- */
+async function renderPayroll(el, mod) {
+  if (!requirePermission('payroll.view')) return;
+  if (!State.session?.token) { await sessionExpired('กรุณาเข้าสู่ระบบใหม่เพื่อใช้งานสลิปเงินเดือน (ระบบปรับปรุงความปลอดภัย)'); return; }
+  payrollEnsureStyle();
+  el.innerHTML = pageHeader({
+    title: mod?.name || 'สลิปเงินเดือน', icon: 'receipt-text', tone: 'mint',
+    subtitle: 'นำเข้าไฟล์ Excel (งด.2) → ตรวจสอบ → ดู/ค้นหา → พิมพ์สลิป A4 หรือบันทึก PDF',
+    actions: hasPermission('payroll.manage') ? `<button class="btn btn-primary" data-pr="import">${ic('file-up')} นำเข้าไฟล์ Excel</button>` : '',
+  }) + `<div class="flex items-start gap-2 rounded-2xl bg-mint-50 border border-mint-200 px-4 py-2.5 mb-5 text-xs text-slate-600">
+      ${ic('shield-check', 'w-4 h-4 text-mint-500 shrink-0 mt-0.5')}
+      <span>ข้อมูลเงินเดือนเข้าถึงผ่านระบบยืนยันตัวตน (session token) และตรวจสิทธิ์ที่ฐานข้อมูลทุกครั้ง · ไฟล์ Excel อ่านในเบราว์เซอร์ ไม่ถูกอัปโหลดขึ้นเซิร์ฟเวอร์ · การนำเข้า พิมพ์ และส่งออกถูกบันทึกใน Audit Log</span></div>
+    <div id="prBody"></div>`;
+  refreshIcons();
+  el.onclick = (e) => payrollOnClick(el, e);
+  el.onchange = (e) => payrollOnChange(el, e);
+  await payrollShowList(el);
+}
+async function payrollOnClick(el, e) {
+  const b = e.target.closest('[data-pr]');
+  if (!b) return;
+  const id = b.dataset.id;
+  switch (b.dataset.pr) {
+    case 'import': payrollShowImport(el); break;
+    case 'back': await payrollShowList(el); break;
+    case 'open': await payrollShowPeriod(el, id); break;
+    case 'status': await payrollSetStatus(el, id, b.dataset.to); break;
+    case 'delete': await payrollDeletePeriod(el, id); break;
+    case 'preview': { const s = Payroll.slips.find(x => x.id === id); if (s) openPayrollSlipPreview(s, payrollMeta(Payroll.period), { canPrint: hasPermission('payroll.print'), periodId: Payroll.period.id }); break; }
+    case 'print-one': { const s = Payroll.slips.find(x => x.id === id); if (s) openPayrollPrintDialog([s], payrollMeta(Payroll.period), Payroll.period.id, `สลิปของ ${s.full_name}`); break; }
+    case 'print-selected': {
+      const list = Payroll.slips.filter(s => Payroll.selected.has(s.id));
+      if (!list.length) return showToast('กรุณาเลือกรายชื่อที่ต้องการพิมพ์ก่อน', 'warning');
+      openPayrollPrintDialog(list, payrollMeta(Payroll.period), Payroll.period.id, `ที่เลือก ${list.length} คน`); break;
+    }
+    case 'print-filtered': { const list = Payroll.table.getFiltered(); openPayrollPrintDialog(list, payrollMeta(Payroll.period), Payroll.period.id, list.length === Payroll.slips.length ? 'ทั้งงวด' : `ตามตัวกรอง ${list.length} คน`); break; }
+    case 'export': payrollExportCsv(Payroll.table.getFiltered(), Payroll.period); break;
+    case 'select-filtered': Payroll.table.getFiltered().forEach(s => Payroll.selected.add(s.id)); Payroll.table.render(); payrollUpdateSelection(el); break;
+    case 'select-none': Payroll.selected.clear(); Payroll.table.render(); payrollUpdateSelection(el); break;
+    case 'imp-choose': $('#prFileInput', el).click(); break;
+    case 'imp-preview': { const imp = Payroll.imports.find(x => x.id === b.dataset.f); const p = imp?.people[+b.dataset.i]; if (p) openPayrollSlipPreview({ ...p, warnings: [...p.warnings, ...(p.compare || [])] }, payrollImportMeta(imp)); break; }
+    case 'imp-remove': Payroll.imports = Payroll.imports.filter(x => x.id !== b.dataset.f); payrollDrawImports(el); break;
+    case 'imp-all-issues': { const imp = Payroll.imports.find(x => x.id === b.dataset.f); if (imp) { imp.showAll = true; payrollDrawImports(el); } break; }
+    case 'imp-go': { const imp = Payroll.imports.find(x => x.id === b.dataset.f); if (imp) await payrollDoImport(el, imp); break; }
+  }
+}
+async function payrollOnChange(el, e) {
+  const sel = e.target.closest('[data-sel]');
+  if (sel) { sel.checked ? Payroll.selected.add(sel.dataset.sel) : Payroll.selected.delete(sel.dataset.sel); payrollUpdateSelection(el); return; }
+  const f = e.target.closest('[data-imp-field]');
+  if (f) {
+    const imp = Payroll.imports.find(x => x.id === f.dataset.f);
+    if (!imp) return;
+    const k = f.dataset.impField;
+    imp[k] = ['month', 'year'].includes(k) ? parseInt(f.value, 10) || null : f.value;
+    if (['month', 'year', 'staff_group'].includes(k)) await payrollCompareWithPrevious(imp);
+    payrollDrawImports(el);
+  }
+  if (e.target.id === 'prFileInput') { const files = [...e.target.files]; e.target.value = ''; await payrollReadFiles(el, files); }
+}
+
+/* ---------- รายการงวด ---------- */
+function payrollStatusActions(p, compact = false) {
+  if (!hasPermission('payroll.manage')) return '';
+  const b = (to, icon, text, cls) => `<button class="btn ${cls} ${compact ? 'btn-sm' : ''}" data-pr="status" data-id="${p.id}" data-to="${to}">${ic(icon, 'w-4 h-4')} ${text}</button>`;
+  const del = `<button class="btn btn-danger ${compact ? 'btn-sm' : ''}" data-pr="delete" data-id="${p.id}">${ic('trash-2', 'w-4 h-4')} ลบงวด</button>`;
+  if (p.status === 'draft') return b('published', 'send', 'เผยแพร่', 'btn-mint') + del;
+  if (p.status === 'published') return b('closed', 'lock', 'ปิดงวด', 'btn-ghost') + b('draft', 'undo-2', 'กลับเป็นร่าง', 'btn-cream');
+  if (p.status === 'closed' && payrollIsSuper()) return b('published', 'lock-open', 'เปิดงวดอีกครั้ง', 'btn-cream');
+  return '';
+}
+async function payrollShowList(el) {
+  const body = $('#prBody', el);
+  body.innerHTML = `<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">${skeletonCards(3, 'h-52')}</div>`;
+  const r = await rpcSecure('sfh_payroll_periods', {}, { loaderText: 'กำลังโหลดงวดเงินเดือน...', error: 'โหลดงวดเงินเดือนไม่สำเร็จ' });
+  if (!r.ok) { body.innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); refreshIcons(); return; }
+  Payroll.periods = r.data || [];
+  if (!Payroll.periods.length) {
+    body.innerHTML = `<div class="card p-8 text-center">
+      <div class="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-mint-100 to-brand-100 grid place-items-center mb-4">${ic('file-spreadsheet', 'w-9 h-9 text-mint-500')}</div>
+      <h3 class="font-semibold text-slate-700">ยังไม่มีงวดเงินเดือน</h3>
+      <p class="text-sm text-slate-500 mt-1">${hasPermission('payroll.manage') ? 'เริ่มต้นโดยนำเข้าไฟล์ Excel "รายละเอียดผู้มีสิทธิรับเงินแนบท้ายประกอบ (งด.2)"' : 'รอเจ้าหน้าที่การเงินนำเข้าและเผยแพร่งวดเงินเดือน'}</p>
+      ${hasPermission('payroll.manage') ? `<button class="btn btn-primary mt-4" data-pr="import">${ic('file-up')} นำเข้าไฟล์ Excel</button>` : ''}</div>`;
+    refreshIcons(); return;
+  }
+  const years = [...new Set(Payroll.periods.map(p => p.period_year))];
+  body.innerHTML = years.map(y => `<h3 class="section-title mb-3 mt-1">${ic('calendar-range', 'w-5 h-5 text-mint-500')} พ.ศ. ${y}</h3>
+    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 mb-6">${Payroll.periods.filter(p => p.period_year === y).map(p => `
+      <div class="card p-5 flex flex-col gap-3">
+        <div class="flex items-start justify-between gap-2">
+          <div><div class="text-xs text-slate-400">ประจำเดือน</div><div class="text-xl font-semibold text-slate-800 leading-tight">${TH_MONTHS[p.period_month - 1]} ${p.period_year}</div></div>
+          ${payrollStatusBadge(p.status)}</div>
+        <div class="flex flex-wrap gap-1.5">${payrollGroupBadge(p.staff_group)}${isSuperAdmin() && p.org_name ? `<span class="badge bg-slate-100 text-slate-500">${esc(p.org_name)}</span>` : ''}</div>
+        <div class="grid grid-cols-2 gap-2 text-sm">
+          <div class="rounded-2xl bg-slate-50 p-2.5"><div class="text-xs text-slate-400">จำนวนคน</div><div class="font-semibold text-slate-700">${formatNumber(p.employee_count)} คน</div></div>
+          <div class="rounded-2xl bg-mint-50 p-2.5"><div class="text-xs text-slate-400">รับสุทธิรวม</div><div class="font-semibold text-mint-600">${formatMoney(p.total_net, { unit: false })}</div></div>
+        </div>
+        <div class="text-xs text-slate-400">${ic('clock', 'w-3.5 h-3.5 inline')} นำเข้าเมื่อ ${formatThaiDate(p.imported_at, { time: true })}${p.source_filename ? ` · ${esc(p.source_filename)}` : ''}</div>
+        <div class="flex flex-wrap gap-2 mt-auto pt-2 border-t border-slate-100">
+          <button class="btn btn-primary btn-sm" data-pr="open" data-id="${p.id}">${ic('eye', 'w-4 h-4')} เปิดดูสลิป</button>${payrollStatusActions(p, true)}</div>
+      </div>`).join('')}</div>`).join('');
+  refreshIcons();
+}
+async function payrollSetStatus(el, id, to) {
+  if (!requirePermission('payroll.manage')) return;
+  const p = Payroll.periods.find(x => x.id === id) || Payroll.period;
+  const label = `${payrollPeriodText(p)} (${PAYROLL_GROUPS[p.staff_group]})`;
+  const msg = {
+    published: p.status === 'closed' ? `เปิดงวด <b>${label}</b> อีกครั้ง? จะกลับมานำเข้าซ้ำหรือแก้สถานะได้` : `เผยแพร่ <b>${label}</b>? ผู้มีสิทธิ์ดูสลิปจะเห็นและพิมพ์ได้`,
+    closed: `ปิดงวด <b>${label}</b>? หลังปิดแล้วจะนำเข้าซ้ำหรือลบไม่ได้ (เปิดใหม่ได้เฉพาะ Super Admin)`,
+    draft: `ย้อน <b>${label}</b> กลับเป็นร่าง? ผู้ที่ไม่มีสิทธิ์นำเข้าจะมองไม่เห็นงวดนี้`,
+  }[to];
+  const ok = await confirmModal({ title: 'เปลี่ยนสถานะงวด', message: msg, confirmText: 'ยืนยัน', danger: to === 'closed', icon: 'toggle-right', confirmIcon: 'check' });
+  if (!ok) return;
+  const r = await rpcSecure('sfh_payroll_set_status', { p_period_id: id, p_status: to }, { loaderText: 'กำลังบันทึก...', error: 'เปลี่ยนสถานะไม่สำเร็จ', success: 'เปลี่ยนสถานะงวดเรียบร้อย' });
+  if (!r.ok) return;
+  if (Payroll.period?.id === id && $('[data-pr-period]', el)) await payrollShowPeriod(el, id); else await payrollShowList(el);
+}
+async function payrollDeletePeriod(el, id) {
+  if (!requirePermission('payroll.manage')) return;
+  const p = Payroll.periods.find(x => x.id === id) || Payroll.period;
+  const ok = await confirmModal({ title: 'ลบงวดเงินเดือน', message: `ลบ <b>${payrollPeriodText(p)} (${PAYROLL_GROUPS[p.staff_group]})</b> และสลิปทั้งหมด ${formatNumber(p.employee_count)} รายการ?<br><span class="text-xs text-slate-400">นำเข้าใหม่จากไฟล์ Excel ได้ภายหลัง</span>`, confirmText: 'ลบงวด' });
+  if (!ok) return;
+  const r = await rpcSecure('sfh_payroll_delete_period', { p_period_id: id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบงวดเงินเดือนเรียบร้อย' });
+  if (r.ok) await payrollShowList(el);
+}
+
+/* ---------- ดูงวด: ค้นหา / เลือก / พิมพ์ ---------- */
+function payrollUpdateSelection(el) {
+  const n = Payroll.selected.size;
+  const b = $('[data-pr="print-selected"]', el); if (b) { b.disabled = !n; $('[data-sel-count]', b).textContent = n; }
+}
+async function payrollShowPeriod(el, id) {
+  const body = $('#prBody', el);
+  body.innerHTML = skeletonCards(1, 'h-96');
+  const r = await rpcSecure('sfh_payroll_slips', { p_period_id: id }, { loaderText: 'กำลังโหลดสลิป...', error: 'โหลดสลิปไม่สำเร็จ' });
+  if (!r.ok) { await payrollShowList(el); return; }
+  const p = Payroll.period = r.data.period;
+  Payroll.slips = r.data.slips || [];
+  Payroll.selected = new Set();
+  const canPrint = hasPermission('payroll.print');
+  const units = [...new Set(Payroll.slips.map(s => s.unit_name).filter(Boolean))];
+  const types = [...new Set(Payroll.slips.map(s => s.employee_type).filter(Boolean))];
+  const warnCount = Payroll.slips.filter(s => (s.warnings || []).length).length;
+  body.innerHTML = `<div data-pr-period>
+    <div class="flex flex-col lg:flex-row lg:items-center gap-3 mb-4">
+      <button class="btn btn-ghost self-start" data-pr="back">${ic('arrow-left')} งวดทั้งหมด</button>
+      <div class="flex-1 min-w-0"><h3 class="text-lg font-semibold text-slate-800">${payrollPeriodText(p)}</h3>
+        <div class="flex flex-wrap gap-1.5 mt-1">${payrollGroupBadge(p.staff_group)}${payrollStatusBadge(p.status)}</div></div>
+      <div class="flex flex-wrap gap-2">${payrollStatusActions(p)}</div>
+    </div>
+    ${p.status === 'draft' ? `<div class="rounded-2xl bg-cream-50 border border-cream-200 px-4 py-3 mb-4 text-sm text-slate-600">${ic('info', 'w-4 h-4 inline text-cream-500')} งวดนี้ยังเป็น <b>ร่าง</b> – ตรวจสอบรายชื่อและยอดเงินให้เรียบร้อยแล้วกด <b>เผยแพร่</b> (เห็นเฉพาะผู้มีสิทธิ์นำเข้า)</div>` : ''}
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+      ${statCard({ label: 'จำนวนคน', value: formatNumber(p.employee_count), icon: 'users', tone: 'brand', hint: `${p.sheet_count || units.length} งาน` })}
+      ${statCard({ label: 'รวมรายการรับ', value: formatMoney(p.total_income, { unit: false }), icon: 'trending-up', tone: 'mint' })}
+      ${statCard({ label: 'รวมรายการหัก', value: formatMoney(p.total_deduction, { unit: false }), icon: 'trending-down', tone: 'blush' })}
+      ${statCard({ label: 'รับสุทธิรวม', value: formatMoney(p.total_net, { unit: false }), icon: 'wallet', tone: 'cream', hint: warnCount ? `⚠️ มีข้อสังเกต ${warnCount} คน` : '' })}
+    </div>
+    <div class="card p-4 md:p-5"><div id="prSlipTable"></div></div></div>`;
+  Payroll.table = createDataTable($('#prSlipTable', el), {
+    pageSize: 20,
+    searchKeys: ['full_name', 'unit_name', 'employee_type', 'sub_unit'], searchPlaceholder: 'ค้นหาชื่อ-สกุล หรือหน่วยงาน...',
+    filters: [
+      { key: 'unit_name', label: 'ทุกหน่วยงาน', options: units.map(u => ({ value: u, label: u })) },
+      { key: 'employee_type', label: 'ทุกประเภท', options: types.map(t => ({ value: t, label: t })) },
+      ...(warnCount ? [{ key: 'warn', label: 'ทุกสถานะ', options: [{ value: 'y', label: 'มีข้อสังเกต' }], match: (s) => (s.warnings || []).length > 0 }] : []),
+    ],
+    toolbar: `${canPrint ? `<button class="btn btn-soft" data-pr="select-filtered" title="เลือกทุกคนตามตัวกรอง">${ic('check-square', 'w-4 h-4')} เลือกทั้งหมด</button>
+        <button class="btn btn-ghost" data-pr="select-none">${ic('square', 'w-4 h-4')} ล้าง</button>
+        <button class="btn btn-primary" data-pr="print-selected" disabled>${ic('printer', 'w-4 h-4')} พิมพ์ที่เลือก (<span data-sel-count>0</span>)</button>
+        <button class="btn btn-mint" data-pr="print-filtered">${ic('printer', 'w-4 h-4')} พิมพ์ตามตัวกรอง</button>` : ''}
+      ${hasPermission('payroll.export') ? `<button class="btn btn-ghost" data-pr="export">${ic('download', 'w-4 h-4')} CSV</button>` : ''}`,
+    columns: [
+      ...(canPrint ? [{ key: '_sel', label: '', class: 'w-8', hideOnCard: true, render: s => `<input type="checkbox" class="w-4 h-4 accent-brand-500" data-sel="${s.id}" ${Payroll.selected.has(s.id) ? 'checked' : ''} aria-label="เลือก">` }] : []),
+      { key: 'full_name', label: 'ชื่อ-สกุล', render: s => `<div class="flex items-center gap-2">${canPrint ? `<input type="checkbox" class="md:hidden w-4 h-4 accent-brand-500" data-sel="${s.id}" ${Payroll.selected.has(s.id) ? 'checked' : ''}>` : ''}
+          <div class="min-w-0"><button class="font-medium text-slate-700 hover:text-brand-600 text-left" data-pr="preview" data-id="${s.id}">${esc(s.full_name)}</button>
+          ${(s.warnings || []).length ? `<span class="ml-1 text-cream-500" title="${esc(s.warnings.join(' · '))}">${ic('alert-triangle', 'w-3.5 h-3.5 inline')}</span>` : ''}
+          <div class="text-xs text-slate-400">${esc(s.employee_type || '')}</div></div></div>` },
+      { key: 'unit_name', label: 'หน่วยงาน', render: s => `<span class="text-slate-600 text-xs">${esc([s.unit_name, s.sub_unit].filter(Boolean).join(' / '))}</span>` },
+      { key: 'total_income', label: 'รวมรับ', class: 'text-right', render: s => formatMoney(s.total_income, { unit: false }) },
+      { key: 'total_deduction', label: 'รวมหัก', class: 'text-right', render: s => formatMoney(s.total_deduction, { unit: false }) },
+      { key: 'net_amount', label: 'รับสุทธิ', class: 'text-right', render: s => `<b class="text-mint-600">${formatMoney(s.net_amount, { unit: false })}</b>` },
+    ],
+    actions: s => `<button class="btn-icon" data-pr="preview" data-id="${s.id}" title="ดูสลิป">${ic('eye')}</button>
+      ${canPrint ? `<button class="btn-icon" data-pr="print-one" data-id="${s.id}" title="พิมพ์ใบนี้">${ic('printer')}</button>` : ''}`,
+    emptyText: 'ไม่พบรายชื่อตามเงื่อนไข',
+  });
+  Payroll.table.setRows(Payroll.slips);
+  refreshIcons();
+}
+
+/* ---------- นำเข้า Excel: เลือกไฟล์ → ตรวจสอบ → ยืนยัน ---------- */
+function payrollImportMeta(imp) {
+  return { org_title: imp.org_title, org_subtitle: imp.org_subtitle, period_year: imp.year, period_month: imp.month, staff_group: imp.staff_group };
+}
+function payrollShowImport(el) {
+  if (!requirePermission('payroll.manage')) return;
+  Payroll.imports = [];
+  const body = $('#prBody', el);
+  body.innerHTML = `<div class="flex items-center gap-3 mb-4"><button class="btn btn-ghost" data-pr="back">${ic('arrow-left')} งวดทั้งหมด</button>
+      <h3 class="text-lg font-semibold text-slate-800">นำเข้าไฟล์ Excel เงินเดือน</h3></div>
+    <ol class="grid sm:grid-cols-3 gap-2 mb-4 text-sm">
+      ${[['1', 'เลือกไฟล์ Excel', 'file-up'], ['2', 'ระบบตรวจสอบยอดให้อัตโนมัติ', 'scan-search'], ['3', 'กดนำเข้า แล้วเผยแพร่งวด', 'check-circle-2']].map(([n, t, i]) =>
+        `<li class="flex items-center gap-2 rounded-2xl bg-white border border-slate-100 px-3 py-2"><span class="w-7 h-7 rounded-xl bg-brand-100 text-brand-600 grid place-items-center font-semibold">${n}</span><span class="text-slate-600">${t}</span>${ic(i, 'w-4 h-4 text-slate-300 ml-auto')}</li>`).join('')}
+    </ol>
+    <div class="pr-drop card border-2 border-dashed border-brand-200 p-8 text-center cursor-pointer mb-5" data-pr="imp-choose" id="prDrop">
+      <div class="w-16 h-16 mx-auto rounded-3xl bg-gradient-to-br from-brand-100 to-mint-100 grid place-items-center mb-3">${ic('file-spreadsheet', 'w-8 h-8 text-brand-500')}</div>
+      <div class="font-medium text-slate-700">ลากไฟล์มาวางที่นี่ หรือคลิกเพื่อเลือกไฟล์</div>
+      <div class="text-sm text-slate-500 mt-1">ไฟล์ "รายละเอียดผู้มีสิทธิรับเงินแนบท้ายประกอบ (งด.2)" (.xlsx / .xls) · เลือกได้หลายไฟล์ เช่น ฝ่ายประจำ + ฝ่ายการเมือง</div>
+      <div class="text-xs text-mint-600 mt-2">${ic('lock', 'w-3.5 h-3.5 inline')} ไฟล์ถูกอ่านในเครื่องของคุณ ไม่อัปโหลดไฟล์ต้นฉบับขึ้นเซิร์ฟเวอร์</div>
+      <input type="file" id="prFileInput" class="hidden" multiple accept=".xlsx,.xls">
+    </div>
+    <div id="prImports" class="space-y-5"></div>`;
+  const drop = $('#prDrop', el);
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('drag'); }));
+  drop.addEventListener('drop', (e) => payrollReadFiles(el, [...(e.dataTransfer?.files || [])]));
+  refreshIcons();
+}
+async function payrollReadFiles(el, files) {
+  files = files.filter(f => { const ok = /\.(xlsx|xls)$/i.test(f.name); if (!ok) showToast(`${f.name} ไม่ใช่ไฟล์ Excel`, 'warning'); return ok; });
+  if (!files.length) return;
+  showLoader(true, 'กำลังเตรียมตัวอ่านไฟล์ Excel...');
+  try {
+    const XLSX = await loadSheetJS();
+    if (!Payroll.periods.length) { const r = await rpcSecure('sfh_payroll_periods', {}, { loader: false }); if (r.ok) Payroll.periods = r.data || []; }
+    for (const f of files) {
+      $('#loaderText').textContent = `กำลังอ่านและตรวจสอบ ${f.name}...`;
+      try {
+        const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+        const res = PayrollParser.parseWorkbook(wb, f.name, XLSX);
+        const now = new Date();
+        Object.assign(res, {
+          id: Math.random().toString(36).slice(2), staff_group: res.group, showAll: false,
+          month: res.period?.month || now.getMonth() + 1, year: res.period?.year || now.getFullYear() + 543,
+          org_title: res.org.title, org_subtitle: res.org.subtitle, compareIssues: [],
+        });
+        await payrollCompareWithPrevious(res);
+        Payroll.imports.push(res);
+      } catch (err) {
+        console.error(err);
+        showToast(`อ่านไฟล์ ${f.name} ไม่สำเร็จ: ${err.message}`, 'error', 6000);
+      }
+    }
+  } catch (err) { showToast(err.message, 'error', 6000); }
+  finally { showLoader(false); }
+  payrollDrawImports(el);
+}
+/** เทียบกับงวดก่อนหน้า (กลุ่มเดียวกัน): คนใหม่ / คนที่หายไป / รับสุทธิเปลี่ยนเกิน 20% */
+async function payrollCompareWithPrevious(imp) {
+  imp.people.forEach(p => { p.compare = []; });
+  imp.compareIssues = []; imp.prevLabel = '';
+  if (!imp.staff_group || !imp.month || !imp.year) return;
+  const pm = imp.month === 1 ? 12 : imp.month - 1, py = imp.month === 1 ? imp.year - 1 : imp.year;
+  const prev = Payroll.periods.find(x => x.staff_group === imp.staff_group && x.period_month === pm && x.period_year === py && (isSuperAdmin() ? x.org_id === currentUser().org_id : true));
+  if (!prev) { imp.prevLabel = 'ไม่มีงวดก่อนหน้าให้เทียบ'; return; }
+  const r = await rpcSecure('sfh_payroll_slips', { p_period_id: prev.id }, { loader: false });
+  if (!r.ok) return;
+  imp.prevLabel = `เทียบกับ ${TH_MONTHS[pm - 1]} ${py}`;
+  const prevMap = new Map((r.data.slips || []).map(s => [s.full_name, s]));
+  const seen = new Set();
+  imp.people.forEach(p => {
+    const q = prevMap.get(p.full_name);
+    if (!q) { p.compare.push('บุคลากรใหม่ (ไม่มีในงวดก่อน)'); return; }
+    seen.add(p.full_name);
+    const before = Number(q.net_amount), now = p.net_amount;
+    if (before > 0 && Math.abs(now - before) / before > 0.2)
+      p.compare.push(`รับสุทธิเปลี่ยน ${now > before ? '+' : ''}${Math.round((now - before) / before * 100)}% จากงวดก่อน (${formatMoney(before, { unit: false })} → ${formatMoney(now, { unit: false })})`);
+  });
+  const missing = [...prevMap.keys()].filter(n => !seen.has(n));
+  if (missing.length) imp.compareIssues.push({ level: 'warning', msg: `มีในงวดก่อนแต่ไม่พบในไฟล์นี้ ${missing.length} คน: ${missing.slice(0, 8).join(', ')}${missing.length > 8 ? ' …' : ''}` });
+}
+function payrollImportCounts(imp) {
+  const errors = imp.counts.errors;
+  const warnings = imp.counts.warnings + imp.people.reduce((a, p) => a + (p.compare || []).length, 0) + imp.compareIssues.length;
+  return { errors, warnings };
+}
+function payrollDrawImports(el) {
+  const box = $('#prImports', el);
+  if (!box) return;
+  box.innerHTML = Payroll.imports.map(imp => {
+    const c = payrollImportCounts(imp);
+    const issues = [
+      ...imp.fileIssues.map(i => ({ ...i, where: 'ไฟล์' })),
+      ...imp.sheets.flatMap(s => s.issues.map(i => ({ ...i, where: s.unit }))),
+      ...imp.compareIssues.map(i => ({ ...i, where: imp.prevLabel })),
+      ...imp.people.flatMap(p => [
+        ...p.errors.map(m => ({ level: 'error', msg: m, where: `${p.unit_name} · แถว ${p.row} · ${p.full_name || '(ไม่มีชื่อ)'}` })),
+        ...p.warnings.map(m => ({ level: 'warning', msg: m, where: `${p.unit_name} · แถว ${p.row} · ${p.full_name}` })),
+        ...(p.compare || []).map(m => ({ level: 'info', msg: m, where: `${p.unit_name} · ${p.full_name}` })),
+      ]),
+    ].sort((a, b) => ({ error: 0, warning: 1, info: 2 }[a.level] - { error: 0, warning: 1, info: 2 }[b.level]));
+    const shown = imp.showAll ? issues : issues.slice(0, 12);
+    const exists = Payroll.periods.find(x => x.staff_group === imp.staff_group && x.period_month === imp.month && x.period_year === imp.year && x.org_id === currentUser().org_id);
+    const ready = !c.errors && imp.staff_group && imp.month && imp.year && imp.people.length;
+    const lv = { error: ['x-circle', 'text-blush-500', 'bg-blush-50'], warning: ['alert-triangle', 'text-cream-500', 'bg-cream-50'], info: ['info', 'text-brand-500', 'bg-brand-50'] };
+    return `<div class="card p-4 md:p-5">
+      <div class="flex flex-col md:flex-row md:items-center gap-3 mb-4">
+        <div class="flex items-center gap-3 flex-1 min-w-0"><span class="w-11 h-11 rounded-2xl bg-mint-100 text-mint-600 grid place-items-center shrink-0">${ic('file-spreadsheet', 'w-5 h-5')}</span>
+          <div class="min-w-0"><div class="font-semibold text-slate-800 truncate">${esc(imp.fileName)}</div>
+            <div class="flex flex-wrap gap-1.5 mt-1"><span class="badge bg-slate-100 text-slate-600">${formatNumber(imp.people.length)} คน · ${imp.sheets.filter(s => !s.skipped).length} งาน</span>
+              ${c.errors ? `<span class="badge bg-blush-100 text-blush-500">${ic('x-circle', 'w-3 h-3')} ต้องแก้ ${c.errors}</span>` : `<span class="badge bg-mint-100 text-mint-600">${ic('check-circle-2', 'w-3 h-3')} ยอดถูกต้อง</span>`}
+              ${c.warnings ? `<span class="badge bg-cream-100 text-cream-600">${ic('alert-triangle', 'w-3 h-3')} ข้อสังเกต ${c.warnings}</span>` : ''}</div></div></div>
+        <button class="btn btn-ghost btn-sm self-start" data-pr="imp-remove" data-f="${imp.id}">${ic('x', 'w-4 h-4')} นำออก</button>
+      </div>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <div><label class="label">กลุ่มบุคลากร</label><select class="input" data-imp-field="staff_group" data-f="${imp.id}">
+          <option value="">— เลือก —</option>${Object.entries(PAYROLL_GROUPS).map(([k, v]) => `<option value="${k}" ${imp.staff_group === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+        <div><label class="label">เดือน</label><select class="input" data-imp-field="month" data-f="${imp.id}">${TH_MONTHS.map((m, i) => `<option value="${i + 1}" ${imp.month === i + 1 ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
+        <div><label class="label">ปี (พ.ศ.)</label><input type="number" class="input" min="2500" max="2700" value="${imp.year || ''}" data-imp-field="year" data-f="${imp.id}"></div>
+        <div><label class="label">ชื่อหน่วยงานบนสลิป</label><input class="input" value="${esc(imp.org_title || '')}" data-imp-field="org_title" data-f="${imp.id}"></div>
+      </div>
+      <p class="text-xs text-slate-400 -mt-2 mb-4">${imp.period ? `${ic('wand-sparkles', 'w-3.5 h-3.5 inline')} ระบบอ่านเดือน/ปี และกลุ่มจากไฟล์ให้แล้ว แก้ไขได้ถ้าไม่ถูกต้อง` : `${ic('alert-triangle', 'w-3.5 h-3.5 inline')} ไม่พบ "ประจำเดือน ..." ในไฟล์ กรุณาเลือกเดือน/ปีเอง`}${imp.prevLabel ? ` · ${esc(imp.prevLabel)}` : ''}</p>
+      <div class="overflow-x-auto rounded-2xl border border-slate-100 mb-4"><table class="sfh-table w-full text-sm">
+        <thead class="bg-slate-50 text-slate-500"><tr><th>งาน</th><th class="text-right">คน</th><th class="text-right">รวมรับ</th><th class="text-right">รวมหัก</th><th class="text-right">รับสุทธิ</th><th>ตรวจยอดรวม</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${imp.sheets.map(s => s.skipped
+          ? `<tr><td class="text-slate-400">${esc(s.name)}</td><td colspan="5" class="text-xs text-slate-400">ข้าม: ${esc(s.reason)}</td></tr>`
+          : `<tr><td>${esc(s.unit)}</td><td class="text-right">${s.people.length}</td><td class="text-right">${formatMoney(s.totals.income, { unit: false })}</td>
+              <td class="text-right">${formatMoney(s.totals.deduction, { unit: false })}</td><td class="text-right font-medium">${formatMoney(s.totals.net, { unit: false })}</td>
+              <td>${s.issues.some(i => i.level === 'error') ? `<span class="badge bg-blush-100 text-blush-500">${ic('x-circle', 'w-3 h-3')} ไม่ตรง</span>`
+                : s.checkedTotals ? `<span class="badge bg-mint-100 text-mint-600">${ic('check', 'w-3 h-3')} ตรงกับแถวรวมทั้งสิ้น</span>` : `<span class="badge bg-cream-100 text-cream-600">${ic('alert-triangle', 'w-3 h-3')} ตรวจไม่ได้</span>`}</td></tr>`).join('')}</tbody>
+        <tfoot><tr class="bg-mint-50/60 font-semibold"><td>รวมทั้งไฟล์</td><td class="text-right">${imp.people.length}</td><td class="text-right">${formatMoney(imp.totals.income, { unit: false })}</td>
+          <td class="text-right">${formatMoney(imp.totals.deduction, { unit: false })}</td><td class="text-right">${formatMoney(imp.totals.net, { unit: false })}</td><td></td></tr></tfoot>
+      </table></div>
+      ${issues.length ? `<div class="mb-4"><div class="text-sm font-medium text-slate-600 mb-2">ผลการตรวจสอบ</div>
+        <ul class="space-y-1.5">${shown.map(i => `<li class="flex items-start gap-2 rounded-xl ${lv[i.level][2]} px-3 py-2 text-sm">${ic(lv[i.level][0], `w-4 h-4 mt-0.5 shrink-0 ${lv[i.level][1]}`)}
+          <div class="min-w-0"><span class="text-xs text-slate-400">${esc(i.where)}</span><div class="text-slate-700">${esc(i.msg)}</div></div></li>`).join('')}</ul>
+        ${issues.length > shown.length ? `<button class="btn btn-ghost btn-sm mt-2" data-pr="imp-all-issues" data-f="${imp.id}">ดูทั้งหมด ${issues.length} รายการ</button>` : ''}</div>`
+        : `<div class="rounded-2xl bg-mint-50 border border-mint-200 px-4 py-3 mb-4 text-sm text-mint-600">${ic('check-circle-2', 'w-4 h-4 inline')} ตรวจสอบผ่านทั้งหมด: ยอดรายคนและยอดรวมทุกงานตรงกับไฟล์</div>`}
+      <details class="mb-4 rounded-2xl border border-slate-100"><summary class="px-4 py-2.5 text-sm text-slate-600 flex items-center gap-2">${ic('list', 'w-4 h-4')} รายชื่อทั้งหมด (${imp.people.length}) – คลิกชื่อเพื่อดูตัวอย่างสลิป</summary>
+        <div class="max-h-80 overflow-auto border-t border-slate-100"><table class="sfh-table w-full text-sm"><tbody class="divide-y divide-slate-100">
+          ${imp.people.map((p, i) => `<tr><td class="text-slate-400 w-10">${i + 1}</td><td><button class="text-left hover:text-brand-600" data-pr="imp-preview" data-f="${imp.id}" data-i="${i}">${esc(p.full_name || '(ไม่มีชื่อ)')}</button>
+            ${p.errors.length ? ic('x-circle', 'w-3.5 h-3.5 inline text-blush-500') : (p.warnings.length || (p.compare || []).length) ? ic('alert-triangle', 'w-3.5 h-3.5 inline text-cream-500') : ''}</td>
+            <td class="text-xs text-slate-500">${esc(p.unit_name)}</td><td class="text-right">${formatMoney(p.net_amount, { unit: false })}</td></tr>`).join('')}
+        </tbody></table></div></details>
+      <div class="flex flex-col sm:flex-row sm:items-center gap-3 pt-3 border-t border-slate-100">
+        <div class="flex-1 text-sm ${ready ? 'text-slate-500' : 'text-blush-500'}">${!imp.staff_group ? 'กรุณาเลือกกลุ่มบุคลากร' : c.errors ? 'แก้ไขไฟล์ Excel ให้ถูกต้อง แล้วนำเข้าใหม่' :
+          exists ? `${ic('alert-triangle', 'w-4 h-4 inline text-cream-500')} มีงวด ${TH_MONTHS[imp.month - 1]} ${imp.year} (${PAYROLL_GROUPS[imp.staff_group]}) อยู่แล้ว (${PAYROLL_STATUS[exists.status].label}) – ระบบจะถามก่อนแทนที่` : 'พร้อมนำเข้า: งวดจะอยู่ในสถานะ "ร่าง" จนกว่าจะกดเผยแพร่'}</div>
+        <button class="btn btn-primary" data-pr="imp-go" data-f="${imp.id}" ${ready ? '' : 'disabled'}>${ic('database', 'w-4 h-4')} นำเข้า ${formatNumber(imp.people.length)} รายการ</button>
+      </div>
+    </div>`;
+  }).join('');
+  refreshIcons();
+}
+async function payrollDoImport(el, imp, replace = false) {
+  if (!requirePermission('payroll.manage')) return;
+  const c = payrollImportCounts(imp);
+  if (c.errors || !imp.staff_group || !imp.month || !imp.year) return showToast('ข้อมูลยังไม่พร้อมนำเข้า', 'warning');
+  const period = {
+    period_year: imp.year, period_month: imp.month, staff_group: imp.staff_group, org_title: imp.org_title || '', org_subtitle: imp.org_subtitle || '',
+    source_filename: imp.fileName, sheet_count: imp.sheets.filter(s => !s.skipped).length,
+  };
+  const slips = imp.people.map(p => ({
+    full_name: p.full_name, employee_type: p.employee_type, unit_name: p.unit_name, sub_unit: p.sub_unit || '', sheet_name: p.sheet,
+    incomes: p.incomes, deductions: p.deductions, total_income: p.total_income, total_deduction: p.total_deduction, net_amount: p.net_amount,
+    warnings: [...p.warnings, ...(p.compare || [])],
+  }));
+  const r = await rpcSecure('sfh_payroll_import', { p_period: period, p_slips: slips, p_replace: replace }, { loaderText: `กำลังนำเข้า ${slips.length} รายการ...`, error: 'นำเข้าไม่สำเร็จ' });
+  if (!r.ok) return;
+  if (r.data?.code === 'EXISTS') {
+    const ok = await confirmModal({
+      title: 'มีงวดนี้อยู่แล้ว', danger: true, icon: 'copy', confirmText: 'แทนที่ข้อมูลเดิม', confirmIcon: 'replace',
+      message: `${payrollPeriodText(period)} (${PAYROLL_GROUPS[period.staff_group]}) มีข้อมูลอยู่แล้ว ${formatNumber(r.data.employee_count)} รายการ (${PAYROLL_STATUS[r.data.status]?.label})<br>ต้องการ <b>แทนที่ด้วยไฟล์นี้</b> หรือไม่? งวดจะกลับเป็นสถานะ "ร่าง"`,
+    });
+    if (ok) await payrollDoImport(el, imp, true);
+    return;
+  }
+  showToast(`นำเข้าเรียบร้อย ${formatNumber(r.data.count)} รายการ (สถานะร่าง)`, 'success', 5000);
+  Payroll.imports = Payroll.imports.filter(x => x !== imp);
+  const pr = await rpcSecure('sfh_payroll_periods', {}, { loader: false });
+  if (pr.ok) Payroll.periods = pr.data || [];
+  if (Payroll.imports.length) payrollDrawImports(el);
+  else await payrollShowPeriod(el, r.data.period_id);
+}
 /* ===== END MODULE: payroll ===== */
 
 
@@ -3449,7 +4274,7 @@ const MODULES = {
   saraban:       { render: renderSaraban },
   travel:        { render: renderComingSoon },
   register:      { render: renderComingSoon },
-  payroll:       { render: renderComingSoon },
+  payroll:       { render: renderPayroll },
 };
 
 
