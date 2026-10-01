@@ -2915,6 +2915,512 @@ async function deleteAnnouncement(a, onDone) {
 /* ===== END MODULE: announcements ===== */
 
 
+/* ===== MODULE: saraban (งานสารบรรณอิเล็กทรอนิกส์ e-Saraban) ===== */
+// คลังเอกสารราชการดิจิทัล: หนังสือเข้า/ส่ง, คำสั่ง/ประกาศ, ระเบียบ, บันทึกข้อความ/หนังสือเวียน, คู่มือ/แบบฟอร์ม
+// ตารางที่ใช้: saraban_categories, saraban_documents, saraban_files (module_saraban.sql)
+// Guest อ่านจาก v_public_saraban / v_public_saraban_files เท่านั้น
+Object.assign(TABLE_LABELS, { saraban_documents: 'เอกสารสารบรรณ', saraban_files: 'ไฟล์แนบสารบรรณ', saraban_categories: 'ประเภทเอกสาร' });
+
+const SARABAN_URGENCY = {
+  normal: { label: 'ปกติ', cls: 'bg-slate-100 text-slate-500' },
+  urgent: { label: 'ด่วน', cls: 'bg-cream-100 text-cream-600' },
+  very_urgent: { label: 'ด่วนมาก', cls: 'bg-blush-100 text-blush-500' },
+  most_urgent: { label: 'ด่วนที่สุด', cls: 'bg-blush-400 text-white' },
+};
+const SARABAN_ACCESS = {
+  public: { label: 'สาธารณะ', icon: 'globe', cls: 'bg-mint-100 text-mint-600', hint: 'บุคคลทั่วไปดูและดาวน์โหลดได้' },
+  internal: { label: 'ภายในหน่วยงาน', icon: 'building-2', cls: 'bg-brand-100 text-brand-600', hint: 'เฉพาะเจ้าหน้าที่ในหน่วยงานเดียวกัน' },
+  restricted: { label: 'ลับ/จำกัดสิทธิ์', icon: 'lock', cls: 'bg-blush-100 text-blush-500', hint: 'เฉพาะผู้บันทึกและผู้มีสิทธิ์ view_all' },
+};
+const SARABAN_MAX_FILES = 10;
+const SARABAN_MAX_SIZE = 20 * 1024 * 1024;
+const SARABAN_ACCEPT = '.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.txt,.csv,.zip,.jpg,.jpeg,.png,.webp,.gif';
+const Saraban = { cats: [], docs: [], group: '' };
+
+/** ปีงบประมาณไทย (1 ต.ค. – 30 ก.ย.) → พ.ศ. */
+function thaiFiscalYear(value) {
+  const d = value ? new Date(value) : new Date();
+  if (isNaN(d)) return null;
+  return d.getFullYear() + (d.getMonth() >= 9 ? 1 : 0) + 543;
+}
+const sarabanReg = (d) => d.reg_no ? `${d.reg_no}/${d.reg_year}` : '-';
+const sarabanFY = (d) => d.reg_year || thaiFiscalYear(d.doc_date || d.created_at);
+function sarabanFileMeta(name = '', mime = '') {
+  const ext = String(name).split('.').pop().toLowerCase();
+  if (ext === 'pdf' || mime === 'application/pdf') return { icon: 'file-text', color: '#D95C8A', kind: 'pdf' };
+  if (/^(doc|docx|odt|txt)$/.test(ext)) return { icon: 'file-type', color: '#3B8FD4', kind: 'doc' };
+  if (/^(xls|xlsx|ods|csv)$/.test(ext)) return { icon: 'file-spreadsheet', color: '#3AA57C', kind: 'sheet' };
+  if (/^(ppt|pptx)$/.test(ext)) return { icon: 'presentation', color: '#F0A04B', kind: 'slide' };
+  if (/^(jpg|jpeg|png|webp|gif)$/.test(ext) || /^image\//.test(mime)) return { icon: 'image', color: '#8670D6', kind: 'image' };
+  if (ext === 'zip') return { icon: 'file-archive', color: '#64748B', kind: 'zip' };
+  return { icon: 'file', color: '#64748B', kind: 'other' };
+}
+const sarabanDownloadUrl = (f) => sb.storage.from(STORAGE_BUCKET).getPublicUrl(f.file_path, { download: f.file_name }).data.publicUrl;
+const sarabanCanInternal = () => isLoggedIn() && hasPermission('saraban.view');
+const sarabanCan = (d, action) => isLoggedIn() && hasPermission('saraban.' + action) && canEditRecord(d, 'saraban.view_all');
+const urgencyBadge = (u) => u && u !== 'normal' ? `<span class="badge ${SARABAN_URGENCY[u].cls}">${ic('zap', 'w-3 h-3')} ${SARABAN_URGENCY[u].label}</span>` : '';
+const accessBadge = (a) => { const m = SARABAN_ACCESS[a] || SARABAN_ACCESS.public; return `<span class="badge ${m.cls}">${ic(m.icon, 'w-3 h-3')} ${m.label}</span>`; };
+const catBadge = (c) => c ? `<span class="badge border" style="background:${hexToRgba(c.color, .12)};color:${c.color};border-color:${hexToRgba(c.color, .3)}">${ic(c.icon, 'w-3 h-3')} ${esc(c.name)}</span>` : '';
+
+/** โหลดประเภทเอกสาร + เอกสาร ตามสิทธิ์ของผู้ใช้ */
+async function sarabanLoad() {
+  if (!sarabanCanInternal()) {
+    const r = await dbMany([
+      s => s.from('saraban_categories').select('*').eq('is_active', true).order('sort_order'),
+      s => s.from('v_public_saraban').select('*').order('created_at', { ascending: false }),
+    ], { loaderText: 'กำลังโหลดเอกสาร...', error: 'โหลดเอกสารไม่สำเร็จ' });
+    if (!r.ok) return false;
+    Saraban.cats = r.data[0];
+    Saraban.docs = r.data[1].map(d => ({
+      ...d, access_level: 'public', files: null,
+      cat: { cat_key: d.cat_key, name: d.category_name, group_key: d.group_key, group_name: d.group_name, icon: d.category_icon, color: d.category_color },
+    }));
+    return true;
+  }
+  const u = currentUser();
+  let q = sb.from('saraban_documents')
+    .select('*, saraban_categories(*), organizations(name, short_name), saraban_files(id, file_name, file_path, file_url, mime_type, file_size, sort_order)')
+    .order('created_at', { ascending: false });
+  if (!isSuperAdmin()) {
+    const o = u.org_id;
+    q = hasPermission('saraban.view_all')
+      ? q.or(`access_level.eq.public,org_id.eq.${o}`)
+      : q.or(`access_level.eq.public,and(org_id.eq.${o},access_level.eq.internal),and(org_id.eq.${o},created_by.eq.${u.id})`);
+  }
+  const r = await dbMany([s => s.from('saraban_categories').select('*').order('sort_order'), () => q], { loaderText: 'กำลังโหลดเอกสาร...', error: 'โหลดเอกสารไม่สำเร็จ' });
+  if (!r.ok) return false;
+  Saraban.cats = r.data[0];
+  Saraban.docs = r.data[1].map(d => ({
+    ...d, cat: d.saraban_categories, org_name: d.organizations?.name, org_short_name: d.organizations?.short_name,
+    files: (d.saraban_files || []).sort((a, b) => a.sort_order - b.sort_order), file_count: (d.saraban_files || []).length,
+  }));
+  return true;
+}
+
+function sarabanCard(d) {
+  const c = d.cat || {};
+  return `<div class="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
+    <div class="flex items-start gap-3">
+      <span class="w-11 h-11 rounded-2xl grid place-items-center shrink-0" style="background:${hexToRgba(c.color, .15)};color:${c.color}">${ic(c.icon || 'file-text', 'w-5 h-5')}</span>
+      <div class="min-w-0 flex-1">
+        <button type="button" class="text-left font-medium text-slate-800 leading-snug line-clamp-2 hover:text-brand-600" data-act="view" data-id="${d.id}">${esc(d.title)}</button>
+        <div class="text-xs text-slate-400 mt-1">${d.reg_no ? `ทะเบียน ${sarabanReg(d)} · ` : ''}${d.doc_no ? esc(d.doc_no) + ' · ' : ''}${formatThaiDate(d.doc_date || d.created_at)}</div>
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-1.5 mt-3">${catBadge(c)}${urgencyBadge(d.urgency)}${isLoggedIn() ? accessBadge(d.access_level) : ''}</div>
+    <div class="flex items-center justify-between gap-2 mt-3 pt-3 border-t border-slate-100">
+      <span class="text-xs text-slate-400 flex items-center gap-1">${ic('paperclip', 'w-3.5 h-3.5')} ${d.file_count || 0} ไฟล์ · ${ic('download', 'w-3.5 h-3.5')} ${d.download_count || 0}</span>
+      <div class="flex gap-1">${sarabanActions(d)}</div>
+    </div>
+  </div>`;
+}
+function sarabanActions(d) {
+  return `<button class="btn-icon" data-act="view" data-id="${d.id}" title="ดูรายละเอียด/ดาวน์โหลด">${ic('eye')}</button>
+    ${sarabanCan(d, 'update') ? `<button class="btn-icon" data-act="edit" data-id="${d.id}" title="แก้ไข">${ic('pencil')}</button>` : ''}
+    ${sarabanCan(d, 'delete') ? `<button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-act="delete" data-id="${d.id}" title="ลบ">${ic('trash-2')}</button>` : ''}`;
+}
+
+async function renderSaraban(el, mod) {
+  const internal = sarabanCanInternal();
+  Saraban.group = '';
+  el.innerHTML = pageHeader({
+    title: mod?.name || 'งานสารบรรณอิเล็กทรอนิกส์', icon: 'archive', tone: 'cream',
+    subtitle: internal ? 'คลังเอกสารราชการดิจิทัล – ค้นหา ดาวน์โหลด และจัดเก็บเอกสาร (เจ้าหน้าที่แก้ไข/ลบได้เฉพาะเอกสารที่ตนเองบันทึก)' : 'ค้นหาและดาวน์โหลดเอกสารราชการที่เผยแพร่ต่อสาธารณะ',
+    actions: `${isLoggedIn() && hasPermission('saraban.manage_types') ? `<button class="btn btn-ghost" data-act="types">${ic('tags')} ประเภทเอกสาร</button>` : ''}
+      ${isLoggedIn() && hasPermission('saraban.export') ? `<button class="btn btn-ghost" data-act="export">${ic('download')} ส่งออก CSV</button>` : ''}
+      ${isLoggedIn() && hasPermission('saraban.create') ? `<button class="btn btn-primary" data-act="add">${ic('file-plus')} เพิ่มเอกสาร</button>` : ''}`,
+  }) + `<div id="sbGroups" class="flex flex-wrap gap-2 mb-4"></div><div id="sbTable">${skeletonCards(4, 'h-20')}</div>`;
+  refreshIcons();
+  if (!(await sarabanLoad())) { $('#sbTable', el).innerHTML = errorState('โหลดเอกสารไม่สำเร็จ'); return; }
+
+  const years = [...new Set(Saraban.docs.map(sarabanFY).filter(Boolean))].sort((a, b) => b - a);
+  const filters = [
+    { key: 'category_id', label: 'ทุกประเภท', options: Saraban.cats.map(c => ({ value: c.cat_key, label: c.name })), match: (d, v) => d.cat?.cat_key === v },
+    { key: 'fy', label: 'ทุกปีงบประมาณ', options: years.map(y => ({ value: String(y), label: `ปีงบประมาณ ${y}` })), match: (d, v) => String(sarabanFY(d)) === v },
+    { key: 'urgency', label: 'ทุกความเร่งด่วน', options: Object.entries(SARABAN_URGENCY).map(([k, m]) => ({ value: k, label: m.label })) },
+  ];
+  if (internal) filters.push({ key: 'access_level', label: 'ทุกระดับการเข้าถึง', options: [...Object.entries(SARABAN_ACCESS).map(([k, m]) => ({ value: k, label: m.label })), { value: '__mine', label: 'เอกสารที่ฉันบันทึก' }],
+    match: (d, v) => v === '__mine' ? d.created_by === currentUser().id : d.access_level === v });
+
+  const table = createDataTable($('#sbTable', el), {
+    pageSize: 10, filters,
+    searchKeys: ['title', 'doc_no', 'from_org', 'to_org', 'keywords', 'summary', 'reg_label', 'cat.name'],
+    searchPlaceholder: 'ค้นหาเรื่อง, เลขที่หนังสือ, เลขทะเบียน, จาก/ถึง, คำค้น...',
+    columns: [
+      { key: 'reg_no', label: 'ทะเบียน / เลขที่', class: 'whitespace-nowrap', render: d => `<div class="font-medium text-slate-700">${sarabanReg(d)}</div><div class="text-xs text-slate-400">${esc(d.doc_no || '-')}</div>` },
+      { key: 'title', label: 'เรื่อง', render: d => `<button type="button" class="text-left font-medium text-slate-700 hover:text-brand-600 line-clamp-2 max-w-md" data-act="view" data-id="${d.id}">${esc(d.title)}</button>
+          <div class="flex flex-wrap gap-1 mt-1">${catBadge(d.cat)}${urgencyBadge(d.urgency)}${internal ? accessBadge(d.access_level) : ''}</div>` },
+      { key: 'from_org', label: 'จาก / ถึง', render: d => `<div class="text-xs text-slate-500 max-w-[14rem]"><div class="truncate">จาก: ${esc(d.from_org || '-')}</div><div class="truncate">ถึง: ${esc(d.to_org || '-')}</div></div>` },
+      { key: 'doc_date', label: 'ลงวันที่', class: 'whitespace-nowrap', render: d => `<span class="text-slate-600">${formatThaiDate(d.doc_date)}</span>` },
+      { key: 'file_count', label: 'ไฟล์', render: d => `<span class="badge bg-slate-100 text-slate-500">${ic('paperclip', 'w-3 h-3')} ${d.file_count || 0}</span>` },
+    ],
+    actions: sarabanActions, card: sarabanCard, emptyText: 'ไม่พบเอกสารตามเงื่อนไข',
+  });
+  const applyGroup = () => {
+    const groups = [];
+    Saraban.cats.forEach(c => { if (!groups.some(g => g.key === c.group_key)) groups.push({ key: c.group_key, name: c.group_name, icon: c.icon, color: c.color }); });
+    const count = (g) => Saraban.docs.filter(d => !g || d.cat?.group_key === g).length;
+    $('#sbGroups', el).innerHTML = [{ key: '', name: 'ทั้งหมด', icon: 'layers', color: '#5AA9E6' }, ...groups].map(g => {
+      const on = Saraban.group === g.key;
+      return `<button type="button" data-group="${g.key}" class="inline-flex items-center gap-2 rounded-2xl px-3.5 py-2 text-sm border transition ${on ? 'text-white shadow-md' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}"
+        style="${on ? `background:${g.color};border-color:${g.color}` : ''}">${ic(g.icon, 'w-4 h-4')} ${esc(g.name)}
+        <span class="rounded-full px-1.5 text-xs ${on ? 'bg-white/25' : 'bg-slate-100 text-slate-500'}">${count(g.key)}</span></button>`;
+    }).join('');
+    Saraban.docs.forEach(d => { d.reg_label = sarabanReg(d); });
+    table.setRows(Saraban.docs.filter(d => !Saraban.group || d.cat?.group_key === Saraban.group));
+    refreshIcons();
+  };
+  const refresh = async () => { if (await sarabanLoad()) applyGroup(); };
+  applyGroup();
+
+  el.onclick = async (e) => {
+    const g = e.target.closest('[data-group]');
+    if (g) { Saraban.group = g.dataset.group; applyGroup(); return; }
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const d = Saraban.docs.find(x => x.id === b.dataset.id);
+    switch (b.dataset.act) {
+      case 'view': openSarabanDetail(d); break;
+      case 'add': openSarabanForm(null, refresh); break;
+      case 'edit': openSarabanForm(d, refresh); break;
+      case 'delete': deleteSaraban(d, refresh); break;
+      case 'types': openSarabanTypes(refresh); break;
+      case 'export': {
+        if (!requirePermission('saraban.export')) return;
+        const rows = table.getFiltered();
+        downloadCSV(`saraban_${toInputDate()}`,
+          ['เลขทะเบียน', 'เลขที่หนังสือ', 'ประเภท', 'กลุ่มเอกสาร', 'เรื่อง', 'จาก', 'ถึง', 'ลงวันที่', 'วันที่รับ', 'ความเร่งด่วน', 'ระดับการเข้าถึง', 'จำนวนไฟล์', 'ดาวน์โหลด', 'หน่วยงาน'],
+          rows.map(x => [sarabanReg(x), x.doc_no, x.cat?.name, x.cat?.group_name, x.title, x.from_org, x.to_org, x.doc_date ? formatThaiDate(x.doc_date) : '', x.received_date ? formatThaiDate(x.received_date) : '',
+            SARABAN_URGENCY[x.urgency]?.label, SARABAN_ACCESS[x.access_level]?.label, x.file_count || 0, x.download_count || 0, x.org_name]));
+        logAudit('export', 'saraban_documents', null, { count: rows.length });
+        break;
+      }
+    }
+  };
+}
+
+async function openSarabanDetail(d) {
+  if (!d) return;
+  let files = d.files;
+  if (!files) {
+    const r = await db(s => s.from('v_public_saraban_files').select('*').eq('doc_id', d.id).order('sort_order'), { loaderText: 'กำลังโหลดไฟล์...', error: 'โหลดไฟล์ไม่สำเร็จ' });
+    files = r.data || [];
+  }
+  if (sb) sb.rpc('sfh_saraban_hit', { p_doc_id: d.id, p_kind: 'view' }).then(() => { d.view_count = (d.view_count || 0) + 1; });
+  const c = d.cat || {};
+  const row = (label, val) => val ? `<div class="flex flex-col sm:flex-row sm:gap-3 py-2 border-b border-slate-50"><dt class="text-slate-400 sm:w-36 shrink-0">${label}</dt><dd class="text-slate-700 min-w-0 break-words">${val}</dd></div>` : '';
+  const m = openModal({
+    title: esc(c.name || 'เอกสาร'), icon: c.icon || 'file-text', size: 'xl',
+    body: `<h2 class="text-lg md:text-xl font-semibold text-slate-800 leading-snug mb-2">${esc(d.title)}</h2>
+      <div class="flex flex-wrap gap-1.5 mb-4">${catBadge(c)}${urgencyBadge(d.urgency)}${isLoggedIn() ? accessBadge(d.access_level) : ''}</div>
+      <div class="grid lg:grid-cols-5 gap-5">
+        <dl class="lg:col-span-2 text-sm">
+          ${row('เลขทะเบียน', d.reg_no ? `${sarabanReg(d)} <span class="text-xs text-slate-400">(ปีงบประมาณ ${d.reg_year})</span>` : '')}
+          ${row('เลขที่หนังสือ', esc(d.doc_no || ''))}
+          ${row('ลงวันที่', d.doc_date ? formatThaiDate(d.doc_date, { long: true }) : '')}
+          ${row('วันที่รับ', d.received_date ? formatThaiDate(d.received_date, { long: true }) : '')}
+          ${row('จาก', esc(d.from_org || ''))}
+          ${row('ถึง/เรียน', esc(d.to_org || ''))}
+          ${row('ความเร่งด่วน', SARABAN_URGENCY[d.urgency]?.label)}
+          ${row('หน่วยงานเจ้าของ', esc(d.org_name || ''))}
+          ${row('บันทึกเมื่อ', formatThaiDate(d.created_at, { time: true }))}
+          ${row('สถิติ', `${ic('eye', 'w-3.5 h-3.5 inline')} ${formatNumber((d.view_count || 0) + 1)} ครั้ง · ${ic('download', 'w-3.5 h-3.5 inline')} <span data-dlcount>${formatNumber(d.download_count || 0)}</span> ครั้ง`)}
+          ${d.summary ? `<div class="pt-3"><div class="text-slate-400 mb-1">สาระสำคัญ</div><div class="prose-sfh text-sm">${esc(d.summary)}</div></div>` : ''}
+          ${d.keywords ? `<div class="pt-3 flex flex-wrap gap-1.5">${d.keywords.split(',').map(k => k.trim()).filter(Boolean).map(k => `<span class="badge bg-lilac-50 text-lilac-600 border border-lilac-100">#${esc(k)}</span>`).join('')}</div>` : ''}
+        </dl>
+        <div class="lg:col-span-3">
+          <div class="text-sm font-medium text-slate-600 mb-2">${ic('paperclip', 'w-4 h-4 inline')} ไฟล์แนบ (${files.length})</div>
+          ${files.length ? `<ul class="space-y-2">${files.map(f => { const fm = sarabanFileMeta(f.file_name, f.mime_type); return `<li class="flex items-center gap-3 rounded-2xl border border-slate-100 p-2.5 bg-white">
+              <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0" style="background:${hexToRgba(fm.color, .12)};color:${fm.color}">${ic(fm.icon, 'w-5 h-5')}</span>
+              <div class="min-w-0 flex-1"><div class="text-sm text-slate-700 truncate" title="${esc(f.file_name)}">${esc(f.file_name)}</div><div class="text-xs text-slate-400">${formatBytes(f.file_size)}</div></div>
+              ${['pdf', 'image'].includes(fm.kind) ? `<button type="button" class="btn btn-soft btn-sm" data-preview="${f.id}">${ic('eye', 'w-3.5 h-3.5')} <span class="hidden sm:inline">ดูตัวอย่าง</span></button>` : ''}
+              <a class="btn btn-primary btn-sm" href="${esc(sarabanDownloadUrl(f))}" data-dl="${f.id}" rel="noopener">${ic('download', 'w-3.5 h-3.5')} <span class="hidden sm:inline">ดาวน์โหลด</span></a></li>`; }).join('')}</ul>
+            <div id="sbPreview" class="mt-3"></div>`
+          : `<div class="rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-400">${ic('file-x', 'w-6 h-6 mx-auto mb-1')} ไม่มีไฟล์แนบ</div>`}
+        </div>
+      </div>`,
+    footer: `<button class="btn btn-ghost" data-close>ปิด</button>`,
+  });
+  m.el.addEventListener('click', (e) => {
+    const pv = e.target.closest('[data-preview]');
+    if (pv) {
+      const f = files.find(x => x.id === pv.dataset.preview);
+      const kind = sarabanFileMeta(f.file_name, f.mime_type).kind;
+      $('#sbPreview', m.el).innerHTML = kind === 'pdf'
+        ? `<iframe src="${esc(f.file_url)}" class="w-full h-[60vh] rounded-2xl border border-slate-100 bg-slate-50" title="${esc(f.file_name)}"></iframe>`
+        : `<img src="${esc(f.file_url)}" alt="${esc(f.file_name)}" class="w-full max-h-[60vh] object-contain rounded-2xl bg-slate-50" onerror="imgError(this)">`;
+      return;
+    }
+    if (e.target.closest('[data-dl]') && sb) {
+      sb.rpc('sfh_saraban_hit', { p_doc_id: d.id, p_kind: 'download' }).then(() => {
+        d.download_count = (d.download_count || 0) + 1;
+        const c2 = $('[data-dlcount]', m.el); if (c2) c2.textContent = formatNumber(d.download_count);
+      });
+    }
+  });
+}
+
+/** อัปโหลดไฟล์เอกสาร (รูปภาพบีบอัดเป็น WebP, ไฟล์อื่นอัปโหลดตามจริง) */
+async function sarabanUpload(item, folder) {
+  const ext = item.upload.type === 'image/webp' ? 'webp' : (String(item.name).split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
+  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await sb.storage.from(STORAGE_BUCKET).upload(path, item.upload, { contentType: item.upload.type || 'application/octet-stream', cacheControl: '3600', upsert: false });
+  if (error) throw error;
+  return { path, url: sb.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl };
+}
+
+function openSarabanForm(d, onSaved) {
+  if (!requirePermission(d ? 'saraban.update' : 'saraban.create')) return;
+  if (d && !sarabanCan(d, 'update')) return showToast('แก้ไขได้เฉพาะเอกสารที่ตนเองบันทึก', 'error');
+  const me = currentUser();
+  const cats = Saraban.cats.filter(c => c.is_active || c.id === d?.category_id);
+  const groups = [...new Set(cats.map(c => c.group_name))];
+  const existing = (d?.files || []).map(f => ({ ...f, removed: false }));
+  const pending = [];   // { name, size, upload(Blob), note }
+  const m = openModal({
+    title: d ? 'แก้ไขเอกสาร' : 'เพิ่มเอกสาร', icon: d ? 'file-pen' : 'file-plus', size: 'xl',
+    body: `<form id="sbForm" class="space-y-4">
+      <div class="grid sm:grid-cols-3 gap-4">
+        <div class="sm:col-span-2"><label class="label">ประเภทเอกสาร *</label>
+          <select name="category_id" class="input" required>${groups.map(g => `<optgroup label="${esc(g)}">${cats.filter(c => c.group_name === g).map(c => `<option value="${c.id}" ${(d?.category_id || cats[0]?.id) === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</optgroup>`).join('')}</select></div>
+        <div><label class="label">เลขทะเบียน</label>${d
+          ? `<div class="flex items-center gap-2"><input name="reg_no" type="number" min="1" class="input" value="${d.reg_no ?? ''}" placeholder="-"><span class="text-sm text-slate-400 whitespace-nowrap">/ ${d.reg_year || '-'}</span></div>`
+          : `<div id="sbRegHint" class="input bg-slate-50 text-slate-500 text-xs leading-5"></div>`}</div>
+      </div>
+      <div class="grid sm:grid-cols-3 gap-4">
+        <div><label class="label">เลขที่หนังสือ</label><input name="doc_no" class="input" value="${esc(d?.doc_no || '')}" placeholder="เช่น สท 52301/1520"></div>
+        <div><label class="label">ลงวันที่</label><input name="doc_date" type="date" class="input" value="${d?.doc_date || (d ? '' : toInputDate())}"></div>
+        <div id="sbRecvWrap"><label class="label">วันที่รับ</label><input name="received_date" type="date" class="input" value="${d?.received_date || ''}"></div>
+      </div>
+      <div><label class="label">เรื่อง *</label><textarea name="title" class="input" rows="2" required maxlength="500">${esc(d?.title || '')}</textarea></div>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label">จาก</label><input name="from_org" class="input" value="${esc(d?.from_org || '')}"></div>
+        <div><label class="label">ถึง/เรียน</label><input name="to_org" class="input" value="${esc(d?.to_org || '')}"></div>
+      </div>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div><label class="label">ความเร่งด่วน</label><select name="urgency" class="input">${Object.entries(SARABAN_URGENCY).map(([k, v]) => `<option value="${k}" ${(d?.urgency || 'normal') === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></div>
+        ${isSuperAdmin() ? `<div><label class="label">หน่วยงานเจ้าของ</label><select name="org_id" class="input" id="sbOrgSel"><option value="${esc(d?.org_id || me.org_id || '')}">กำลังโหลด...</option></select></div>` : '<div></div>'}
+      </div>
+      <div><label class="label">ระดับการเข้าถึง</label>
+        <div class="grid sm:grid-cols-3 gap-2">${Object.entries(SARABAN_ACCESS).map(([k, v]) => `<label class="flex items-start gap-2.5 rounded-2xl border border-slate-200 p-3 cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-brand-50/60">
+          <input type="radio" name="access_level" value="${k}" class="mt-1 accent-brand-500" ${(d?.access_level || 'internal') === k ? 'checked' : ''}>
+          <span><span class="flex items-center gap-1 text-sm font-medium text-slate-700">${ic(v.icon, 'w-3.5 h-3.5')} ${v.label}</span><span class="text-xs text-slate-400">${v.hint}</span></span></label>`).join('')}</div></div>
+      <div><label class="label">สาระสำคัญ</label><textarea name="summary" class="input" rows="3">${esc(d?.summary || '')}</textarea></div>
+      <div><label class="label">คำค้น (คั่นด้วย ,)</label><input name="keywords" class="input" value="${esc(d?.keywords || '')}" placeholder="เช่น งบประมาณ, 2570"></div>
+      <div><label class="label">ไฟล์แนบ (สูงสุด ${SARABAN_MAX_FILES} ไฟล์ · ไฟล์ละไม่เกิน 20 MB)</label>
+        <div class="rounded-2xl border-2 border-dashed border-brand-200 bg-brand-50/50 p-3">
+          <ul id="sbFileList" class="space-y-2 mb-3"></ul>
+          <input type="file" id="sbFileInput" class="hidden" multiple accept="${SARABAN_ACCEPT}">
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="btn btn-soft btn-sm" id="sbChoose">${ic('upload', 'w-4 h-4')} เลือกไฟล์</button>
+            <span class="text-xs text-slate-400">PDF, Word, Excel, PowerPoint, รูปภาพ, ZIP · รูปภาพจะถูกบีบอัดเป็น WebP อัตโนมัติ</span>
+          </div>
+        </div></div>
+    </form>`,
+    footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button><button class="btn btn-primary" type="submit" form="sbForm">${ic('save')} บันทึก</button>`,
+  });
+  const form = $('#sbForm', m.el);
+  const catOf = () => cats.find(c => c.id === form.category_id.value);
+  const updateCatUi = () => {
+    const c = catOf();
+    $('#sbRecvWrap', m.el).classList.toggle('hidden', c?.cat_key !== 'incoming');
+    const hint = $('#sbRegHint', m.el);
+    if (hint) hint.innerHTML = c?.auto_number
+      ? `${ic('hash', 'w-3.5 h-3.5 inline')} ออกเลขอัตโนมัติ<br>ปีงบประมาณ ${thaiFiscalYear(form.received_date.value || form.doc_date.value || new Date())}`
+      : 'ไม่ออกเลขทะเบียน';
+    refreshIcons();
+  };
+  const drawFiles = () => {
+    const live = existing.filter(f => !f.removed);
+    $('#sbFileList', m.el).innerHTML = [...live.map(f => ({ ...f, kind: 'old' })), ...pending.map((f, i) => ({ ...f, kind: 'new', idx: i }))].map(f => {
+      const fm = sarabanFileMeta(f.name || f.file_name, f.mime_type || f.upload?.type);
+      return `<li class="flex items-center gap-3 rounded-xl bg-white p-2 border border-slate-100">
+        <span class="w-9 h-9 rounded-lg grid place-items-center shrink-0" style="background:${hexToRgba(fm.color, .12)};color:${fm.color}">${ic(fm.icon, 'w-4 h-4')}</span>
+        <div class="min-w-0 flex-1"><div class="text-sm text-slate-700 truncate">${esc(f.name || f.file_name)}</div>
+          <div class="text-xs text-slate-400">${f.kind === 'new' ? `<span class="text-mint-600">ไฟล์ใหม่</span> · ${f.note || formatBytes(f.size)}` : formatBytes(f.file_size)}</div></div>
+        <button type="button" class="btn-icon hover:!text-blush-500" ${f.kind === 'new' ? `data-rm-new="${f.idx}"` : `data-rm-old="${f.id}"`} title="นำออก">${ic('x')}</button></li>`;
+    }).join('') || '<li class="text-sm text-slate-400 text-center py-2">ยังไม่มีไฟล์แนบ</li>';
+    refreshIcons();
+  };
+  form.category_id.onchange = updateCatUi;
+  form.doc_date.onchange = updateCatUi;
+  form.received_date.onchange = updateCatUi;
+  $('#sbChoose', m.el).onclick = () => $('#sbFileInput', m.el).click();
+  $('#sbFileInput', m.el).onchange = async (e) => {
+    const chosen = [...e.target.files];
+    e.target.value = '';
+    for (const f of chosen) {
+      if (existing.filter(x => !x.removed).length + pending.length >= SARABAN_MAX_FILES) { showToast(`แนบได้สูงสุด ${SARABAN_MAX_FILES} ไฟล์`, 'warning'); break; }
+      if (f.size > SARABAN_MAX_SIZE) { showToast(`${f.name} มีขนาดเกิน 20 MB`, 'warning'); continue; }
+      const ext = f.name.split('.').pop().toLowerCase();
+      if (!SARABAN_ACCEPT.split(',').includes('.' + ext)) { showToast(`ไม่รองรับไฟล์ .${ext}`, 'warning'); continue; }
+      if (/^image\/(jpeg|png|webp)$/.test(f.type)) {
+        showLoader(true, 'กำลังบีบอัดรูปภาพ...');
+        try {
+          const c = await compressImage(f, { maxSide: 1600, quality: 0.75 });
+          pending.push({ name: f.name.replace(/\.[^.]+$/, '') + '.' + c.ext, size: c.compressedSize, upload: c.blob,
+            note: `${formatBytes(c.originalSize)} → ${formatBytes(c.compressedSize)} (บีบอัด ${c.ext.toUpperCase()})` });
+        } catch (err) { showToast('บีบอัดรูปภาพไม่สำเร็จ: ' + err.message, 'error'); }
+        finally { showLoader(false); }
+      } else pending.push({ name: f.name, size: f.size, upload: f });
+    }
+    drawFiles();
+  };
+  m.el.addEventListener('click', (e) => {
+    const rn = e.target.closest('[data-rm-new]'); if (rn) { pending.splice(+rn.dataset.rmNew, 1); drawFiles(); }
+    const ro = e.target.closest('[data-rm-old]'); if (ro) { existing.find(f => f.id === ro.dataset.rmOld).removed = true; drawFiles(); }
+  });
+  if (isSuperAdmin()) db(s => s.from('organizations').select('id, name').order('code'), { loader: false, silent: true }).then(r => {
+    const sel = $('#sbOrgSel', m.el); const cur = d?.org_id || me.org_id;
+    if (sel && r.ok) sel.innerHTML = r.data.map(o => `<option value="${o.id}" ${o.id === cur ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
+  });
+  updateCatUi(); drawFiles();
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!requirePermission(d ? 'saraban.update' : 'saraban.create')) return;
+    const title = form.title.value.trim();
+    if (!title) return showToast('กรุณากรอกเรื่อง', 'warning');
+    const c = catOf();
+    const payload = {
+      category_id: c.id, doc_no: form.doc_no.value.trim() || null, doc_date: form.doc_date.value || null,
+      received_date: c.cat_key === 'incoming' ? (form.received_date.value || null) : null,
+      title, from_org: form.from_org.value.trim() || null, to_org: form.to_org.value.trim() || null,
+      urgency: form.urgency.value, access_level: form.access_level.value,
+      summary: form.summary.value.trim() || null,
+      keywords: form.keywords.value.split(',').map(x => x.trim()).filter(Boolean).join(', ') || null,
+    };
+    const orgId = isSuperAdmin() && form.org_id ? (form.org_id.value || null) : (d?.org_id || me.org_id);
+    if (d) {
+      payload.org_id = orgId;
+      const rn = form.reg_no.value.trim();
+      payload.reg_no = rn ? parseInt(rn, 10) : null;
+      if (d.category_id !== c.id) payload.reg_year = d.reg_year;   // คงปีงบประมาณเดิม
+    }
+    // 1) อัปโหลดไฟล์ใหม่ก่อน
+    const uploaded = [];
+    showLoader(true, `กำลังอัปโหลดไฟล์ 0/${pending.length}...`);
+    try {
+      for (const [i, f] of pending.entries()) {
+        $('#loaderText').textContent = `กำลังอัปโหลดไฟล์ ${i + 1}/${pending.length}...`;
+        const up = await sarabanUpload(f, `saraban/${orgId || 'common'}/${thaiFiscalYear()}`);
+        uploaded.push({ ...up, f });
+      }
+    } catch (err) {
+      showLoader(false);
+      uploaded.forEach(u => deleteFile(u.path));
+      return showToast('อัปโหลดไฟล์ไม่สำเร็จ: ' + dbErrorMessage(err), 'error', 6000);
+    }
+    showLoader(false);
+    // 2) บันทึกเอกสาร
+    const r = d
+      ? await db(s => s.from('saraban_documents').update(payload).eq('id', d.id).select().single(), { loaderText: 'กำลังบันทึกเอกสาร...', error: 'บันทึกเอกสารไม่สำเร็จ' })
+      : await db(s => s.from('saraban_documents').insert({ ...payload, org_id: orgId, created_by: me.id }).select().single(), { loaderText: 'กำลังบันทึกเอกสาร...', error: 'เพิ่มเอกสารไม่สำเร็จ' });
+    if (!r.ok) { uploaded.forEach(u => deleteFile(u.path)); return; }
+    const doc = r.data;
+    // 3) บันทึกรายการไฟล์ใหม่ / ลบไฟล์ที่นำออก
+    const keepCount = existing.filter(f => !f.removed).length;
+    if (uploaded.length) {
+      const fr = await db(s => s.from('saraban_files').insert(uploaded.map((u, i) => ({
+        doc_id: doc.id, org_id: doc.org_id, file_name: u.f.name, file_path: u.path, file_url: u.url,
+        mime_type: u.f.upload.type || null, file_size: u.f.size, sort_order: keepCount + i, created_by: me.id,
+      }))), { loaderText: 'กำลังบันทึกไฟล์แนบ...', error: 'บันทึกไฟล์แนบไม่สำเร็จ' });
+      if (!fr.ok) uploaded.forEach(u => deleteFile(u.path));
+    }
+    const removed = existing.filter(f => f.removed);
+    if (removed.length) {
+      const dr = await db(s => s.from('saraban_files').delete().in('id', removed.map(f => f.id)), { loader: false, error: 'ลบไฟล์แนบไม่สำเร็จ' });
+      if (dr.ok) removed.forEach(f => deleteFile(f.file_path));   // ลบไฟล์เก่าใน Storage
+    }
+    await logAudit(d ? 'update' : 'create', 'saraban_documents', doc.id, {
+      title, reg: doc.reg_no ? `${doc.reg_no}/${doc.reg_year}` : null, files_added: uploaded.length, files_removed: removed.length,
+    });
+    showToast(d ? 'บันทึกการแก้ไขเรียบร้อย' : `เพิ่มเอกสารเรียบร้อย${doc.reg_no ? ` (เลขทะเบียน ${doc.reg_no}/${doc.reg_year})` : ''}`, 'success', 4500);
+    form.reset();
+    m.close();
+    onSaved && onSaved();
+  };
+}
+
+async function deleteSaraban(d, onDone) {
+  if (!requirePermission('saraban.delete')) return;
+  if (!sarabanCan(d, 'delete')) return showToast('ลบได้เฉพาะเอกสารที่ตนเองบันทึก', 'error');
+  const ok = await confirmModal({ title: 'ลบเอกสาร', message: `ต้องการลบเอกสาร <b>${esc(d.title)}</b>${d.reg_no ? ` (ทะเบียน ${sarabanReg(d)})` : ''} ใช่หรือไม่?<br><span class="text-xs text-slate-400">ไฟล์แนบ ${d.file_count || 0} ไฟล์ใน Storage จะถูกลบด้วย</span>`, confirmText: 'ลบเอกสาร' });
+  if (!ok) return;
+  const r = await db(s => s.from('saraban_documents').delete().eq('id', d.id), { loaderText: 'กำลังลบ...', success: 'ลบเอกสารเรียบร้อย', error: 'ลบเอกสารไม่สำเร็จ' });
+  if (!r.ok) return;
+  (d.files || []).forEach(f => deleteFile(f.file_path));
+  await logAudit('delete', 'saraban_documents', d.id, { title: d.title, reg: d.reg_no ? sarabanReg(d) : null, files: (d.files || []).length });
+  onDone && onDone();
+}
+
+function openSarabanTypes(onDone) {
+  if (!requirePermission('saraban.manage_types')) return;
+  const groups = [...new Map(Saraban.cats.map(c => [c.group_key, c.group_name])).entries()];
+  const m = openModal({
+    title: 'ประเภทเอกสาร', icon: 'tags', size: 'xl',
+    body: `<p class="text-sm text-slate-500 mb-3">กำหนดประเภทเอกสาร กลุ่ม ไอคอน สี และการออกเลขทะเบียนอัตโนมัติ (นับใหม่ทุกปีงบประมาณ แยกตามหน่วยงานและประเภท)</p>
+      <div class="overflow-x-auto rounded-2xl border border-slate-100"><table class="sfh-table w-full text-sm"><thead class="bg-slate-50 text-slate-500"><tr>
+        <th>ประเภท</th><th>กลุ่ม</th><th>ไอคอน</th><th>สี</th><th class="text-center">ออกเลขอัตโนมัติ</th><th class="text-center">ใช้งาน</th><th></th></tr></thead>
+      <tbody class="divide-y divide-slate-100">${Saraban.cats.map(c => `<tr data-cat="${c.id}">
+        <td><input class="input !py-1.5 min-w-[9rem]" data-f="name" value="${esc(c.name)}"></td>
+        <td class="text-slate-500 whitespace-nowrap">${esc(c.group_name)}</td>
+        <td><div class="flex items-center gap-2"><span class="w-8 h-8 rounded-lg grid place-items-center" style="background:${hexToRgba(c.color, .15)};color:${c.color}">${ic(c.icon, 'w-4 h-4')}</span><input class="input !py-1.5 font-mono w-36" data-f="icon" value="${esc(c.icon)}"></div></td>
+        <td><input type="color" class="h-9 w-12 rounded-lg border border-slate-200 p-0.5" data-f="color" value="${esc(c.color)}"></td>
+        <td class="text-center"><label class="switch"><input type="checkbox" data-f="auto_number" ${c.auto_number ? 'checked' : ''}><span class="slider"></span></label></td>
+        <td class="text-center"><label class="switch"><input type="checkbox" data-f="is_active" ${c.is_active ? 'checked' : ''}><span class="slider"></span></label></td>
+        <td class="text-right whitespace-nowrap"><button class="btn btn-soft btn-sm" data-save-cat="${c.id}">${ic('save', 'w-3.5 h-3.5')} บันทึก</button>
+          <button class="btn-icon hover:!text-blush-500" data-del-cat="${c.id}" title="ลบ">${ic('trash-2')}</button></td></tr>`).join('')}</tbody></table></div>
+      <form id="sbCatForm" class="grid sm:grid-cols-5 gap-2 mt-4 rounded-2xl bg-brand-50/60 p-3">
+        <input name="cat_key" class="input font-mono" placeholder="รหัส เช่น contract" pattern="[a-z_]{2,30}" required>
+        <input name="cat_name" class="input" placeholder="ชื่อประเภท" required>
+        <select name="group_key" class="input">${groups.map(([k, n]) => `<option value="${esc(k)}">${esc(n)}</option>`).join('')}</select>
+        <input name="icon" class="input font-mono" placeholder="ไอคอน Lucide" value="file-text">
+        <button class="btn btn-primary" type="submit">${ic('plus')} เพิ่มประเภท</button>
+      </form>`,
+    footer: `<button class="btn btn-ghost" data-close>ปิด</button>`,
+    onClose: () => onDone && onDone(),
+  });
+  m.el.addEventListener('click', async (e) => {
+    const s = e.target.closest('[data-save-cat]');
+    if (s) {
+      if (!requirePermission('saraban.manage_types')) return;
+      const tr = s.closest('tr'); const v = (f) => $(`[data-f="${f}"]`, tr);
+      const payload = { name: v('name').value.trim(), icon: v('icon').value.trim() || 'file-text', color: v('color').value, auto_number: v('auto_number').checked, is_active: v('is_active').checked };
+      if (!payload.name) return showToast('กรุณากรอกชื่อประเภท', 'warning');
+      const r = await db(q => q.from('saraban_categories').update(payload).eq('id', s.dataset.saveCat), { success: 'บันทึกประเภทเอกสารแล้ว', error: 'บันทึกไม่สำเร็จ' });
+      if (r.ok) { Object.assign(Saraban.cats.find(c => c.id === s.dataset.saveCat), payload); logAudit('update', 'saraban_categories', s.dataset.saveCat, payload); }
+      return;
+    }
+    const del = e.target.closest('[data-del-cat]');
+    if (del) {
+      if (!requirePermission('saraban.manage_types')) return;
+      const c = Saraban.cats.find(x => x.id === del.dataset.delCat);
+      const ok = await confirmModal({ title: 'ลบประเภทเอกสาร', message: `ลบประเภท <b>${esc(c.name)}</b>? (ลบได้เฉพาะประเภทที่ยังไม่มีเอกสาร หากมีเอกสารแล้วให้ปิด "ใช้งาน" แทน)` });
+      if (!ok) return;
+      const r = await db(q => q.from('saraban_categories').delete().eq('id', c.id), { success: 'ลบประเภทเอกสารแล้ว', error: 'ลบไม่สำเร็จ' });
+      if (r.ok) { logAudit('delete', 'saraban_categories', c.id, { cat_key: c.cat_key }); Saraban.cats = Saraban.cats.filter(x => x.id !== c.id); del.closest('tr').remove(); }
+    }
+  });
+  $('#sbCatForm', m.el).onsubmit = async (e) => {
+    e.preventDefault();
+    if (!requirePermission('saraban.manage_types')) return;
+    const f = e.target;
+    const key = f.cat_key.value.trim().toLowerCase();
+    if (!/^[a-z_]{2,30}$/.test(key)) return showToast('รหัสประเภทใช้ได้เฉพาะ a-z และ _', 'warning');
+    const g = groups.find(([k]) => k === f.group_key.value);
+    const row = { cat_key: key, name: f.cat_name.value.trim(), group_key: g[0], group_name: g[1], icon: f.icon.value.trim() || 'file-text', sort_order: Saraban.cats.length + 1, created_by: currentUser().id };
+    const r = await db(q => q.from('saraban_categories').insert(row).select().single(), { success: `เพิ่มประเภท ${row.name} แล้ว`, error: 'เพิ่มประเภทไม่สำเร็จ' });
+    if (!r.ok) return;
+    logAudit('create', 'saraban_categories', r.data.id, { cat_key: key });
+    Saraban.cats.push(r.data);
+    m.close();
+    openSarabanTypes(onDone);
+  };
+}
+/* ===== END MODULE: saraban ===== */
+
+
 /* ===== MODULE: travel (โปรแกรมคำนวณค่าใช้จ่ายไปราชการ) ===== */
 // Phase 1: ยังไม่พัฒนา → ใช้ renderComingSoon
 // รอบถัดไป: เขียน function renderTravel(el, mod, menu) { ... } แล้วเปลี่ยน MODULES.travel.render = renderTravel
@@ -2939,6 +3445,7 @@ async function deleteAnnouncement(a, onDone) {
    เพิ่มโมดูลใหม่: เพิ่ม key + render ที่นี่ และเพิ่มแถวในตาราง modules / menus / permissions */
 const MODULES = {
   announcements: { render: renderAnnouncements },
+  saraban:       { render: renderSaraban },
   travel:        { render: renderComingSoon },
   register:      { render: renderComingSoon },
   payroll:       { render: renderComingSoon },
