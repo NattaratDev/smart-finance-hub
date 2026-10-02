@@ -784,12 +784,26 @@ function errorState(title, detail = '') {
     <button class="btn btn-soft mt-4" data-nav="home">${ic('home')} กลับหน้าหลัก</button></div>`;
 }
 const skeletonCards = (n = 4, h = 'h-28') => Array.from({ length: n }, () => `<div class="skeleton ${h} rounded-3xl"></div>`).join('');
+/** สาเหตุที่เชื่อมต่อ Supabase ไม่ได้ (แยกให้ชัด เพื่อแก้ได้ตรงจุด) */
+function configProblem() {
+  if (typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_ANON_KEY === 'undefined')
+    return { code: 'NO_CONFIG_FILE', title: 'โหลดไฟล์ config.js ไม่สำเร็จ',
+      detail: 'ไม่พบไฟล์ <code>config.js</code> ในโฟลเดอร์เดียวกับ <code>index.html</code> – ตรวจว่าวางไฟล์ไว้คู่กัน (ทั้งบนเครื่องและใน GitHub) แล้วรีเฟรชหน้านี้' };
+  if (!CONFIG_OK)
+    return { code: 'BAD_CONFIG', title: 'ค่าใน config.js ยังไม่ถูกต้อง',
+      detail: 'เปิดไฟล์ <code>config.js</code> แล้วใส่ <b>SUPABASE_URL</b> (ขึ้นต้นด้วย https://) และ <b>SUPABASE_ANON_KEY</b> จาก Supabase Dashboard › Project Settings › API แล้วรีเฟรชหน้านี้' };
+  if (!window.supabase)
+    return { code: 'NO_SUPABASE_LIB', title: 'โหลดไลบรารี Supabase ไม่สำเร็จ',
+      detail: 'เบราว์เซอร์ดาวน์โหลดไลบรารีจาก cdn.jsdelivr.net ไม่ได้ – ตรวจการเชื่อมต่ออินเทอร์เน็ต / ไฟร์วอลล์ / ส่วนขยายบล็อกโฆษณา แล้วรีเฟรชหน้านี้' };
+  return { code: 'CLIENT_ERROR', title: 'สร้างการเชื่อมต่อ Supabase ไม่สำเร็จ', detail: 'ดูรายละเอียดใน Console ของเบราว์เซอร์ (F12)' };
+}
 function configErrorCard() {
+  const p = configProblem();
   return `<div class="card p-5 md:p-6 mb-6 border-cream-200 bg-cream-50">
     <div class="flex gap-3"><div class="w-11 h-11 rounded-2xl bg-cream-200 text-cream-600 grid place-items-center shrink-0">${ic('plug-zap', 'w-5 h-5')}</div>
-    <div><h3 class="font-semibold text-slate-800">ยังไม่ได้เชื่อมต่อฐานข้อมูล</h3>
-    <p class="text-sm text-slate-600 mt-1 leading-relaxed">กรุณาเปิดไฟล์ <code class="px-1.5 py-0.5 rounded bg-white">config.js</code> แล้วใส่ค่า <b>SUPABASE_URL</b> และ <b>SUPABASE_ANON_KEY</b>
-    จาก Supabase Dashboard › Project Settings › API จากนั้นรันไฟล์ <code class="px-1.5 py-0.5 rounded bg-white">database.sql</code> ใน SQL Editor แล้วรีเฟรชหน้านี้</p></div></div></div>`;
+    <div><h3 class="font-semibold text-slate-800">ยังไม่ได้เชื่อมต่อฐานข้อมูล: ${esc(p.title)}</h3>
+    <p class="text-sm text-slate-600 mt-1 leading-relaxed">${p.detail}</p>
+    <p class="text-xs text-slate-400 mt-2">รหัสปัญหา: ${p.code} · ติดตั้งครั้งแรก: รัน <code>database.sql</code> ใน Supabase SQL Editor ก่อน</p></div></div></div>`;
 }
 
 /* ===== CORE: ตารางข้อมูล (ค้นหา / กรอง / แบ่งหน้า / มือถือแสดงเป็นการ์ด) ===== */
@@ -4465,11 +4479,12 @@ const MODULES = {
 async function init() {
   renderChrome();
   if (!sb) {
-    console.warn('[SFH] ยังไม่ได้ตั้งค่า config.js');
+    const prob = configProblem();
+    console.warn(`[SFH] เชื่อมต่อ Supabase ไม่ได้ (${prob.code}): ${prob.title} · หน้าเว็บ: ${location.href}`);
     await loadMenus(); renderChrome();
     window.addEventListener('hashchange', route);
     route();
-    showToast('ยังไม่ได้เชื่อมต่อฐานข้อมูล กรุณาตรวจสอบไฟล์ config.js', 'warning', 7000);
+    showToast(`ยังไม่ได้เชื่อมต่อฐานข้อมูล: ${prob.title}`, 'warning', 8000);
     return;
   }
   showLoader(true, 'กำลังเริ่มระบบ...');
