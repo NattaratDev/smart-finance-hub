@@ -73,12 +73,31 @@ create table if not exists public.payroll_slips (
   total_deduction  numeric(14,2) not null default 0,
   net_amount       numeric(14,2) not null default 0,
   warnings         jsonb not null default '[]'::jsonb,
+  entry_type       text not null default 'import' check (entry_type in ('import','edited','manual')),  -- นำเข้า / แก้ไขด้วยมือ / เพิ่มด้วยมือ
+  original         jsonb,         -- ค่าจากไฟล์ก่อนแก้ไขครั้งแรก (เก็บไว้ตรวจสอบย้อนหลัง)
+  edit_reason      text,
+  edited_by        uuid,
+  edited_by_name   text,
+  edited_at        timestamptz,
   created_by       uuid,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );
 create index if not exists idx_payroll_slips_period on public.payroll_slips(period_id, seq);
 create index if not exists idx_payroll_slips_name   on public.payroll_slips(full_name);
+
+-- อัปเกรดจากรุ่นแรก: คอลัมน์สำหรับสลิปที่แก้ไข/เพิ่มด้วยมือ
+alter table public.payroll_slips add column if not exists entry_type     text not null default 'import';
+alter table public.payroll_slips add column if not exists original       jsonb;
+alter table public.payroll_slips add column if not exists edit_reason    text;
+alter table public.payroll_slips add column if not exists edited_by      uuid;
+alter table public.payroll_slips add column if not exists edited_by_name text;
+alter table public.payroll_slips add column if not exists edited_at      timestamptz;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'payroll_slips_entry_type_check') then
+    alter table public.payroll_slips add constraint payroll_slips_entry_type_check check (entry_type in ('import','edited','manual'));
+  end if;
+end $$;
 
 drop trigger if exists trg_payroll_periods_updated_at on public.payroll_periods;
 create trigger trg_payroll_periods_updated_at before update on public.payroll_periods
@@ -231,7 +250,9 @@ begin
     end if;
     if not coalesce(p_replace, false) then
       return jsonb_build_object('success', false, 'code', 'EXISTS', 'period_id', v_existing.id, 'status', v_existing.status,
-                                'employee_count', v_existing.employee_count);
+                                'employee_count', v_existing.employee_count,
+                                'manual_count', (select count(*) from public.payroll_slips
+                                                  where period_id = v_existing.id and entry_type <> 'import'));
     end if;
     delete from public.payroll_slips where period_id = v_existing.id;
     v_pid := v_existing.id;
@@ -352,6 +373,139 @@ begin
 end $$;
 
 
+-- 3.7 (ภายใน) คำนวณยอดรวมของงวดใหม่หลังแก้ไขสลิป
+drop function if exists public.sfh_payroll_save_slip(text, uuid, uuid, jsonb, text);
+drop function if exists public.sfh_payroll_delete_slip(text, uuid, text);
+drop function if exists public.sfh_payroll_recalc(uuid);
+create function public.sfh_payroll_recalc(p_period_id uuid)
+returns void
+language sql security definer
+set search_path = public, extensions
+as $$
+  update public.payroll_periods p set
+    employee_count  = (select count(*)                           from public.payroll_slips where period_id = p.id),
+    total_income    = (select coalesce(sum(total_income), 0)    from public.payroll_slips where period_id = p.id),
+    total_deduction = (select coalesce(sum(total_deduction), 0) from public.payroll_slips where period_id = p.id),
+    total_net       = (select coalesce(sum(net_amount), 0)      from public.payroll_slips where period_id = p.id)
+   where p.id = p_period_id;
+$$;
+
+-- 3.8 จัดทำสลิปแบบ Manual: แก้ไขสลิปเดิม (p_slip_id) หรือเพิ่มสลิปใหม่ (p_slip_id = null)
+--     ยอดรวมคำนวณฝั่งฐานข้อมูลจากรายการเสมอ · ต้องระบุเหตุผล · เก็บค่าจากไฟล์เดิมไว้ใน original
+create function public.sfh_payroll_save_slip(p_token text, p_period_id uuid, p_slip_id uuid, p_slip jsonb, p_reason text)
+returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user   public.users%rowtype;
+  v_period public.payroll_periods%rowtype;
+  v_old    public.payroll_slips%rowtype;
+  v_name   text := trim(coalesce(p_slip->>'full_name', ''));
+  v_inc    jsonb;
+  v_ded    jsonb;
+  v_ti     numeric;
+  v_td     numeric;
+  v_id     uuid;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'payroll.manage');
+  select * into v_period from public.payroll_periods where id = p_period_id;
+  if not found then raise exception 'ไม่พบงวดเงินเดือน'; end if;
+  if v_period.org_id <> v_user.org_id
+     and not exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin') then
+    raise exception 'FORBIDDEN: org';
+  end if;
+  if v_period.status = 'closed' then raise exception 'งวดนี้ปิดแล้ว แก้ไขสลิปไม่ได้ (ให้ Super Admin เปิดงวดก่อน)'; end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception 'กรุณาระบุเหตุผลการแก้ไข'; end if;
+  if v_name = '' then raise exception 'กรุณาระบุชื่อ-สกุล'; end if;
+  if exists (select 1 from jsonb_array_elements(coalesce(p_slip->'incomes', '[]') || coalesce(p_slip->'deductions', '[]')) x
+              where (x->>'amount')::numeric < 0) then
+    raise exception 'จำนวนเงินต้องไม่ติดลบ';
+  end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object('name', trim(x->>'name'), 'amount', round((x->>'amount')::numeric, 2)) order by o), '[]'::jsonb)
+    into v_inc
+    from jsonb_array_elements(coalesce(p_slip->'incomes', '[]')) with ordinality t(x, o)
+   where trim(coalesce(x->>'name', '')) <> '' and round((x->>'amount')::numeric, 2) <> 0;
+  select coalesce(jsonb_agg(jsonb_build_object('name', trim(x->>'name'), 'amount', round((x->>'amount')::numeric, 2)) order by o), '[]'::jsonb)
+    into v_ded
+    from jsonb_array_elements(coalesce(p_slip->'deductions', '[]')) with ordinality t(x, o)
+   where trim(coalesce(x->>'name', '')) <> '' and round((x->>'amount')::numeric, 2) <> 0;
+  v_ti := coalesce((select sum((x->>'amount')::numeric) from jsonb_array_elements(v_inc) x), 0);
+  v_td := coalesce((select sum((x->>'amount')::numeric) from jsonb_array_elements(v_ded) x), 0);
+  if v_ti <= 0 then raise exception 'ต้องมีรายการรับอย่างน้อย 1 รายการ'; end if;
+
+  if p_slip_id is null then
+    insert into public.payroll_slips(period_id, org_id, seq, full_name, employee_type, unit_name, sub_unit, sheet_name,
+                                     incomes, deductions, total_income, total_deduction, net_amount, entry_type,
+                                     edit_reason, edited_by, edited_by_name, edited_at, created_by)
+    values (p_period_id, v_period.org_id,
+            coalesce((select max(seq) from public.payroll_slips where period_id = p_period_id), 0) + 1,
+            v_name, nullif(trim(p_slip->>'employee_type'), ''), nullif(trim(p_slip->>'unit_name'), ''), nullif(trim(p_slip->>'sub_unit'), ''), null,
+            v_inc, v_ded, v_ti, v_td, v_ti - v_td, 'manual',
+            trim(p_reason), v_user.id, v_user.full_name, now(), v_user.id)
+    returning id into v_id;
+    insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+    values (v_period.org_id, v_user.id, v_user.username, 'create', 'payroll_slips', v_id::text,
+            jsonb_build_object('manual', true, 'name', v_name, 'net', v_ti - v_td, 'reason', trim(p_reason),
+                               'period', v_period.period_month || '/' || v_period.period_year, 'group', v_period.staff_group), v_user.id);
+  else
+    select * into v_old from public.payroll_slips where id = p_slip_id and period_id = p_period_id;
+    if not found then raise exception 'ไม่พบสลิปที่ต้องการแก้ไข'; end if;
+    update public.payroll_slips set
+      full_name = v_name, employee_type = nullif(trim(p_slip->>'employee_type'), ''),
+      unit_name = nullif(trim(p_slip->>'unit_name'), ''), sub_unit = nullif(trim(p_slip->>'sub_unit'), ''),
+      incomes = v_inc, deductions = v_ded, total_income = v_ti, total_deduction = v_td, net_amount = v_ti - v_td,
+      entry_type = case when v_old.entry_type = 'import' then 'edited' else v_old.entry_type end,
+      original = coalesce(v_old.original, case when v_old.entry_type = 'import' then jsonb_build_object(
+                   'full_name', v_old.full_name, 'employee_type', v_old.employee_type, 'unit_name', v_old.unit_name,
+                   'incomes', v_old.incomes, 'deductions', v_old.deductions, 'total_income', v_old.total_income,
+                   'total_deduction', v_old.total_deduction, 'net_amount', v_old.net_amount) end),
+      warnings = '[]'::jsonb,
+      edit_reason = trim(p_reason), edited_by = v_user.id, edited_by_name = v_user.full_name, edited_at = now()
+     where id = p_slip_id;
+    v_id := p_slip_id;
+    insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+    values (v_period.org_id, v_user.id, v_user.username, 'update', 'payroll_slips', v_id::text,
+            jsonb_build_object('manual', true, 'name', v_name, 'reason', trim(p_reason),
+                               'net_before', v_old.net_amount, 'net_after', v_ti - v_td,
+                               'period', v_period.period_month || '/' || v_period.period_year, 'group', v_period.staff_group), v_user.id);
+  end if;
+  perform public.sfh_payroll_recalc(p_period_id);
+  return jsonb_build_object('success', true, 'slip_id', v_id, 'net_amount', v_ti - v_td);
+end $$;
+
+-- 3.9 ลบสลิป (เช่น ซ้ำ หรือไม่มีสิทธิ์รับเงินงวดนี้) – ต้องระบุเหตุผล
+create function public.sfh_payroll_delete_slip(p_token text, p_slip_id uuid, p_reason text)
+returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user   public.users%rowtype;
+  v_slip   public.payroll_slips%rowtype;
+  v_period public.payroll_periods%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'payroll.manage');
+  select * into v_slip from public.payroll_slips where id = p_slip_id;
+  if not found then raise exception 'ไม่พบสลิป'; end if;
+  select * into v_period from public.payroll_periods where id = v_slip.period_id;
+  if v_period.org_id <> v_user.org_id
+     and not exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin') then
+    raise exception 'FORBIDDEN: org';
+  end if;
+  if v_period.status = 'closed' then raise exception 'งวดนี้ปิดแล้ว ลบสลิปไม่ได้'; end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception 'กรุณาระบุเหตุผลการลบ'; end if;
+  delete from public.payroll_slips where id = p_slip_id;
+  perform public.sfh_payroll_recalc(v_slip.period_id);
+  insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+  values (v_period.org_id, v_user.id, v_user.username, 'delete', 'payroll_slips', p_slip_id::text,
+          jsonb_build_object('manual', true, 'name', v_slip.full_name, 'net', v_slip.net_amount, 'reason', trim(p_reason),
+                             'period', v_period.period_month || '/' || v_period.period_year, 'group', v_period.staff_group), v_user.id);
+  return jsonb_build_object('success', true);
+end $$;
+
+
 -- =====================================================================
 -- 4) ลงทะเบียนโมดูล / Permission / สิทธิ์
 -- =====================================================================
@@ -404,6 +558,9 @@ grant execute on function public.sfh_payroll_import(text, jsonb, jsonb, boolean)
 grant execute on function public.sfh_payroll_set_status(text, uuid, text)                to anon, authenticated;
 grant execute on function public.sfh_payroll_delete_period(text, uuid)                   to anon, authenticated;
 grant execute on function public.sfh_payroll_log(text, uuid, text, int, text, text)      to anon, authenticated;
+grant execute on function public.sfh_payroll_save_slip(text, uuid, uuid, jsonb, text)    to anon, authenticated;
+grant execute on function public.sfh_payroll_delete_slip(text, uuid, text)               to anon, authenticated;
+revoke execute on function public.sfh_payroll_recalc(uuid) from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------
 -- หมายเหตุ: ข้อมูลเงินเดือนเป็นข้อมูลส่วนบุคคล (PDPA)
