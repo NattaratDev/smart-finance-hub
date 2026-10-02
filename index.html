@@ -3746,6 +3746,7 @@ const payrollLogoHtml = (cls) => State.settings.logo_url
   : `<div class="${cls}">${PAYROLL_EMBLEM}</div>`;
 /** สร้าง HTML สลิป 1 หน้า A4 */
 function payrollSlipHtml(s, meta, signer, idx = 0, total = 1) {
+  meta = s._meta || meta;   // สลิป Manual แต่ละใบมีเดือน/หัวเรื่อง/สังกัดของตัวเอง
   const rows = (list) => (list && list.length)
     ? list.map(x => `<tr><td>${esc(x.name)}</td><td class="r">${formatMoney(x.amount, { unit: false })}</td></tr>`).join('')
     : '<tr class="empty"><td colspan="2">– ไม่มีรายการ –</td></tr>';
@@ -3755,14 +3756,14 @@ function payrollSlipHtml(s, meta, signer, idx = 0, total = 1) {
     <div class="ps-head">${payrollLogoHtml('ps-logo')}
       <h1 class="ps-org">${esc(meta.org_title || State.settings.org_name || '')}</h1>
       ${meta.org_subtitle ? `<p class="ps-sub">${esc(meta.org_subtitle)}</p>` : ''}</div>
-    <div class="ps-title">สลิปเงินเดือน</div>
+    <div class="ps-title">${esc(meta.slip_title || 'สลิปเงินเดือน')}</div>
     <div class="ps-period">${payrollPeriodText(meta)}</div>
     <hr class="ps-rule"><hr class="ps-rule">
     <div class="ps-info">
       <div class="k">ชื่อ-สกุล</div><div class="v">${esc(s.full_name)}</div>
       <div class="k">ประเภท</div><div class="v">${esc(s.employee_type || '-')}</div>
       <div class="k">หน่วยงาน</div><div class="v">${esc(unit || '-')}</div>
-      <div class="k">สังกัด</div><div class="v">${esc(PAYROLL_GROUPS[meta.staff_group] || '-')}</div>
+      <div class="k">สังกัด</div><div class="v">${esc(PAYROLL_GROUPS[meta.staff_group] || meta.staff_group || '-')}</div>
     </div>
     <div class="ps-tables">
       <table><thead><tr><th>รายการรับ</th><th class="r">จำนวนเงิน (บาท)</th></tr></thead>
@@ -3771,12 +3772,12 @@ function payrollSlipHtml(s, meta, signer, idx = 0, total = 1) {
         <tbody>${rows(s.deductions)}</tbody><tfoot><tr><td>รวมรายการหัก</td><td class="r">${formatMoney(s.total_deduction, { unit: false })}</td></tr></tfoot></table>
     </div>
     <div class="ps-net"><span class="lbl">รับสุทธิ</span><span class="txt">(${bahtText(s.net_amount)})</span><span class="amt">${formatMoney(s.net_amount)}</span></div>
-    <div class="ps-remark">หมายเหตุ: เอกสารนี้ใช้เป็นหลักฐานแสดงรายการรับ-จ่ายเงินเดือนประจำเดือน</div>
+    <div class="ps-remark">หมายเหตุ: ${s.note ? esc(s.note) : 'เอกสารนี้ใช้เป็นหลักฐานแสดงรายการรับ-จ่ายเงินเดือนประจำเดือน'}</div>
     <div class="ps-sign-area"><div class="ps-sign">
       <div class="muted">ลงชื่อ ........................................................</div>
       <div>(${esc(signer?.name || '........................................................')})</div>
       ${signer?.position ? `<div class="muted">${esc(signer.position)}</div>` : ''}</div></div>
-    <div class="ps-foot"><span>ออกโดยระบบ Smart Finance Hub · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })}</span><span>หน้า ${idx + 1}/${total}</span></div>
+    <div class="ps-foot"><span>ออกโดยระบบ Smart Finance Hub${s.doc_no ? ` · เลขที่ ${esc(s.doc_no)}` : ''} · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })}</span><span>หน้า ${idx + 1}/${total}</span></div>
   </section>`;
 }
 /** วัดจริงหลังแสดงผล: ถ้าเนื้อหาชนส่วนท้าย → ย่อ 1-2 ระดับ */
@@ -3862,15 +3863,19 @@ function openPayrollSlipPreview(slip, meta, { canPrint = false, periodId = null 
   const pb = $('[data-ps-print]', m.el);
   if (pb) pb.onclick = () => { m.close(); openPayrollPrintDialog([slip], meta, periodId, `สลิปของ ${slip.full_name}`); };
 }
-async function openPayrollPrintDialog(slips, meta, periodId, label) {
-  if (!requirePermission('payroll.print')) return;
+/**
+ * หน้าต่างพิมพ์ (ใช้ร่วมกับสลิปแบบ Manual) – opts.perm: สิทธิ์ที่ต้องมี, opts.onPrint(signer): บันทึกการพิมพ์แบบกำหนดเอง
+ */
+async function openPayrollPrintDialog(slips, meta, periodId, label, opts = {}) {
+  const perm = opts.perm || 'payroll.print';
+  if (!requirePermission(perm)) return;
   if (!slips.length) return showToast('ไม่มีสลิปที่จะพิมพ์', 'warning');
   const def = await payrollSignerDefaults();
   const m = openModal({
     title: 'พิมพ์สลิปเงินเดือน', icon: 'printer', size: 'md',
     body: `<div class="rounded-2xl bg-brand-50 border border-brand-100 p-3 mb-4 text-sm text-slate-600">
         ${ic('files', 'w-4 h-4 inline text-brand-500')} <b>${esc(label)}</b> · ${formatNumber(slips.length)} สลิป (${formatNumber(slips.length)} หน้า A4)<br>
-        <span class="text-xs text-slate-500">${payrollPeriodText(meta)} · ${PAYROLL_GROUPS[meta.staff_group] || ''}</span></div>
+        <span class="text-xs text-slate-500">${opts.subtitle || `${payrollPeriodText(meta)} · ${PAYROLL_GROUPS[meta.staff_group] || ''}`}</span></div>
       <form id="psSignForm" class="space-y-3">
         <div><label class="label">ชื่อผู้ลงนาม</label><input name="sname" class="input" value="${esc(def.name)}" placeholder="เช่น นางสาวตัวอย่าง ใจดี"></div>
         <div><label class="label">ตำแหน่งผู้ลงนาม</label><input name="spos" class="input" value="${esc(def.position)}" placeholder="เช่น ผู้อำนวยการกองคลัง"></div>
@@ -3883,12 +3888,13 @@ async function openPayrollPrintDialog(slips, meta, periodId, label) {
   });
   $('#psSignForm', m.el).onsubmit = async (e) => {
     e.preventDefault();
-    if (!requirePermission('payroll.print')) return;
+    if (!requirePermission(perm)) return;
     const f = e.target;
     const signer = { name: f.sname.value.trim(), position: f.spos.value.trim() };
     if (f.sdef.checked) await payrollSaveSignerDefault(signer);
     m.close();
-    if (periodId) rpcSecure('sfh_payroll_log', { p_period_id: periodId, p_kind: 'print', p_count: slips.length, p_signer_name: signer.name || null, p_signer_position: signer.position || null }, { loader: false });
+    if (opts.onPrint) opts.onPrint(signer);
+    else if (periodId) rpcSecure('sfh_payroll_log', { p_period_id: periodId, p_kind: 'print', p_count: slips.length, p_signer_name: signer.name || null, p_signer_position: signer.position || null }, { loader: false });
     await payrollPrint(slips, meta, signer);
   };
 }
@@ -4460,6 +4466,277 @@ async function payrollDeleteSlip(el, s) {
 }
 /* ===== END MODULE: payroll ===== */
 
+/* ===== MODULE: payroll_manual (สลิปเงินเดือนแบบ Manual – เมนูแยก) ===== */
+// สลิปเดี่ยวที่ไม่ผูกกับงวดนำเข้าจาก Excel เช่น สลิปเงินตกเบิก / ผู้ที่ไม่มีในไฟล์
+// ใช้รูปแบบสลิปและหน้าต่างพิมพ์ร่วมกับ MODULE: payroll · ข้อมูลผ่าน rpcSecure('sfh_payroll_manual_*') เท่านั้น
+Object.assign(TABLE_LABELS, { payroll_manual_slips: 'สลิปเงินเดือน (Manual)' });
+const PM = { slips: [], table: null, selected: new Set() };
+const PM_TITLES = ['สลิปเงินเดือน', 'สลิปเงินตกเบิก', 'สลิปค่าตอบแทน', 'สลิปเงินเดือน (ฉบับแก้ไข)'];
+const pmMeta = (s) => ({ org_title: s.org_title, org_subtitle: s.org_subtitle, period_year: s.period_year, period_month: s.period_month, staff_group: s.staff_group, slip_title: s.slip_title });
+const pmWithMeta = (s) => ({ ...s, _meta: pmMeta(s) });
+
+async function renderPayrollManual(el, mod) {
+  if (!requirePermission('payroll_manual.view')) return;
+  if (!State.session?.token) { await sessionExpired('กรุณาเข้าสู่ระบบใหม่เพื่อใช้งานสลิปเงินเดือน (ระบบปรับปรุงความปลอดภัย)'); return; }
+  payrollEnsureStyle();
+  el.innerHTML = pageHeader({
+    title: mod?.name || 'สลิปเงินเดือน (Manual)', icon: 'file-pen-line', tone: 'lilac',
+    subtitle: 'จัดทำสลิปเงินเดือนเพิ่มเติมด้วยมือ แยกจากงวดที่นำเข้าจาก Excel – เช่น สลิปเงินตกเบิก หรือผู้ที่ไม่มีในไฟล์',
+    actions: hasPermission('payroll_manual.manage') ? `<button class="btn btn-primary" data-pm="new">${ic('file-plus-2')} สร้างสลิปใหม่</button>` : '',
+  }) + `<div class="flex items-start gap-2 rounded-2xl bg-mint-50 border border-mint-200 px-4 py-2.5 mb-5 text-xs text-slate-600">
+      ${ic('shield-check', 'w-4 h-4 text-mint-500 shrink-0 mt-0.5')}
+      <span>ข้อมูลเข้าถึงผ่านระบบยืนยันตัวตน (session token) และตรวจสิทธิ์ที่ฐานข้อมูลทุกครั้ง · ระบบออกเลขที่สลิปให้อัตโนมัติ (MSปปปป-ลำดับ) · การสร้าง แก้ไข ลบ และพิมพ์ถูกบันทึกใน Audit Log</span></div>
+    <div id="pmStats" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">${skeletonCards(4, 'h-24')}</div>
+    <div class="card p-4 md:p-5"><div id="pmTable">${skeletonCards(2, 'h-16')}</div></div>`;
+  refreshIcons();
+  el.onclick = (e) => pmOnClick(el, e);
+  el.onchange = (e) => {
+    const s = e.target.closest('[data-pm-sel]');
+    if (s) { s.checked ? PM.selected.add(s.dataset.pmSel) : PM.selected.delete(s.dataset.pmSel); pmUpdateSel(el); }
+  };
+  await pmLoad(el);
+}
+function pmUpdateSel(el) {
+  const b = $('[data-pm="print-selected"]', el);
+  if (b) { b.disabled = !PM.selected.size; $('[data-pm-count]', b).textContent = PM.selected.size; }
+}
+async function pmLoad(el) {
+  const r = await rpcSecure('sfh_payroll_manual_list', {}, { loaderText: 'กำลังโหลดสลิป...', error: 'โหลดสลิปไม่สำเร็จ' });
+  if (!r.ok) { $('#pmTable', el).innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); $('#pmStats', el).innerHTML = ''; refreshIcons(); return; }
+  PM.slips = (r.data || []).map(pmWithMeta);
+  PM.selected = new Set();
+  const canManage = hasPermission('payroll_manual.manage');
+  // หัวกระดาษตั้งต้นให้ตรงกับสลิปที่นำเข้า (ชื่อเทศบาล + อำเภอ/จังหวัด จากงวดล่าสุด)
+  if (canManage && !PM.slips.length && !(Payroll.periods || []).length && hasPermission('payroll.view')) {
+    const pr = await rpcSecure('sfh_payroll_periods', {}, { loader: false });
+    if (pr.ok) Payroll.periods = pr.data || [];
+  }
+  const now = new Date(), cm = now.getMonth() + 1, cy = now.getFullYear() + 543;
+  const thisMonth = PM.slips.filter(s => s.period_month === cm && s.period_year === cy);
+  $('#pmStats', el).innerHTML = [
+    statCard({ label: 'สลิปทั้งหมด', value: formatNumber(PM.slips.length), icon: 'files', tone: 'lilac' }),
+    statCard({ label: `ประจำเดือน ${TH_MONTHS_SHORT[cm - 1]} ${cy}`, value: formatNumber(thisMonth.length), icon: 'calendar', tone: 'brand' }),
+    statCard({ label: 'รับสุทธิรวม (ทั้งหมด)', value: formatMoney(PM.slips.reduce((a, s) => a + Number(s.net_amount), 0), { unit: false }), icon: 'wallet', tone: 'mint' }),
+    statCard({ label: 'เลขที่ล่าสุด', value: `<span class="text-base">${esc(PM.slips.slice().sort((a, b) => (b.doc_year - a.doc_year) || (b.doc_seq - a.doc_seq))[0]?.doc_no || '-')}</span>`, icon: 'hash', tone: 'cream' }),
+  ].join('');
+  if (!PM.slips.length) {
+    $('#pmTable', el).innerHTML = `<div class="text-center py-8">
+      <div class="w-16 h-16 mx-auto rounded-3xl bg-lilac-100 grid place-items-center mb-3">${ic('file-pen-line', 'w-8 h-8 text-lilac-500')}</div>
+      <div class="font-medium text-slate-700">ยังไม่มีสลิปแบบ Manual</div>
+      <p class="text-sm text-slate-500 mt-1">${canManage ? 'กด "สร้างสลิปใหม่" เพื่อจัดทำสลิปเพิ่มเติม เช่น สลิปเงินตกเบิก' : 'รอเจ้าหน้าที่การเงินจัดทำสลิป'}</p>
+      ${canManage ? `<button class="btn btn-primary mt-4" data-pm="new">${ic('file-plus-2')} สร้างสลิปใหม่</button>` : ''}</div>`;
+    refreshIcons(); return;
+  }
+  const periods = [...new Set(PM.slips.map(s => `${s.period_year}-${String(s.period_month).padStart(2, '0')}`))].sort().reverse();
+  const uniq = (k) => [...new Set(PM.slips.map(s => s[k]).filter(Boolean))];
+  PM.table = createDataTable($('#pmTable', el), {
+    pageSize: 15,
+    searchKeys: ['doc_no', 'full_name', 'unit_name', 'employee_type', 'slip_title', 'note'], searchPlaceholder: 'ค้นหาเลขที่ ชื่อ-สกุล หน่วยงาน หรือหมายเหตุ...',
+    filters: [
+      { key: 'period', label: 'ทุกเดือน', options: periods.map(p => { const [y, m] = p.split('-'); return { value: p, label: `${TH_MONTHS[+m - 1]} ${y}` }; }),
+        match: (s, v) => `${s.period_year}-${String(s.period_month).padStart(2, '0')}` === v },
+      { key: 'slip_title', label: 'ทุกหัวเรื่อง', options: uniq('slip_title').map(v => ({ value: v, label: v })) },
+      ...(uniq('staff_group').length ? [{ key: 'staff_group', label: 'ทุกสังกัด', options: uniq('staff_group').map(v => ({ value: v, label: v })) }] : []),
+    ],
+    toolbar: `<button class="btn btn-soft" data-pm="select-filtered">${ic('check-square', 'w-4 h-4')} เลือกทั้งหมด</button>
+      <button class="btn btn-ghost" data-pm="select-none">${ic('square', 'w-4 h-4')} ล้าง</button>
+      <button class="btn btn-primary" data-pm="print-selected" disabled>${ic('printer', 'w-4 h-4')} พิมพ์ที่เลือก (<span data-pm-count>0</span>)</button>`,
+    columns: [
+      { key: '_sel', label: '', class: 'w-8', hideOnCard: true, render: s => `<input type="checkbox" class="w-4 h-4 accent-brand-500" data-pm-sel="${s.id}" ${PM.selected.has(s.id) ? 'checked' : ''} aria-label="เลือก">` },
+      { key: 'full_name', label: 'ชื่อ-สกุล', render: s => `<div class="flex items-center gap-2"><input type="checkbox" class="md:hidden w-4 h-4 accent-brand-500" data-pm-sel="${s.id}" ${PM.selected.has(s.id) ? 'checked' : ''}>
+          <div class="min-w-0"><button class="font-medium text-slate-700 hover:text-brand-600 text-left" data-pm="preview" data-id="${s.id}">${esc(s.full_name)}</button>
+          <div class="text-xs text-slate-400">${esc(s.doc_no)}${s.employee_type ? ` · ${esc(s.employee_type)}` : ''}</div></div></div>` },
+      { key: 'slip_title', label: 'สลิป', render: s => `<div class="text-sm text-slate-700">${esc(s.slip_title)}</div><div class="text-xs text-slate-400">${TH_MONTHS[s.period_month - 1]} ${s.period_year}</div>` },
+      { key: 'unit_name', label: 'หน่วยงาน / สังกัด', render: s => `<span class="text-xs text-slate-600">${esc([s.unit_name, s.staff_group].filter(Boolean).join(' · ') || '-')}</span>` },
+      { key: 'net_amount', label: 'รับสุทธิ', class: 'text-right', render: s => `<b class="text-mint-600">${formatMoney(s.net_amount, { unit: false })}</b>` },
+      { key: 'updated_at', label: 'บันทึกล่าสุด', render: s => `<span class="text-xs text-slate-400">${formatThaiDate(s.updated_at, { time: true })}<br>${esc(s.updated_by_name || '')}</span>` },
+    ],
+    actions: s => `<button class="btn-icon" data-pm="preview" data-id="${s.id}" title="ดูสลิป">${ic('eye')}</button>
+      <button class="btn-icon" data-pm="print-one" data-id="${s.id}" title="พิมพ์">${ic('printer')}</button>
+      ${canManage ? `<button class="btn-icon" data-pm="copy" data-id="${s.id}" title="คัดลอกไปทำเดือนถัดไป">${ic('copy')}</button>
+        <button class="btn-icon" data-pm="edit" data-id="${s.id}" title="แก้ไข">${ic('pencil')}</button>
+        <button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-pm="delete" data-id="${s.id}" title="ลบ">${ic('trash-2')}</button>` : ''}`,
+    emptyText: 'ไม่พบสลิปตามเงื่อนไข',
+  });
+  PM.table.setRows(PM.slips);
+  refreshIcons();
+}
+function pmPrint(list, label) {
+  openPayrollPrintDialog(list, list[0]._meta, null, label, {
+    perm: 'payroll_manual.view', subtitle: 'สลิปเงินเดือนแบบ Manual',
+    onPrint: (signer) => rpcSecure('sfh_payroll_manual_log', { p_ids: list.map(s => s.id), p_signer_name: signer.name || null, p_signer_position: signer.position || null }, { loader: false }),
+  });
+}
+async function pmOnClick(el, e) {
+  const b = e.target.closest('[data-pm]');
+  if (!b) return;
+  const s = PM.slips.find(x => x.id === b.dataset.id);
+  switch (b.dataset.pm) {
+    case 'new': openPmEditor(el, null); break;
+    case 'edit': if (s) openPmEditor(el, s); break;
+    case 'copy': if (s) openPmEditor(el, s, { copy: true }); break;
+    case 'delete': if (s) pmDelete(el, s); break;
+    case 'preview': if (s) openPayrollSlipPreview(s, s._meta, { canPrint: false }); break;
+    case 'print-one': if (s) pmPrint([s], `${s.doc_no} · ${s.full_name}`); break;
+    case 'print-selected': {
+      const list = PM.slips.filter(x => PM.selected.has(x.id));
+      if (!list.length) return showToast('กรุณาเลือกสลิปที่ต้องการพิมพ์ก่อน', 'warning');
+      pmPrint(list, `ที่เลือก ${list.length} ใบ`); break;
+    }
+    case 'select-filtered': PM.table.getFiltered().forEach(x => PM.selected.add(x.id)); PM.table.render(); pmUpdateSel(el); break;
+    case 'select-none': PM.selected.clear(); PM.table.render(); pmUpdateSel(el); break;
+  }
+}
+function openPmEditor(el, slip, { copy = false } = {}) {
+  if (!requirePermission('payroll_manual.manage')) return;
+  const editing = !!slip && !copy;
+  const now = new Date();
+  let month = slip ? slip.period_month : now.getMonth() + 1;
+  let year = slip ? slip.period_year : now.getFullYear() + 543;
+  if (copy) { month += 1; if (month > 12) { month = 1; year += 1; } }   // คัดลอกไปทำเดือนถัดไป
+  const last = PM.slips[0] || Payroll.periods?.[0] || {};
+  const head = { title: slip?.org_title || last.org_title || State.settings.org_name || '', sub: slip?.org_subtitle ?? last.org_subtitle ?? '' };
+  const clone = (list) => (list || []).map(x => ({ name: x.name, amount: x.amount }));
+  const st = { incomes: slip ? clone(slip.incomes) : [{ name: 'เงินเดือน', amount: '' }], deductions: slip ? clone(slip.deductions) : [] };
+  if (!st.incomes.length) st.incomes.push({ name: '', amount: '' });
+  const known = (key) => { const out = []; PM.slips.forEach(s => (s[key] || []).forEach(x => { if (!out.includes(x.name)) out.push(x.name); }));
+    [...(key === 'incomes' ? ['เงินตกเบิก'] : []), ...PAYROLL_DEFAULT_ITEMS[key]].forEach(n => { if (!out.includes(n)) out.push(n); }); return out; };
+  const uniq = (k, extra = []) => [...new Set([...PM.slips.map(s => s[k]), ...(Payroll.slips || []).map(s => s[k]), ...extra].filter(Boolean))];
+  const kindLabel = { incomes: 'รายการรับ', deductions: 'รายการหัก' };
+  const m = openModal({
+    title: editing ? `แก้ไขสลิป ${esc(slip.doc_no)}` : copy ? `คัดลอกจาก ${esc(slip.doc_no)}` : 'สร้างสลิปเงินเดือน (Manual)',
+    icon: editing ? 'file-pen' : copy ? 'copy' : 'file-plus-2', size: 'xl',
+    body: `${copy ? `<div class="rounded-2xl bg-brand-50 border border-brand-100 px-4 py-2.5 mb-4 text-sm text-slate-600">${ic('info', 'w-4 h-4 inline')} คัดลอกรายการจากสลิป ${esc(slip.doc_no)} และเลื่อนเป็นเดือนถัดไปให้แล้ว – ตรวจสอบยอดก่อนบันทึก (จะได้เลขที่สลิปใหม่)</div>` : ''}
+      <form id="pmForm" class="space-y-4" autocomplete="off">
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div><label class="label">ประจำเดือน *</label><select name="month" class="input">${TH_MONTHS.map((mn, i) => `<option value="${i + 1}" ${month === i + 1 ? 'selected' : ''}>${mn}</option>`).join('')}</select></div>
+          <div><label class="label">ปี (พ.ศ.) *</label><input name="year" type="number" min="2500" max="2700" class="input" value="${year}" required></div>
+          <div class="lg:col-span-2"><label class="label">หัวเรื่องสลิป</label><input name="slip_title" class="input" list="pmTitles" value="${esc(slip?.slip_title || 'สลิปเงินเดือน')}"></div>
+        </div>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div class="lg:col-span-2"><label class="label">ชื่อ-สกุล *</label><input name="full_name" class="input" value="${esc(slip?.full_name || '')}" required placeholder="เช่น นายสมชาย ใจดี" list="pmNames"></div>
+          <div><label class="label">ประเภท</label><input name="employee_type" class="input" list="pmTypes" value="${esc(slip?.employee_type || '')}"></div>
+          <div><label class="label">สังกัด</label><input name="staff_group" class="input" list="pmGroups" value="${esc(slip?.staff_group || '')}" placeholder="เช่น ฝ่ายประจำ"></div>
+        </div>
+        <div><label class="label">หน่วยงาน (งาน)</label><input name="unit_name" class="input" list="pmUnits" value="${esc(slip?.unit_name || '')}"></div>
+        <datalist id="pmTitles">${PM_TITLES.concat(uniq('slip_title')).filter((v, i, a) => a.indexOf(v) === i).map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmNames">${uniq('full_name').map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmTypes">${uniq('employee_type').map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmGroups">${uniq('staff_group', Object.values(PAYROLL_GROUPS)).filter(v => !PAYROLL_GROUPS[v]).map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmUnits">${uniq('unit_name').map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmIncNames">${known('incomes').map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <datalist id="pmDedNames">${known('deductions').map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        <div class="grid lg:grid-cols-2 gap-4">
+          ${['incomes', 'deductions'].map(k => `<div class="rounded-2xl border border-slate-200 p-3">
+            <div class="flex items-center justify-between mb-2"><div class="font-medium text-slate-700">${kindLabel[k]}</div>
+              <button type="button" class="btn btn-soft btn-sm" data-pme-add="${k}">${ic('plus', 'w-3.5 h-3.5')} เพิ่มรายการ</button></div>
+            <div data-pme-rows="${k}" class="space-y-2"></div>
+            <div class="flex justify-between mt-3 pt-2 border-t border-slate-100 text-sm font-semibold"><span>รวม${kindLabel[k]}</span><span data-pme-sum="${k}">0.00</span></div>
+          </div>`).join('')}
+        </div>
+        <div class="rounded-2xl bg-mint-50 border border-mint-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-4">
+          <div class="font-semibold text-slate-700">รับสุทธิ</div><div class="text-sm text-slate-500 flex-1" data-pme-text></div>
+          <div class="text-xl font-bold text-mint-600 whitespace-nowrap" data-pme-net>0.00 บาท</div></div>
+        <div><label class="label">หมายเหตุ (พิมพ์บนสลิป)</label><input name="note" class="input" value="${esc(slip?.note || '')}" placeholder="เว้นว่าง = ใช้ข้อความมาตรฐาน · เช่น เงินตกเบิกเลื่อนขั้น เม.ย.–ก.ย. 2569"></div>
+        <details class="rounded-2xl border border-slate-100 bg-slate-50/60 px-4 py-3"><summary class="text-sm font-medium text-slate-600 flex items-center gap-2">${ic('chevron-down', 'w-4 h-4')} ส่วนหัวสลิป (ชื่อหน่วยงานบนสลิป)</summary>
+          <div class="grid sm:grid-cols-2 gap-3 mt-3">
+            <div><label class="label">ชื่อหน่วยงาน</label><input name="org_title" class="input" value="${esc(head.title)}"></div>
+            <div><label class="label">บรรทัดรอง (อำเภอ/จังหวัด)</label><input name="org_subtitle" class="input" value="${esc(head.sub)}"></div>
+          </div></details>
+      </form>`,
+    footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button>
+      <button type="button" class="btn btn-soft" data-pme-preview>${ic('eye')} ดูตัวอย่างสลิป</button>
+      <button class="btn btn-primary" type="submit" form="pmForm">${ic('save')} ${editing ? 'บันทึกการแก้ไข' : 'บันทึกสลิป'}</button>`,
+  });
+  const form = $('#pmForm', m.el);
+  const collect = (k) => st[k].map(x => ({ name: String(x.name || '').trim(), raw: x.amount, p: PayrollParser.num(x.amount) }));
+  const items = (k) => collect(k).filter(x => x.name && x.p.ok && x.p.v !== 0).map(x => ({ name: x.name, amount: Math.round(x.p.v * 100) / 100 }));
+  const totals = () => {
+    const sum = (k) => Math.round(collect(k).filter(x => x.name && x.p.ok).reduce((a, x) => a + x.p.v, 0) * 100) / 100;
+    const ti = sum('incomes'), td = sum('deductions');
+    return { ti, td, net: Math.round((ti - td) * 100) / 100 };
+  };
+  const drawTotals = () => {
+    const t = totals();
+    $('[data-pme-sum="incomes"]', m.el).textContent = formatMoney(t.ti, { unit: false });
+    $('[data-pme-sum="deductions"]', m.el).textContent = formatMoney(t.td, { unit: false });
+    $('[data-pme-net]', m.el).textContent = formatMoney(t.net);
+    $('[data-pme-net]', m.el).classList.toggle('text-blush-500', t.net <= 0);
+    $('[data-pme-text]', m.el).textContent = `(${bahtText(t.net)})`;
+  };
+  const drawRows = (k) => {
+    $(`[data-pme-rows="${k}"]`, m.el).innerHTML = st[k].length ? st[k].map((x, i) => `<div class="flex gap-2 items-center">
+        <input class="input !py-2 flex-1 min-w-0" list="${k === 'incomes' ? 'pmIncNames' : 'pmDedNames'}" placeholder="ชื่อรายการ" value="${esc(x.name)}" data-pme-k="${k}" data-pme-i="${i}" data-pme-f="name">
+        <input class="input !py-2 w-32 text-right" inputmode="decimal" placeholder="0.00" value="${x.amount === '' ? '' : esc(x.amount)}" data-pme-k="${k}" data-pme-i="${i}" data-pme-f="amount">
+        <button type="button" class="btn-icon hover:!text-blush-500" data-pme-del="${k}" data-pme-i="${i}" title="นำออก">${ic('x', 'w-4 h-4')}</button></div>`).join('')
+      : `<div class="text-sm text-slate-400 text-center py-2">– ไม่มีรายการ –</div>`;
+    refreshIcons();
+  };
+  const current = () => {
+    const t = totals();
+    return { full_name: form.full_name.value.trim(), employee_type: form.employee_type.value.trim(), unit_name: form.unit_name.value.trim(),
+      staff_group: form.staff_group.value.trim(), slip_title: form.slip_title.value.trim() || 'สลิปเงินเดือน', note: form.note.value.trim(),
+      period_year: parseInt(form.year.value, 10), period_month: parseInt(form.month.value, 10),
+      org_title: form.org_title.value.trim(), org_subtitle: form.org_subtitle.value.trim(),
+      incomes: items('incomes'), deductions: items('deductions'), total_income: t.ti, total_deduction: t.td, net_amount: t.net };
+  };
+  drawRows('incomes'); drawRows('deductions'); drawTotals();
+  m.el.addEventListener('input', (e) => {
+    const t = e.target.closest('[data-pme-k]');
+    if (!t) return;
+    st[t.dataset.pmeK][+t.dataset.pmeI][t.dataset.pmeF] = t.value;
+    if (t.dataset.pmeF === 'amount') t.classList.toggle('!border-blush-300', !!t.value && !PayrollParser.num(t.value).ok);
+    drawTotals();
+  });
+  m.el.addEventListener('click', (e) => {
+    const add = e.target.closest('[data-pme-add]');
+    if (add) { st[add.dataset.pmeAdd].push({ name: '', amount: '' }); drawRows(add.dataset.pmeAdd); $(`[data-pme-rows="${add.dataset.pmeAdd}"] > div:last-child input`, m.el)?.focus(); return; }
+    const del = e.target.closest('[data-pme-del]');
+    if (del) { st[del.dataset.pmeDel].splice(+del.dataset.pmeI, 1); drawRows(del.dataset.pmeDel); drawTotals(); return; }
+    if (e.target.closest('[data-pme-preview]')) {
+      const c = current();
+      openPayrollSlipPreview({ ...c, full_name: c.full_name || '(ยังไม่ระบุชื่อ)', doc_no: editing ? slip.doc_no : '(ออกเลขเมื่อบันทึก)', _meta: pmMeta(c) }, pmMeta(c));
+    }
+  });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!requirePermission('payroll_manual.manage')) return;
+    const c = current();
+    if (!c.full_name) return showToast('กรุณาระบุชื่อ-สกุล', 'warning');
+    if (!(c.period_year >= 2500 && c.period_year <= 2700)) return showToast('กรุณาระบุปี พ.ศ. ให้ถูกต้อง', 'warning');
+    const rows = [...collect('incomes').map(x => ({ ...x, k: 'รายการรับ' })), ...collect('deductions').map(x => ({ ...x, k: 'รายการหัก' }))];
+    const bad = rows.find(x => (x.name || x.raw !== '') && (!x.name || !x.p.ok || x.p.v < 0));
+    if (bad) return showToast(!bad.name ? `${bad.k}: กรุณาระบุชื่อรายการ` : `${bad.k} "${bad.name}": จำนวนเงินไม่ถูกต้อง`, 'warning', 5000);
+    if (c.total_income <= 0) return showToast('ต้องมีรายการรับอย่างน้อย 1 รายการ', 'warning');
+    if (c.net_amount <= 0 && !(await confirmModal({ title: 'รับสุทธิเป็นศูนย์หรือติดลบ', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ', message: `รับสุทธิ ${formatMoney(c.net_amount)} ต้องการบันทึกหรือไม่?` }))) return;
+    const r = await rpcSecure('sfh_payroll_manual_save', { p_id: editing ? slip.id : null, p_slip: c }, { loaderText: 'กำลังบันทึกสลิป...', error: 'บันทึกสลิปไม่สำเร็จ' });
+    if (!r.ok) return;
+    showToast(`${editing ? 'บันทึกการแก้ไข' : 'สร้างสลิป'} ${r.data.doc_no} เรียบร้อย · รับสุทธิ ${formatMoney(r.data.net_amount)}`, 'success', 5000);
+    form.reset(); m.close();
+    await pmLoad(el);
+  };
+}
+function pmDelete(el, s) {
+  if (!requirePermission('payroll_manual.manage')) return;
+  const m = openModal({
+    title: 'ลบสลิป', icon: 'trash-2', size: 'sm',
+    body: `<p class="text-sm text-slate-600 mb-3">ลบสลิป <b>${esc(s.doc_no)}</b> ของ <b>${esc(s.full_name)}</b> (รับสุทธิ ${formatMoney(s.net_amount)})?<br>
+        <span class="text-xs text-slate-400">เลขที่สลิปนี้จะไม่ถูกนำกลับมาใช้ใหม่</span></p>
+      <form id="pmDelForm"><label class="label">เหตุผลการลบ *</label><textarea name="reason" class="input" rows="2" required placeholder="เช่น บันทึกซ้ำ / ออกสลิปผิดคน"></textarea></form>`,
+    footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button><button class="btn btn-pink" type="submit" form="pmDelForm">${ic('trash-2')} ลบสลิป</button>`,
+  });
+  $('#pmDelForm', m.el).onsubmit = async (e) => {
+    e.preventDefault();
+    const reason = e.target.reason.value.trim();
+    if (!reason) return showToast('กรุณาระบุเหตุผล', 'warning');
+    const r = await rpcSecure('sfh_payroll_manual_delete', { p_id: s.id, p_reason: reason }, { loaderText: 'กำลังลบ...', error: 'ลบสลิปไม่สำเร็จ', success: `ลบสลิป ${s.doc_no} เรียบร้อย` });
+    if (!r.ok) return;
+    m.close();
+    await pmLoad(el);
+  };
+}
+/* ===== END MODULE: payroll_manual ===== */
+
 
 /* ===== MODULE REGISTRY =====
    Router เรียก MODULES[module_key].render(section, moduleInfo, menu)
@@ -4470,6 +4747,7 @@ const MODULES = {
   travel:        { render: renderComingSoon },
   register:      { render: renderComingSoon },
   payroll:       { render: renderPayroll },
+  payroll_manual: { render: renderPayrollManual },
 };
 
 

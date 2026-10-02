@@ -562,6 +562,246 @@ grant execute on function public.sfh_payroll_save_slip(text, uuid, uuid, jsonb, 
 grant execute on function public.sfh_payroll_delete_slip(text, uuid, text)               to anon, authenticated;
 revoke execute on function public.sfh_payroll_recalc(uuid) from public, anon, authenticated;
 
+
+-- =====================================================================
+-- 7) สลิปเงินเดือนแบบ Manual (เมนูแยก – สลิปเดี่ยว ไม่ผูกกับงวดที่นำเข้าจาก Excel)
+--    เช่น สลิปเงินตกเบิก / สลิปของผู้ที่ไม่มีในไฟล์ · ความปลอดภัยแบบเดียวกับ payroll_*
+-- =====================================================================
+create table if not exists public.payroll_manual_slips (
+  id               uuid primary key default gen_random_uuid(),
+  org_id           uuid not null references public.organizations(id) on delete restrict,
+  doc_no           text not null,                      -- เลขที่สลิป เช่น MS2569-0001 (ออกอัตโนมัติ)
+  doc_year         int  not null,
+  doc_seq          int  not null,
+  period_year      int  not null check (period_year between 2500 and 2700),
+  period_month     int  not null check (period_month between 1 and 12),
+  slip_title       text not null default 'สลิปเงินเดือน', -- หัวเรื่องบนสลิป เช่น สลิปเงินตกเบิก
+  org_title        text,
+  org_subtitle     text,
+  full_name        text not null,
+  employee_type    text,
+  unit_name        text,
+  staff_group      text,                               -- สังกัด (ข้อความ) เช่น ฝ่ายประจำ
+  incomes          jsonb not null default '[]'::jsonb,
+  deductions       jsonb not null default '[]'::jsonb,
+  total_income     numeric(14,2) not null default 0,
+  total_deduction  numeric(14,2) not null default 0,
+  net_amount       numeric(14,2) not null default 0,
+  note             text,                               -- หมายเหตุ (พิมพ์บนสลิป)
+  created_by       uuid,
+  created_by_name  text,
+  updated_by       uuid,
+  updated_by_name  text,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  unique (org_id, doc_year, doc_seq)
+);
+create index if not exists idx_payroll_manual_org_period on public.payroll_manual_slips(org_id, period_year, period_month);
+
+-- ตัวนับเลขที่สลิป (เพิ่มขึ้นอย่างเดียว – ลบสลิปแล้วเลขที่จะไม่ถูกนำกลับมาใช้ซ้ำ)
+create table if not exists public.payroll_manual_counters (
+  org_id    uuid not null references public.organizations(id) on delete cascade,
+  doc_year  int  not null,
+  last_seq  int  not null default 0,
+  primary key (org_id, doc_year)
+);
+alter table public.payroll_manual_counters enable row level security;
+revoke all on public.payroll_manual_counters from anon, authenticated;
+drop trigger if exists trg_payroll_manual_slips_updated_at on public.payroll_manual_slips;
+create trigger trg_payroll_manual_slips_updated_at before update on public.payroll_manual_slips
+  for each row execute function public.sfh_touch_updated_at();
+
+drop function if exists public.sfh_payroll_manual_list(text);
+drop function if exists public.sfh_payroll_manual_save(text, uuid, jsonb);
+drop function if exists public.sfh_payroll_manual_delete(text, uuid, text);
+drop function if exists public.sfh_payroll_manual_log(text, uuid[], text, text);
+
+-- 7.1 รายการสลิป Manual ของหน่วยงาน (Super Admin เห็นทุกหน่วยงาน)
+create function public.sfh_payroll_manual_list(p_token text)
+returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user  public.users%rowtype;
+  v_super boolean;
+begin
+  v_user  := public.sfh_payroll_auth(p_token, 'payroll_manual.view');
+  v_super := exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin');
+  return coalesce((
+    select jsonb_agg(to_jsonb(s) - 'created_by' - 'updated_by' || jsonb_build_object('org_name', o.name)
+                     order by s.period_year desc, s.period_month desc, s.doc_year desc, s.doc_seq desc)
+      from public.payroll_manual_slips s join public.organizations o on o.id = s.org_id
+     where v_super or s.org_id = v_user.org_id), '[]'::jsonb);
+end $$;
+
+-- 7.2 สร้าง (p_id = null) / แก้ไขสลิป – ยอดรวมคำนวณจากรายการในฐานข้อมูลเสมอ
+create function public.sfh_payroll_manual_save(p_token text, p_id uuid, p_slip jsonb)
+returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user  public.users%rowtype;
+  v_old   public.payroll_manual_slips%rowtype;
+  v_name  text := trim(coalesce(p_slip->>'full_name', ''));
+  v_year  int  := (p_slip->>'period_year')::int;
+  v_month int  := (p_slip->>'period_month')::int;
+  v_inc   jsonb;
+  v_ded   jsonb;
+  v_ti    numeric;
+  v_td    numeric;
+  v_dy    int;
+  v_seq   int;
+  v_id    uuid;
+  v_no    text;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.manage');
+  if v_user.org_id is null then raise exception 'บัญชีนี้ไม่ได้สังกัดหน่วยงาน'; end if;
+  if v_name = '' then raise exception 'กรุณาระบุชื่อ-สกุล'; end if;
+  if v_year is null or v_year not between 2500 and 2700 or v_month is null or v_month not between 1 and 12 then
+    raise exception 'กรุณาระบุเดือน/ปีของสลิปให้ถูกต้อง';
+  end if;
+  if exists (select 1 from jsonb_array_elements(coalesce(p_slip->'incomes', '[]') || coalesce(p_slip->'deductions', '[]')) x
+              where (x->>'amount')::numeric < 0) then
+    raise exception 'จำนวนเงินต้องไม่ติดลบ';
+  end if;
+  select coalesce(jsonb_agg(jsonb_build_object('name', trim(x->>'name'), 'amount', round((x->>'amount')::numeric, 2)) order by o), '[]'::jsonb)
+    into v_inc from jsonb_array_elements(coalesce(p_slip->'incomes', '[]')) with ordinality t(x, o)
+   where trim(coalesce(x->>'name', '')) <> '' and round((x->>'amount')::numeric, 2) <> 0;
+  select coalesce(jsonb_agg(jsonb_build_object('name', trim(x->>'name'), 'amount', round((x->>'amount')::numeric, 2)) order by o), '[]'::jsonb)
+    into v_ded from jsonb_array_elements(coalesce(p_slip->'deductions', '[]')) with ordinality t(x, o)
+   where trim(coalesce(x->>'name', '')) <> '' and round((x->>'amount')::numeric, 2) <> 0;
+  v_ti := coalesce((select sum((x->>'amount')::numeric) from jsonb_array_elements(v_inc) x), 0);
+  v_td := coalesce((select sum((x->>'amount')::numeric) from jsonb_array_elements(v_ded) x), 0);
+  if v_ti <= 0 then raise exception 'ต้องมีรายการรับอย่างน้อย 1 รายการ'; end if;
+
+  if p_id is null then
+    v_dy := extract(year from (now() at time zone 'Asia/Bangkok'))::int + 543;
+    insert into public.payroll_manual_counters(org_id, doc_year, last_seq)
+    values (v_user.org_id, v_dy, greatest(1, coalesce((select max(doc_seq) from public.payroll_manual_slips where org_id = v_user.org_id and doc_year = v_dy), 0) + 1))
+    on conflict (org_id, doc_year) do update set last_seq = public.payroll_manual_counters.last_seq + 1
+    returning last_seq into v_seq;
+    v_no := 'MS' || v_dy || '-' || lpad(v_seq::text, 4, '0');
+    insert into public.payroll_manual_slips(org_id, doc_no, doc_year, doc_seq, period_year, period_month, slip_title, org_title, org_subtitle,
+                                            full_name, employee_type, unit_name, staff_group, incomes, deductions,
+                                            total_income, total_deduction, net_amount, note, created_by, created_by_name, updated_by, updated_by_name)
+    values (v_user.org_id, v_no, v_dy, v_seq, v_year, v_month, coalesce(nullif(trim(p_slip->>'slip_title'), ''), 'สลิปเงินเดือน'),
+            nullif(trim(p_slip->>'org_title'), ''), nullif(trim(p_slip->>'org_subtitle'), ''),
+            v_name, nullif(trim(p_slip->>'employee_type'), ''), nullif(trim(p_slip->>'unit_name'), ''), nullif(trim(p_slip->>'staff_group'), ''),
+            v_inc, v_ded, v_ti, v_td, v_ti - v_td, nullif(trim(p_slip->>'note'), ''), v_user.id, v_user.full_name, v_user.id, v_user.full_name)
+    returning id into v_id;
+  else
+    select * into v_old from public.payroll_manual_slips where id = p_id;
+    if not found then raise exception 'ไม่พบสลิปที่ต้องการแก้ไข'; end if;
+    if v_old.org_id <> v_user.org_id
+       and not exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin') then
+      raise exception 'FORBIDDEN: org';
+    end if;
+    update public.payroll_manual_slips set
+      period_year = v_year, period_month = v_month, slip_title = coalesce(nullif(trim(p_slip->>'slip_title'), ''), 'สลิปเงินเดือน'),
+      org_title = nullif(trim(p_slip->>'org_title'), ''), org_subtitle = nullif(trim(p_slip->>'org_subtitle'), ''),
+      full_name = v_name, employee_type = nullif(trim(p_slip->>'employee_type'), ''), unit_name = nullif(trim(p_slip->>'unit_name'), ''),
+      staff_group = nullif(trim(p_slip->>'staff_group'), ''), incomes = v_inc, deductions = v_ded,
+      total_income = v_ti, total_deduction = v_td, net_amount = v_ti - v_td, note = nullif(trim(p_slip->>'note'), ''),
+      updated_by = v_user.id, updated_by_name = v_user.full_name
+     where id = p_id
+    returning doc_no into v_no;
+    v_id := p_id;
+  end if;
+  insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+  values (v_user.org_id, v_user.id, v_user.username, case when p_id is null then 'create' else 'update' end, 'payroll_manual_slips', v_id::text,
+          jsonb_build_object('doc_no', v_no, 'name', v_name, 'period', v_month || '/' || v_year, 'net', v_ti - v_td)
+          || case when p_id is null then '{}'::jsonb else jsonb_build_object('net_before', v_old.net_amount) end, v_user.id);
+  return jsonb_build_object('success', true, 'id', v_id, 'doc_no', v_no, 'net_amount', v_ti - v_td);
+end $$;
+
+-- 7.3 ลบสลิป Manual (ต้องระบุเหตุผล)
+create function public.sfh_payroll_manual_delete(p_token text, p_id uuid, p_reason text)
+returns jsonb
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare
+  v_user public.users%rowtype;
+  v_old  public.payroll_manual_slips%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.manage');
+  select * into v_old from public.payroll_manual_slips where id = p_id;
+  if not found then raise exception 'ไม่พบสลิป'; end if;
+  if v_old.org_id <> v_user.org_id
+     and not exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin') then
+    raise exception 'FORBIDDEN: org';
+  end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception 'กรุณาระบุเหตุผลการลบ'; end if;
+  delete from public.payroll_manual_slips where id = p_id;
+  insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+  values (v_old.org_id, v_user.id, v_user.username, 'delete', 'payroll_manual_slips', p_id::text,
+          jsonb_build_object('doc_no', v_old.doc_no, 'name', v_old.full_name, 'net', v_old.net_amount, 'reason', trim(p_reason)), v_user.id);
+  return jsonb_build_object('success', true);
+end $$;
+
+-- 7.4 บันทึกการพิมพ์สลิป Manual
+create function public.sfh_payroll_manual_log(p_token text, p_ids uuid[], p_signer_name text default null, p_signer_position text default null)
+returns void
+language plpgsql security definer
+set search_path = public, extensions
+as $$
+declare v_user public.users%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.view');
+  insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
+  values (v_user.org_id, v_user.id, v_user.username, 'print', 'payroll_manual_slips', null,
+          jsonb_build_object('count', coalesce(array_length(p_ids, 1), 0),
+                             'doc_no', (select string_agg(doc_no, ', ' order by doc_no) from public.payroll_manual_slips where id = any(p_ids)),
+                             'signer', p_signer_name, 'signer_position', p_signer_position), v_user.id);
+end $$;
+
+-- 7.5 โมดูล / Permission / เมนู
+insert into public.modules (module_key, name, description, icon, color, status, allow_guest, guest_locked, is_core, sort_order, version, planned_features) values
+ ('payroll_manual', 'สลิปเงินเดือน (Manual)',
+  'จัดทำสลิปเงินเดือนเพิ่มเติมด้วยมือ แยกจากงวดที่นำเข้าจาก Excel เช่น สลิปเงินตกเบิก หรือผู้ที่ไม่มีในไฟล์ พิมพ์รูปแบบ A4 เดียวกับสลิปปกติ',
+  'file-pen-line', '#8670D6', 'active', false, true, false, 13, '1.0.0',
+  '["กรอกรายการรับ-หักเอง ระบบคำนวณยอดและจำนวนเงินตัวอักษรให้","ออกเลขที่สลิปอัตโนมัติ (MSปปปป-ลำดับ)","คัดลอกสลิปเดิมไปทำเดือนถัดไป","พิมพ์ A4 / บันทึก PDF พร้อมเปลี่ยนผู้ลงนาม"]'::jsonb)
+on conflict (module_key) do nothing;
+
+insert into public.permissions (perm_key, module_key, action, name, description, org_admin_grantable, sort_order) values
+ ('payroll_manual.view',   'payroll_manual', 'view',   'ดู/พิมพ์สลิปเงินเดือน (Manual)',        'เข้าเมนู ค้นหา ดูตัวอย่าง และพิมพ์สลิปแบบ Manual', true, 55),
+ ('payroll_manual.manage', 'payroll_manual', 'manage', 'สร้าง/แก้ไข/ลบสลิปเงินเดือน (Manual)', null, true, 56)
+on conflict (perm_key) do update
+  set module_key = excluded.module_key, action = excluded.action, name = excluded.name, description = excluded.description, sort_order = excluded.sort_order;
+
+insert into public.role_permissions (role_id, permission_id)
+select r.id, p.id from public.roles r join public.permissions p on p.module_key = 'payroll_manual'
+ where r.role_key in ('super_admin', 'org_admin')
+on conflict (role_id, permission_id) do nothing;
+
+insert into public.user_permissions (user_id, permission_id, org_id, created_by)
+select 'bbbbbbbb-0000-0000-0000-000000000003'::uuid, p.id, '11111111-1111-1111-1111-111111111111'::uuid, 'bbbbbbbb-0000-0000-0000-000000000001'::uuid
+  from public.permissions p
+ where p.module_key = 'payroll_manual'
+   and exists (select 1 from public.users where id = 'bbbbbbbb-0000-0000-0000-000000000003')
+on conflict (user_id, permission_id) do nothing;
+
+insert into public.menus (menu_key, label, icon, module_key, required_permission, public_permission, sort_order, is_active, show_on_mobile, menu_group, description) values
+ ('payroll_manual', 'สลิปเงินเดือน (Manual)', 'file-pen-line', 'payroll_manual', 'payroll_manual.view', null, 13, true, true, 'module', 'จัดทำสลิปเงินเดือนเพิ่มเติมด้วยมือ')
+on conflict (menu_key) do nothing;
+
+-- 7.6 ปิดการเข้าถึงตรง + สิทธิ์เรียกฟังก์ชัน
+alter table public.payroll_manual_slips enable row level security;
+do $$
+declare p record;
+begin
+  for p in select policyname from pg_policies where schemaname = 'public' and tablename = 'payroll_manual_slips' loop
+    execute format('drop policy if exists %I on public.payroll_manual_slips', p.policyname);
+  end loop;
+end $$;
+revoke all on public.payroll_manual_slips from anon, authenticated;
+grant execute on function public.sfh_payroll_manual_list(text)                        to anon, authenticated;
+grant execute on function public.sfh_payroll_manual_save(text, uuid, jsonb)           to anon, authenticated;
+grant execute on function public.sfh_payroll_manual_delete(text, uuid, text)          to anon, authenticated;
+grant execute on function public.sfh_payroll_manual_log(text, uuid[], text, text)     to anon, authenticated;
+
 -- ---------------------------------------------------------------------
 -- หมายเหตุ: ข้อมูลเงินเดือนเป็นข้อมูลส่วนบุคคล (PDPA)
 --  • token อายุ 8 ชั่วโมง ยกเลิกทันทีเมื่อออกจากระบบ (sfh_logout)
