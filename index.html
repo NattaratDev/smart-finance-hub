@@ -4844,19 +4844,34 @@ function trvLoadScript(src, ready) {
     document.head.appendChild(el);
   });
 }
-/** ดาวน์โหลดใบสรุปเป็นไฟล์ PDF (A4) – แปลงหน้าสรุปเป็นภาพด้วย html2canvas แล้วใส่ลง jsPDF (ภาษาไทยแสดงถูกต้อง) */
+/** ฝังฟอนต์ Kanit (ไทย + อังกฤษ น้ำหนัก 400–600) เป็น data URL เพื่อให้ภาพใน PDF ใช้ฟอนต์เดียวกับหน้าพิมพ์ (โหลดครั้งเดียว) */
+async function trvFontCSS() {
+  if (Trv.fontCSS != null) return Trv.fontCSS;
+  try {
+    const css = await (await fetch('https://fonts.googleapis.com/css2?family=Kanit:wght@400;500;600&display=swap')).text();
+    const blocks = (css.match(/\/\*\s*[\w-]+\s*\*\/\s*@font-face\s*{[^}]*}/g) || []).filter(b => /\/\*\s*(thai|latin)\s*\*\//.test(b));
+    const toData = async (u) => { const b = await (await fetch(u)).blob(); return new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(b); }); };
+    const out = [];
+    for (const b of blocks) { const u = b.match(/url\(([^)]+)\)/)?.[1]; if (u) out.push(b.replace(u, await toData(u))); }
+    Trv.fontCSS = out.join('\n');
+  } catch (e) { console.warn('[SFH] font embed', e); Trv.fontCSS = ''; }
+  return Trv.fontCSS;
+}
+/** ดาวน์โหลดใบสรุปเป็นไฟล์ PDF (A4)
+ *  แปลงหน้าสรุปเป็นภาพด้วย html-to-image (ใช้การจัดหน้าของเบราว์เซอร์เอง → เส้นตาราง/ตำแหน่งตัวอักษรตรงกับหน้าพิมพ์) แล้วใส่ลง jsPDF */
 async function trvDownloadPdf() {
   const root = trvBuildSummary(); if (!root) return;
   showLoader(true, 'กำลังสร้างไฟล์ PDF...');
   try {
     await Promise.all([
-      trvLoadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', () => !!window.html2canvas),
+      trvLoadScript('https://cdn.jsdelivr.net/npm/html-to-image@1.11.11/dist/html-to-image.js', () => !!window.htmlToImage),
       trvLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', () => !!window.jspdf?.jsPDF),
     ]);
     if (document.fonts?.ready) await document.fonts.ready;
     const page = $('.trv-page', root);
     root.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;';   // ต้องอยู่ในจอขณะแปลงเป็นภาพ
-    const canvas = await html2canvas(page, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false, windowWidth: page.scrollWidth });
+    const fontEmbedCSS = await trvFontCSS();
+    const canvas = await window.htmlToImage.toCanvas(page, { pixelRatio: 2, backgroundColor: '#ffffff', ...(fontEmbedCSS ? { fontEmbedCSS } : {}) });
     const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
     const W = 210, H = 297, imgH = canvas.height * W / canvas.width;
     const img = canvas.toDataURL('image/jpeg', 0.92);
