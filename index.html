@@ -4369,8 +4369,8 @@ async function calHomeWidget(box) {
   const today = calToday(), in7 = calAddDays(today, 7), in3 = calAddDays(today, 3);
   box.innerHTML = `<section class="mb-8"><div class="skeleton h-72 rounded-3xl"></div></section>`;
   const r = await dbMany([
-    s => s.from('v_public_cal_acting').select('*').lte('start_date', today).gte('end_date', today).order('position_title'),
-    s => s.from('v_public_cal_absences').select('*').lte('start_date', today).gte('end_date', today).order('person_name'),
+    s => s.from('v_public_cal_acting').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('position_title'),
+    s => s.from('v_public_cal_absences').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('person_name'),
     s => s.from('v_public_cal_events').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('start_time', { nullsFirst: true }).limit(8),
     s => s.from('v_public_cal_tasks').select('*').in('status', ['pending', 'in_progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(200),
     s => s.from('v_public_cal_activity').select('*').order('created_at', { ascending: false }).limit(5),
@@ -4385,6 +4385,10 @@ async function calHomeWidget(box) {
   const canOpen = State.menus.some(x => x.menu_key === 'calendar');
   const li = (inner, open) => `<li><button type="button" class="w-full text-left flex gap-2.5 rounded-xl px-2 py-2 hover:bg-white/80 transition" data-cal-open="${open}">${inner}</button></li>`;
   const empty = (t) => `<li class="px-2 py-3 text-sm text-slate-400">${t}</li>`;
+  // วันนี้ → "วันนี้ · ถึง …" (สีเข้ม) · ยังไม่ถึง → "เริ่ม …" (สีจาง)
+  const whenBadge = (a) => calInRange(a, today)
+    ? `<span class="block text-xs font-medium" style="color:#6B55BC">วันนี้ · ถึง ${formatThaiDate(calDate(a.end_date))}</span>`
+    : `<span class="block text-xs text-slate-400">${calRangeText(a.start_date, a.end_date)}</span>`;
   const block = (icon, color, title, count, inner, cls = '') => `<div class="rounded-2xl p-3 ${cls}" style="background:${hexToRgba(color, .07)}">
     <div class="flex items-center gap-2 mb-1 px-1"><span style="color:${color}">${ic(icon, 'w-4 h-4')}</span><h4 class="font-medium text-slate-700 text-sm flex-1">${title}</h4>${count != null ? `<span class="rounded-full px-2 text-xs text-white" style="background:${color}">${count}</span>` : ''}</div>
     <ul>${inner}</ul></div>`;
@@ -4397,10 +4401,10 @@ async function calHomeWidget(box) {
     </div>
     <div class="card p-3 md:p-4 grid gap-3">
       <div class="grid md:grid-cols-2 gap-3">
-        ${block('user-cog', '#8670D6', 'รักษาราชการแทนวันนี้', acting.length || null, acting.length ? acting.map(a => li(`<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-slate-700">${esc(a.position_title)}</span>
-          <span class="block text-sm text-slate-600">${esc(a.acting_name)} <span class="text-xs text-slate-400">(ถึง ${formatThaiDate(calDate(a.end_date))})</span></span></span>`, `acting|${a.id}`)).join('') : empty('วันนี้ไม่มีการรักษาราชการแทน'))}
-        ${block('user-minus', '#D95C8A', 'ไม่อยู่ปฏิบัติงานวันนี้', absent.length || null, absent.length ? absent.map(a => li(`<span class="min-w-0 flex-1 text-sm"><span class="text-slate-700">${esc(a.person_name)}</span>
-          <span class="badge bg-white text-blush-500 ml-1">${CAL_ABSENCE[a.kind]?.label || ''}${a.period !== 'full' ? ' · ' + CAL_PERIOD[a.period] : ''}</span></span>`, `absence|${a.id}`)).join('') : empty('วันนี้ทุกคนปฏิบัติงานตามปกติ'))}
+        ${block('user-cog', '#8670D6', 'รักษาราชการแทน (วันนี้ / 7 วันข้างหน้า)', acting.length || null, acting.length ? acting.map(a => li(`<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-slate-700">${esc(a.position_title)}</span>
+          <span class="block text-sm text-slate-600">${esc(a.acting_name)}</span>${whenBadge(a)}</span>`, `acting|${a.id}`)).join('') : empty('ไม่มีการรักษาราชการแทนในช่วงนี้'))}
+        ${block('user-minus', '#D95C8A', 'ไม่อยู่ปฏิบัติงาน (วันนี้ / 7 วันข้างหน้า)', absent.length || null, absent.length ? absent.map(a => li(`<span class="min-w-0 flex-1 text-sm"><span class="text-slate-700">${esc(a.person_name)}</span>
+          <span class="badge bg-white text-blush-500 ml-1">${CAL_ABSENCE[a.kind]?.label || ''}${a.period !== 'full' ? ' · ' + CAL_PERIOD[a.period] : ''}</span>${whenBadge(a)}</span>`, `absence|${a.id}`)).join('') : empty('ทุกคนปฏิบัติงานตามปกติ'))}
       </div>
       <div class="grid lg:grid-cols-3 gap-3">
         ${block('calendar-check', '#3B8FD4', 'กิจกรรม 7 วันข้างหน้า', events.length || null, events.length ? events.map(e => { const d = calDate(e.start_date < today ? today : e.start_date); return li(`<span class="w-10 shrink-0 text-center rounded-xl bg-white py-1"><span class="block text-[10px] text-slate-400">${TH_MONTHS_SHORT[d.getMonth()]}</span><span class="block text-base font-semibold text-brand-600 leading-none">${d.getDate()}</span></span>
