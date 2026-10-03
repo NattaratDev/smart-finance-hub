@@ -564,8 +564,9 @@ revoke execute on function public.sfh_payroll_recalc(uuid) from public, anon, au
 
 
 -- =====================================================================
--- 7) สลิปเงินเดือนแบบ Manual (เมนูแยก – สลิปเดี่ยว ไม่ผูกกับงวดที่นำเข้าจาก Excel)
+-- 7) สลิปแบบ Manual (แท็บ "สลิปแบบ Manual" ในโมดูลสลิปเงินเดือน – สลิปเดี่ยว ไม่ผูกกับงวดที่นำเข้าจาก Excel)
 --    เช่น สลิปเงินตกเบิก / สลิปของผู้ที่ไม่มีในไฟล์ · ความปลอดภัยแบบเดียวกับ payroll_*
+--    สิทธิ์: ดู = payroll.view · สร้าง/แก้ไข/ลบ = payroll.manage · พิมพ์ = payroll.print
 -- =====================================================================
 create table if not exists public.payroll_manual_slips (
   id               uuid primary key default gen_random_uuid(),
@@ -626,7 +627,7 @@ declare
   v_user  public.users%rowtype;
   v_super boolean;
 begin
-  v_user  := public.sfh_payroll_auth(p_token, 'payroll_manual.view');
+  v_user  := public.sfh_payroll_auth(p_token, 'payroll.view');
   v_super := exists (select 1 from public.roles where id = v_user.role_id and role_key = 'super_admin');
   return coalesce((
     select jsonb_agg(to_jsonb(s) - 'created_by' - 'updated_by' || jsonb_build_object('org_name', o.name)
@@ -656,7 +657,7 @@ declare
   v_id    uuid;
   v_no    text;
 begin
-  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.manage');
+  v_user := public.sfh_payroll_auth(p_token, 'payroll.manage');
   if v_user.org_id is null then raise exception 'บัญชีนี้ไม่ได้สังกัดหน่วยงาน'; end if;
   if v_name = '' then raise exception 'กรุณาระบุชื่อ-สกุล'; end if;
   if v_year is null or v_year not between 2500 and 2700 or v_month is null or v_month not between 1 and 12 then
@@ -726,7 +727,7 @@ declare
   v_user public.users%rowtype;
   v_old  public.payroll_manual_slips%rowtype;
 begin
-  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.manage');
+  v_user := public.sfh_payroll_auth(p_token, 'payroll.manage');
   select * into v_old from public.payroll_manual_slips where id = p_id;
   if not found then raise exception 'ไม่พบสลิป'; end if;
   if v_old.org_id <> v_user.org_id
@@ -749,7 +750,7 @@ set search_path = public, extensions
 as $$
 declare v_user public.users%rowtype;
 begin
-  v_user := public.sfh_payroll_auth(p_token, 'payroll_manual.view');
+  v_user := public.sfh_payroll_auth(p_token, 'payroll.print');
   insert into public.audit_logs(org_id, user_id, username, action, table_name, record_id, details, created_by)
   values (v_user.org_id, v_user.id, v_user.username, 'print', 'payroll_manual_slips', null,
           jsonb_build_object('count', coalesce(array_length(p_ids, 1), 0),
@@ -757,35 +758,14 @@ begin
                              'signer', p_signer_name, 'signer_position', p_signer_position), v_user.id);
 end $$;
 
--- 7.5 โมดูล / Permission / เมนู
-insert into public.modules (module_key, name, description, icon, color, status, allow_guest, guest_locked, is_core, sort_order, version, planned_features) values
- ('payroll_manual', 'สลิปเงินเดือน (Manual)',
-  'จัดทำสลิปเงินเดือนเพิ่มเติมด้วยมือ แยกจากงวดที่นำเข้าจาก Excel เช่น สลิปเงินตกเบิก หรือผู้ที่ไม่มีในไฟล์ พิมพ์รูปแบบ A4 เดียวกับสลิปปกติ',
-  'file-pen-line', '#8670D6', 'active', false, true, false, 13, '1.0.0',
-  '["กรอกรายการรับ-หักเอง ระบบคำนวณยอดและจำนวนเงินตัวอักษรให้","ออกเลขที่สลิปอัตโนมัติ (MSปปปป-ลำดับ)","คัดลอกสลิปเดิมไปทำเดือนถัดไป","พิมพ์ A4 / บันทึก PDF พร้อมเปลี่ยนผู้ลงนาม"]'::jsonb)
-on conflict (module_key) do nothing;
-
-insert into public.permissions (perm_key, module_key, action, name, description, org_admin_grantable, sort_order) values
- ('payroll_manual.view',   'payroll_manual', 'view',   'ดู/พิมพ์สลิปเงินเดือน (Manual)',        'เข้าเมนู ค้นหา ดูตัวอย่าง และพิมพ์สลิปแบบ Manual', true, 55),
- ('payroll_manual.manage', 'payroll_manual', 'manage', 'สร้าง/แก้ไข/ลบสลิปเงินเดือน (Manual)', null, true, 56)
-on conflict (perm_key) do update
-  set module_key = excluded.module_key, action = excluded.action, name = excluded.name, description = excluded.description, sort_order = excluded.sort_order;
-
-insert into public.role_permissions (role_id, permission_id)
-select r.id, p.id from public.roles r join public.permissions p on p.module_key = 'payroll_manual'
- where r.role_key in ('super_admin', 'org_admin')
-on conflict (role_id, permission_id) do nothing;
-
-insert into public.user_permissions (user_id, permission_id, org_id, created_by)
-select 'bbbbbbbb-0000-0000-0000-000000000003'::uuid, p.id, '11111111-1111-1111-1111-111111111111'::uuid, 'bbbbbbbb-0000-0000-0000-000000000001'::uuid
-  from public.permissions p
- where p.module_key = 'payroll_manual'
-   and exists (select 1 from public.users where id = 'bbbbbbbb-0000-0000-0000-000000000003')
-on conflict (user_id, permission_id) do nothing;
-
-insert into public.menus (menu_key, label, icon, module_key, required_permission, public_permission, sort_order, is_active, show_on_mobile, menu_group, description) values
- ('payroll_manual', 'สลิปเงินเดือน (Manual)', 'file-pen-line', 'payroll_manual', 'payroll_manual.view', null, 13, true, true, 'module', 'จัดทำสลิปเงินเดือนเพิ่มเติมด้วยมือ')
-on conflict (menu_key) do nothing;
+-- 7.5 อัปเกรดจากรุ่นที่เคยแยกเป็นเมนู/โมดูล "payroll_manual" → รวมเข้าโมดูลสลิปเงินเดือน
+--     (ลบ Permission แล้ว role_permissions / user_permissions ที่อ้างถึงจะถูกลบตาม)
+delete from public.menus       where menu_key   = 'payroll_manual';
+delete from public.modules     where module_key = 'payroll_manual';
+delete from public.permissions where module_key = 'payroll_manual';
+update public.modules
+   set planned_features = '["นำเข้าไฟล์ Excel งด.2 ได้ทันทีโดยไม่ต้องจับคู่คอลัมน์","ตรวจยอดรายคนและยอดรวมกับแถวรวมทั้งสิ้น","สลิปแบบ Manual สำหรับสลิปเพิ่มเติม เช่น เงินตกเบิก","พิมพ์สลิป A4 / บันทึก PDF พร้อมเปลี่ยนชื่อผู้ลงนามได้"]'::jsonb
+ where module_key = 'payroll';
 
 -- 7.6 ปิดการเข้าถึงตรง + สิทธิ์เรียกฟังก์ชัน
 alter table public.payroll_manual_slips enable row level security;
