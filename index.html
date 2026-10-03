@@ -4431,10 +4431,597 @@ async function calHomeWidget(box) {
 /* ===== END MODULE: calendar ===== */
 
 
-/* ===== MODULE: travel (โปรแกรมคำนวณค่าใช้จ่ายไปราชการ) ===== */
-// Phase 1: ยังไม่พัฒนา → ใช้ renderComingSoon
-// รอบถัดไป: เขียน function renderTravel(el, mod, menu) { ... } แล้วเปลี่ยน MODULES.travel.render = renderTravel
-//           และเปลี่ยนสถานะโมดูลเป็น active ที่หน้า "จัดการโมดูล" (+ รัน module_travel.sql)
+/* ===== MODULE: travel (โปรแกรมคำนวณค่าใช้จ่ายไปราชการ / ไปฝึกอบรม) ===== */
+// คำนวณเบี้ยเลี้ยง ค่าที่พัก ค่าพาหนะ และค่าใช้จ่ายรวม ทั้งคนเดียวและหมู่คณะ (เครื่องคำนวณ – ไม่บันทึกข้อมูลผู้เดินทาง)
+// ตารางที่ใช้: travel_rate_sets (module_travel.sql) – ชุดอัตรา + กฎการคำนวณ (JSON) แก้ไขได้โดย travel.manage_rates
+Object.assign(TABLE_LABELS, { travel_rate_sets: 'ชุดอัตราค่าใช้จ่ายไปราชการ' });
+
+const TRV_MODES = {
+  travel:   { label: 'ไปราชการ', icon: 'briefcase', title: 'ค่าใช้จ่ายในการเดินทางไปราชการ' },
+  training: { label: 'ไปฝึกอบรม', icon: 'graduation-cap', title: 'ค่าใช้จ่ายในการเดินทางไปฝึกอบรม' },
+};
+const Trv = { tab: 'calc', sets: [], trip: null, quick: null, seq: 0 };
+
+/* ---------- ชุดอัตรา ---------- */
+async function trvLoadSets() {
+  const r = await db(s => s.from('travel_rate_sets').select('*').order('effective_from', { ascending: false, nullsFirst: false }), { loaderText: 'กำลังโหลดอัตรา...', error: 'โหลดอัตราไม่สำเร็จ' });
+  if (!r.ok) return false;
+  Trv.sets = r.data || [];
+  return true;
+}
+/** ชุดอัตราที่มีผล ณ วันที่ (ชุดที่วันที่มีผลล่าสุดแต่ไม่เกินวันเดินทาง · วันที่มีผลว่าง = ชุดตั้งต้น) */
+function trvSetFor(dateStr) {
+  const d = String(dateStr || calToday()).slice(0, 10);
+  const act = Trv.sets.filter(s => s.is_active);
+  return act.filter(s => s.effective_from && s.effective_from <= d).sort((a, b) => b.effective_from.localeCompare(a.effective_from))[0]
+    || act.find(s => !s.effective_from) || act[0] || null;
+}
+const trvGroup = (cfg, key) => cfg.groups.find(g => g.key === key) || cfg.groups[0];
+const trvMoney = (n) => formatMoney(n, { unit: false, decimals: Number.isInteger(+n) ? 0 : 2 });
+const trvNum = (v) => { const n = Number(String(v ?? '').replace(/,/g, '')); return isFinite(n) && n > 0 ? n : 0; };
+
+/* ---------- เวลา ---------- */
+const trvParse = (s) => { const d = s ? new Date(s) : null; return d && !isNaN(d) ? d : null; };
+function trvDT(d) { return d ? `${formatThaiDate(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} น.` : '-'; }
+function trvHM(h) { const hh = Math.floor(h + 1e-9), mm = Math.round((h - hh) * 60); return mm ? `${hh} ชม. ${mm} นาที` : `${hh} ชม.`; }
+/** จำนวนคืน = จำนวนวันปฏิทินที่ข้าม (ใช้เป็นค่าเริ่มต้นของจำนวนคืนที่พัก) */
+function trvNights(dep, ret) {
+  const a = trvParse(dep), b = trvParse(ret);
+  if (!a || !b || b <= a) return 0;
+  return Math.max(0, calDaysBetween(calKey(a), calKey(b)));
+}
+
+/* ---------- 1) เบี้ยเลี้ยง ---------- */
+/** นับวันเบี้ยเลี้ยงตามกฎ: 24 ชม. = 1 วัน · พักแรม: เศษเกิน X ชม. = 1 วัน · ไม่พักแรม: เศษเกิน X ชม. = 1 วัน, เกิน Y ชม. = ครึ่งวัน */
+function trvAllowanceDays(dep, ret, overnight, rules) {
+  const a = trvParse(dep), b = trvParse(ret);
+  if (!a || !b) return { ok: false, msg: 'กรุณาระบุวันเวลาออกเดินทางและกลับ' };
+  if (b <= a) return { ok: false, msg: 'วันเวลากลับต้องหลังวันเวลาออกเดินทาง' };
+  const H = (b - a) / 3600000, dh = rules.day_hours || 24;
+  const full = Math.floor(H / dh + 1e-9), rem = Math.max(0, H - full * dh);
+  let extra = 0, why;
+  if (overnight) {
+    extra = rem > rules.overnight_full_over ? 1 : 0;
+    why = rem < 1 / 60 ? 'ไม่มีเศษ' : extra ? `เศษ ${trvHM(rem)} เกิน ${rules.overnight_full_over} ชม. นับเป็น 1 วัน` : `เศษ ${trvHM(rem)} ไม่เกิน ${rules.overnight_full_over} ชม. (พักแรม) ไม่นับ`;
+  } else {
+    extra = rem > rules.noovernight_full_over ? 1 : rem > rules.noovernight_half_over ? 0.5 : 0;
+    why = rem < 1 / 60 ? 'ไม่มีเศษ' : extra === 1 ? `เศษ ${trvHM(rem)} เกิน ${rules.noovernight_full_over} ชม. นับเป็น 1 วัน`
+      : extra === 0.5 ? `เศษ ${trvHM(rem)} เกิน ${rules.noovernight_half_over} ชม. นับเป็นครึ่งวัน` : `เศษ ${trvHM(rem)} ไม่เกิน ${rules.noovernight_half_over} ชม. ไม่นับ`;
+  }
+  return { ok: true, H, full, rem, days: full + extra, why };
+}
+/** เบี้ยเลี้ยงรายคน – ไปฝึกอบรม: หักมื้ออาหารที่ผู้จัดจัดให้ มื้อละ อัตรา/ตัวหาร */
+function trvAllowance({ group, dep, ret, overnight, meals = 0, training = false }, cfg) {
+  const g = trvGroup(cfg, group), d = trvAllowanceDays(dep, ret, overnight, cfg.day_rules);
+  if (!d.ok) return { amount: 0, lines: [d.msg], error: d.msg };
+  const gross = d.days * g.allowance;
+  const lines = [`ออก ${trvDT(trvParse(dep))} – กลับ ${trvDT(trvParse(ret))} รวม ${trvHM(d.H)} (${overnight ? 'พักแรม' : 'ไม่พักแรม'})`,
+    `${d.full} วัน${d.full ? ` (ครบ ${cfg.day_rules.day_hours || 24} ชม.)` : ''} · ${d.why} → นับได้ ${d.days} วัน`,
+    `${d.days} วัน × ${trvMoney(g.allowance)} บาท (${g.name}) = ${trvMoney(gross)} บาท`];
+  let deduct = 0;
+  if (training && meals > 0) {
+    const per = Math.round(g.allowance / (cfg.training?.meal_divisor || 3) * 100) / 100;
+    deduct = Math.min(gross, per * meals);
+    lines.push(`หักอาหารที่ผู้จัดจัดให้ ${meals} มื้อ × ${trvMoney(per)} บาท = ${trvMoney(deduct)} บาท`);
+  }
+  return { amount: Math.max(0, gross - deduct), days: d.days, rate: g.allowance, deduct, lines };
+}
+
+/* ---------- 2) ค่าที่พัก ---------- */
+/** room: single|double · method: actual|lump · actual: ยอดจ่ายจริงรวมทุกคืน · highCost: เพิ่มเพดานจ่ายจริงไม่เกิน x% */
+function trvLodging({ group, method, room, nights, actual = 0, highCost = false, provided = false, head = null }, cfg) {
+  const g = trvGroup(cfg, group);
+  if (provided) return { amount: 0, lines: ['ผู้จัดจัดที่พักให้ – ไม่เบิกค่าที่พัก'] };
+  if (!nights) return { amount: 0, lines: ['ไม่มีการพักแรม'] };
+  if (method === 'lump') {
+    const amt = g.lodging_lump * nights;
+    return { amount: amt, lines: [`เหมาจ่าย ${trvMoney(g.lodging_lump)} บาท × ${nights} คืน = ${trvMoney(amt)} บาท`] };
+  }
+  const base = room === 'single' ? g.lodging_single : g.lodging_double;
+  const pct = highCost ? (cfg.high_cost_pct || 0) : 0;
+  const rate = Math.round(base * (1 + pct / 100) * 100) / 100;
+  const cap = rate * nights;
+  const lines = [`จ่ายจริง · ${room === 'single' ? 'ห้องพักคนเดียว' : 'ห้องพักคู่'} เพดาน ${trvMoney(base)} บาท${pct ? ` + ${pct}% (ท้องที่ค่าครองชีพสูง) = ${trvMoney(rate)} บาท` : ''} × ${nights} คืน = ${trvMoney(cap)} บาท`];
+  let amt;
+  if (actual > 0) { amt = Math.min(actual, cap); lines.push(`จ่ายจริง ${trvMoney(actual)} บาท → เบิกได้ ${trvMoney(amt)} บาท${actual > cap ? ' (เกินเพดาน)' : ''}`); }
+  else { amt = 0; lines.push('ยังไม่ได้กรอกยอดจ่ายจริง (แสดงเพดานที่เบิกได้)'); }
+  if (head?.on) {   // หัวหน้าคณะ (กลุ่ม ค) เช่าห้องประสานงานเพิ่ม
+    const hcap = g.lodging_single * (head.type === 'suite' ? 2 : 1) * nights;
+    const hamt = Math.min(trvNum(head.amount), hcap);
+    lines.push(`ห้อง${head.type === 'suite' ? 'ชุด' : 'พักคนเดียว'}ประสานงานของหัวหน้าคณะ เพดาน ${trvMoney(hcap)} บาท · จ่ายจริง ${trvMoney(trvNum(head.amount))} → เบิกได้ ${trvMoney(hamt)} บาท`);
+    amt += hamt;
+  }
+  return { amount: amt, cap, lines };
+}
+
+/* ---------- 3) ค่าพาหนะ ---------- */
+function trvVehicle(v, cfg) {
+  const t = cfg.vehicles.find(x => x.key === v.type) || cfg.vehicles[0];
+  if (t.mode === 'km') { const km = trvNum(v.km), amt = Math.round(km * t.rate * 100) / 100; return { amount: amt, line: `${t.name} ${trvMoney(km)} กม. × ${trvMoney(t.rate)} บาท = ${trvMoney(amt)} บาท` }; }
+  const amt = trvNum(v.amount);
+  return { amount: amt, line: `${t.name}${v.note ? ` (${v.note})` : ''} จ่ายจริง ${trvMoney(amt)} บาท` };
+}
+
+/* ---------- 4–5) คำนวณทั้งทริป ---------- */
+function trvNewPerson() { return { id: ++Trv.seq, name: '', group: 'A', room: 'single', needSingle: false, actual: '', ownTime: false, dep: '', ret: '', overnight: true, meals: '', reg: '', head: { on: false, type: 'single', amount: '' } }; }
+function trvNewTrip() {
+  const d = calAddDays(calToday(), 1);
+  const t = { mode: 'travel', purpose: '', place: '', dep: `${d}T08:00`, ret: `${calAddDays(d, 1)}T17:00`, overnight: true, nights: '', method: 'actual', highCost: false,
+    lodgingProvided: false, reg: '', meals: '', people: [], vehicles: [], others: [] };
+  t.people.push(trvNewPerson());
+  return t;
+}
+function trvCompute(trip) {
+  const set = trvSetFor(trip.dep); if (!set) return null;
+  const cfg = set.config, training = trip.mode === 'training', group = trip.people.length > 1;
+  const res = trip.people.map((p, i) => {
+    const dep = p.ownTime && p.dep ? p.dep : trip.dep, ret = p.ownTime && p.ret ? p.ret : trip.ret, overnight = p.ownTime ? p.overnight : trip.overnight;
+    const nightsAuto = overnight ? trvNights(dep, ret) : 0;
+    const nights = !overnight ? 0 : !p.ownTime && trip.nights !== '' ? Math.max(0, Math.floor(trvNum(trip.nights))) : nightsAuto;
+    const g = trvGroup(cfg, p.group);
+    // ห้องพัก: กลุ่ม ก เดินทางคนเดียว = ห้องเดี่ยว · หมู่คณะ = ห้องคู่ (เว้นแต่มีเหตุจำเป็น) · กลุ่ม ข/ค เลือกได้
+    const room = g.choose_room ? p.room : (group && !p.needSingle ? 'double' : 'single');
+    const allow = trvAllowance({ group: p.group, dep, ret, overnight, meals: trvNum(p.meals !== '' ? p.meals : trip.meals), training }, cfg);
+    const lodg = trvLodging({ group: p.group, method: trip.method, room, nights, actual: trvNum(p.actual), highCost: trip.highCost, provided: training && trip.lodgingProvided,
+      head: g.head_extra && group && trip.method === 'actual' ? p.head : null }, cfg);
+    const veh = trip.vehicles.filter(v => +v.payer === p.id).map(v => trvVehicle(v, cfg));
+    const reg = training ? trvNum(p.reg !== '' ? p.reg : trip.reg) : 0;
+    const oth = trip.others.filter(o => o.payer === 'each' || +o.payer === p.id).map(o => ({ amount: trvNum(o.amount), line: `${o.desc || 'ค่าใช้จ่ายอื่น'} ${trvMoney(trvNum(o.amount))} บาท` }));
+    const row = { p, idx: i, name: p.name.trim() || `ผู้เดินทางคนที่ ${i + 1}`, group: g, room, nights,
+      allowance: allow.amount, lodging: lodg.amount, vehicle: veh.reduce((a, v) => a + v.amount, 0), reg, other: oth.reduce((a, o) => a + o.amount, 0),
+      lines: { allowance: allow.lines, lodging: lodg.lines, vehicle: veh.map(v => v.line), other: oth.map(o => o.line) }, error: allow.error };
+    row.total = row.allowance + row.lodging + row.vehicle + row.reg + row.other;
+    return row;
+  });
+  const sum = (k) => res.reduce((a, r) => a + r[k], 0);
+  return { set, cfg, rows: res, totals: { allowance: sum('allowance'), lodging: sum('lodging'), vehicle: sum('vehicle'), reg: sum('reg'), other: sum('other'), total: sum('total') } };
+}
+
+/* ---------- หน้าหลัก ---------- */
+async function renderTravel(el, mod) {
+  const admin = hasPermission('travel.manage_rates') && isLoggedIn();
+  el.innerHTML = pageHeader({
+    title: mod?.name || 'โปรแกรมคำนวณค่าใช้จ่ายไปราชการ', icon: 'plane', tone: 'brand',
+    subtitle: 'คำนวณเบี้ยเลี้ยง ค่าที่พัก ค่าพาหนะ และค่าใช้จ่ายรวม ทั้งคนเดียวและหมู่คณะ · ระบบไม่บันทึกข้อมูลผู้เดินทาง',
+  }) + `<div class="flex gap-1 mb-5 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
+      ${[['calc', 'calculator', 'คำนวณค่าใช้จ่าย'], ['quick', 'zap', 'คำนวณด่วน'], ['rates', 'table-2', admin ? 'ตั้งค่าอัตรา' : 'อัตราที่ใช้']]
+        .map(([k, i, l]) => `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-trv-tab="${k}" role="tab">${ic(i, 'w-4 h-4')} ${l}</button>`).join('')}
+    </div><div id="trvBody">${skeletonCards(1, 'h-96')}</div>`;
+  refreshIcons();
+  if (!(await trvLoadSets())) { $('#trvBody', el).innerHTML = errorState('โหลดอัตราไม่สำเร็จ', 'กรุณารันไฟล์ module_travel.sql'); return; }
+  if (!Trv.sets.length) { $('#trvBody', el).innerHTML = errorState('ยังไม่มีชุดอัตรา', 'กรุณารันไฟล์ module_travel.sql หรือให้ผู้ดูแลเพิ่มชุดอัตรา'); return; }
+  if (!Trv.trip) Trv.trip = trvNewTrip();
+  el.onclick = (e) => { const t = e.target.closest('[data-trv-tab]'); if (t) { Trv.tab = t.dataset.trvTab; trvRenderTab(el); } };
+  trvRenderTab(el);
+}
+function trvRenderTab(el) {
+  $$('[data-trv-tab]', el).forEach(b => {
+    const on = b.dataset.trvTab === Trv.tab;
+    b.setAttribute('aria-selected', on);
+    b.classList.toggle('bg-gradient-to-r', on); b.classList.toggle('from-brand-400', on); b.classList.toggle('to-mint-400', on);
+    b.classList.toggle('text-white', on); b.classList.toggle('shadow-sm', on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('hover:bg-slate-50', !on);
+  });
+  const body = $('#trvBody', el);
+  body.oninput = body.onchange = body.onclick = null;
+  if (Trv.tab === 'calc') trvRenderCalc(body);
+  else if (Trv.tab === 'quick') trvRenderQuick(body);
+  else trvRenderRates(body);
+  refreshIcons();
+}
+
+/* ---------- แท็บ: คำนวณค่าใช้จ่าย ---------- */
+const trvGroupOptions = (cfg, v) => cfg.groups.map(g => `<option value="${g.key}" ${g.key === v ? 'selected' : ''}>${esc(g.name)} – เบี้ยเลี้ยง ${trvMoney(g.allowance)}</option>`).join('');
+function trvRenderCalc(body) {
+  const t = Trv.trip, set = trvSetFor(t.dep), cfg = set.config, training = t.mode === 'training', group = t.people.length > 1;
+  const nightsAuto = t.overnight ? trvNights(t.dep, t.ret) : 0;
+  const personCard = (p, i) => {
+    const g = trvGroup(cfg, p.group), lump = t.method === 'lump';
+    const roomField = (training && t.lodgingProvided) || lump ? '' : g.choose_room
+      ? `<div><label class="label">ห้องพัก</label><select class="input" data-p="${i}" data-f="room" data-re><option value="single" ${p.room === 'single' ? 'selected' : ''}>ห้องพักคนเดียว (${trvMoney(g.lodging_single)})</option><option value="double" ${p.room === 'double' ? 'selected' : ''}>ห้องพักคู่ (${trvMoney(g.lodging_double)})</option></select></div>`
+      : group ? `<div class="flex items-end"><label class="inline-flex items-start gap-2 text-sm text-slate-600 pb-2"><input type="checkbox" class="rounded mt-0.5" data-p="${i}" data-f="needSingle" ${p.needSingle ? 'checked' : ''}> มีเหตุจำเป็นพักรวมไม่ได้ (เบิกอัตราห้องเดี่ยว)</label></div>` : '';
+    return `<div class="rounded-2xl border border-slate-100 bg-white p-3 sm:p-4">
+      <div class="flex items-center gap-2 mb-3"><span class="w-7 h-7 rounded-xl bg-brand-100 text-brand-600 grid place-items-center text-sm font-semibold">${i + 1}</span>
+        <input class="input !py-1.5 flex-1" placeholder="ชื่อ-สกุล (ไม่บังคับ)" value="${esc(p.name)}" data-p="${i}" data-f="name">
+        ${t.people.length > 1 ? `<button type="button" class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-trv-rm="${i}" title="ลบผู้เดินทาง">${ic('trash-2')}</button>` : ''}</div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div class="sm:col-span-2"><label class="label">กลุ่มตำแหน่ง</label><select class="input" data-p="${i}" data-f="group" data-re>${trvGroupOptions(cfg, p.group)}</select>
+          <p class="text-xs text-slate-400 mt-1 line-clamp-2" title="${esc(g.desc)}">${esc(g.desc)}</p></div>
+        ${roomField}
+        ${!lump && !(training && t.lodgingProvided) ? `<div><label class="label">ค่าที่พักจ่ายจริง (รวมทุกคืน)</label><input class="input" inputmode="decimal" placeholder="0.00" value="${esc(p.actual)}" data-p="${i}" data-f="actual"></div>` : ''}
+        ${training ? `<div><label class="label">ค่าลงทะเบียน</label><input class="input" inputmode="decimal" placeholder="ตามค่าส่วนกลาง" value="${esc(p.reg)}" data-p="${i}" data-f="reg"></div>
+          <div><label class="label">มื้ออาหารที่ผู้จัดเลี้ยง (มื้อ)</label><input class="input" inputmode="numeric" placeholder="ตามค่าส่วนกลาง" value="${esc(p.meals)}" data-p="${i}" data-f="meals"></div>` : ''}
+        ${g.head_extra && group && !lump && !(training && t.lodgingProvided) ? `<div class="sm:col-span-2 rounded-xl bg-lilac-50 border border-lilac-100 p-2.5">
+          <label class="inline-flex items-center gap-2 text-sm text-slate-700"><input type="checkbox" class="rounded" data-p="${i}" data-f="head.on" data-re ${p.head.on ? 'checked' : ''}> หัวหน้าคณะ: เช่าห้องเพิ่มเพื่อเป็นที่ประสานงาน</label>
+          ${p.head.on ? `<div class="grid grid-cols-2 gap-2 mt-2"><select class="input" data-p="${i}" data-f="head.type"><option value="single" ${p.head.type === 'single' ? 'selected' : ''}>ห้องพักคนเดียว</option><option value="suite" ${p.head.type === 'suite' ? 'selected' : ''}>ห้องชุด (ไม่เกิน 2 เท่า)</option></select>
+            <input class="input" inputmode="decimal" placeholder="จ่ายจริง (รวมทุกคืน)" value="${esc(p.head.amount)}" data-p="${i}" data-f="head.amount"></div>` : ''}</div>` : ''}
+        <div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" data-p="${i}" data-f="ownTime" data-re ${p.ownTime ? 'checked' : ''}> วันเวลาเดินทางต่างจากคณะ</label></div>
+        ${p.ownTime ? `<div><label class="label">ออกเดินทาง</label><input type="datetime-local" class="input" value="${esc(p.dep || t.dep)}" data-p="${i}" data-f="dep"></div>
+          <div><label class="label">กลับถึง</label><input type="datetime-local" class="input" value="${esc(p.ret || t.ret)}" data-p="${i}" data-f="ret"></div>
+          <div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" data-p="${i}" data-f="overnight" ${p.overnight ? 'checked' : ''}> พักแรม</label></div>` : ''}
+      </div></div>`;
+  };
+  const payerOpts = (v, each = false) => (each ? `<option value="each" ${v === 'each' ? 'selected' : ''}>ทุกคน (คนละเท่ากัน)</option>` : '')
+    + t.people.map((p, i) => `<option value="${p.id}" ${+v === p.id ? 'selected' : ''}>${esc(p.name.trim() || `ผู้เดินทางคนที่ ${i + 1}`)}</option>`).join('');
+  body.innerHTML = `<div class="grid xl:grid-cols-5 gap-4 items-start">
+    <div class="xl:col-span-3 grid gap-4">
+      <div class="card p-4 sm:p-5">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+          <div class="inline-flex rounded-2xl border border-slate-200 bg-white p-1">${Object.entries(TRV_MODES).map(([k, m]) => `<button type="button" data-trv-mode="${k}" class="inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-sm ${t.mode === k ? 'bg-brand-400 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-50'}">${ic(m.icon, 'w-4 h-4')} ${m.label}</button>`).join('')}</div>
+          <button type="button" class="btn btn-ghost btn-sm" data-trv-reset>${ic('rotate-ccw', 'w-4 h-4')} เริ่มใหม่</button>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="sm:col-span-2"><label class="label">${training ? 'หลักสูตร/การฝึกอบรม' : 'วัตถุประสงค์การเดินทาง'}</label><input class="input" value="${esc(t.purpose)}" data-t="purpose" placeholder="ไม่บังคับ – ใช้แสดงในใบสรุป"></div>
+          <div class="sm:col-span-2"><label class="label">สถานที่</label><input class="input" value="${esc(t.place)}" data-t="place" placeholder="ไม่บังคับ"></div>
+          <div><label class="label">ออกเดินทาง *</label><input type="datetime-local" class="input" value="${esc(t.dep)}" data-t="dep" data-re></div>
+          <div><label class="label">กลับถึง *</label><input type="datetime-local" class="input" value="${esc(t.ret)}" data-t="ret" data-re></div>
+          <div><label class="inline-flex items-center gap-2 text-sm text-slate-600 mt-1"><input type="checkbox" class="rounded" data-t="overnight" data-re ${t.overnight ? 'checked' : ''}> พักแรม</label></div>
+          <div><label class="label">จำนวนคืนที่พัก</label><input class="input" inputmode="numeric" value="${esc(t.nights)}" placeholder="อัตโนมัติ: ${nightsAuto} คืน" data-t="nights" ${t.overnight ? '' : 'disabled'}></div>
+          ${training ? `<div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" data-t="lodgingProvided" data-re ${t.lodgingProvided ? 'checked' : ''}> ผู้จัดฝึกอบรมจัดที่พักให้ (ไม่เบิกค่าที่พัก)</label></div>
+            <div><label class="label">ค่าลงทะเบียน (ต่อคน)</label><input class="input" inputmode="decimal" value="${esc(t.reg)}" placeholder="0.00" data-t="reg"></div>
+            <div><label class="label">มื้ออาหารที่ผู้จัดเลี้ยง (ต่อคน)</label><input class="input" inputmode="numeric" value="${esc(t.meals)}" placeholder="0" data-t="meals">
+              <p class="text-xs text-slate-400 mt-1">หักเบี้ยเลี้ยงมื้อละ 1/${cfg.training?.meal_divisor || 3} ของอัตราต่อวัน</p></div>` : ''}
+          ${!(training && t.lodgingProvided) ? `<div class="sm:col-span-2"><label class="label">วิธีเบิกค่าที่พัก (ใช้แบบเดียวกันทั้งคณะ)</label>
+            <div class="grid grid-cols-2 gap-2">${[['actual', 'จ่ายจริง (ไม่เกินอัตรา)'], ['lump', 'เหมาจ่าย']].map(([k, l]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer ${t.method === k ? 'border-brand-300 bg-brand-50 text-brand-700' : 'border-slate-200 text-slate-600'}">
+              <input type="radio" name="trvMethod" value="${k}" class="sr-only" data-t="method" data-re ${t.method === k ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
+            ${t.method === 'actual' ? `<div class="sm:col-span-2"><label class="inline-flex items-start gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded mt-0.5" data-t="highCost" ${t.highCost ? 'checked' : ''}> ท้องที่ค่าครองชีพสูง/แหล่งท่องเที่ยว และผู้บริหารอนุมัติให้เบิกเกินอัตราได้ไม่เกิน ${cfg.high_cost_pct}%</label></div>` : ''}` : ''}
+        </div>
+      </div>
+      <div class="card p-4 sm:p-5">
+        <div class="flex items-center justify-between gap-2 mb-3"><h4 class="font-medium text-slate-700 flex items-center gap-2">${ic('users', 'w-4 h-4 text-brand-400')} ผู้เดินทาง <span class="badge bg-brand-50 text-brand-600">${t.people.length} คน</span></h4>
+          <button type="button" class="btn btn-soft btn-sm" data-trv-add="person">${ic('user-plus', 'w-4 h-4')} เพิ่มผู้เดินทาง</button></div>
+        ${group && t.method === 'actual' && !(training && t.lodgingProvided) ? `<p class="text-xs text-slate-500 mb-3">${ic('info', 'w-3.5 h-3.5 inline')} หมู่คณะ: ${esc(cfg.groups.filter(g => !g.choose_room).map(g => g.name).join(', '))} พักรวมกันสองคนขึ้นไปต่อห้อง เบิกไม่เกินอัตราห้องพักคู่ เว้นแต่มีเหตุจำเป็น</p>` : ''}
+        <div class="grid gap-3">${t.people.map(personCard).join('')}</div>
+      </div>
+      <div class="card p-4 sm:p-5">
+        <div class="flex items-center justify-between gap-2 mb-3"><h4 class="font-medium text-slate-700 flex items-center gap-2">${ic('car', 'w-4 h-4 text-brand-400')} ค่าพาหนะ</h4>
+          <button type="button" class="btn btn-soft btn-sm" data-trv-add="vehicle">${ic('plus', 'w-4 h-4')} เพิ่มรายการ</button></div>
+        ${t.vehicles.length ? `<div class="grid gap-2">${t.vehicles.map((v, i) => { const vt = cfg.vehicles.find(x => x.key === v.type) || cfg.vehicles[0]; return `<div class="grid gap-2 sm:grid-cols-[1.3fr,1fr,1.2fr,auto] items-end rounded-2xl bg-slate-50 p-2.5">
+            <div><label class="label !text-xs">ประเภทพาหนะ</label><select class="input" data-v="${i}" data-f="type" data-re>${cfg.vehicles.map(x => `<option value="${x.key}" ${x.key === vt.key ? 'selected' : ''}>${esc(x.name)}${x.mode === 'km' ? ` (${trvMoney(x.rate)} บ./กม.)` : ''}</option>`).join('')}</select></div>
+            ${vt.mode === 'km' ? `<div><label class="label !text-xs">ระยะทางไป-กลับ (กม.)</label><input class="input" inputmode="decimal" value="${esc(v.km)}" data-v="${i}" data-f="km" placeholder="0"></div>`
+              : `<div><label class="label !text-xs">จำนวนเงินจ่ายจริง</label><input class="input" inputmode="decimal" value="${esc(v.amount)}" data-v="${i}" data-f="amount" placeholder="0.00"></div>`}
+            <div><label class="label !text-xs">ผู้เบิก</label><select class="input" data-v="${i}" data-f="payer">${payerOpts(v.payer)}</select></div>
+            <button type="button" class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-trv-del="vehicle|${i}" title="ลบ">${ic('trash-2')}</button></div>`; }).join('')}</div>
+            <p class="text-xs text-slate-400 mt-2">ระยะทางรถส่วนตัวให้ใช้ระยะทางของกรมทางหลวงในเส้นทางสั้นและตรง</p>`
+          : '<p class="text-sm text-slate-400">ยังไม่มีค่าพาหนะ (เช่น ใช้รถราชการ)</p>'}
+      </div>
+      <div class="card p-4 sm:p-5">
+        <div class="flex items-center justify-between gap-2 mb-3"><h4 class="font-medium text-slate-700 flex items-center gap-2">${ic('receipt', 'w-4 h-4 text-brand-400')} ค่าใช้จ่ายอื่น ๆ</h4>
+          <button type="button" class="btn btn-soft btn-sm" data-trv-add="other">${ic('plus', 'w-4 h-4')} เพิ่มรายการ</button></div>
+        ${t.others.length ? `<div class="grid gap-2">${t.others.map((o, i) => `<div class="grid gap-2 sm:grid-cols-[1.5fr,1fr,1.2fr,auto] items-end rounded-2xl bg-slate-50 p-2.5">
+            <div><label class="label !text-xs">รายการ</label><input class="input" value="${esc(o.desc)}" data-o="${i}" data-f="desc" placeholder="เช่น ค่าธรรมเนียมผ่านทาง"></div>
+            <div><label class="label !text-xs">จำนวนเงิน</label><input class="input" inputmode="decimal" value="${esc(o.amount)}" data-o="${i}" data-f="amount" placeholder="0.00"></div>
+            <div><label class="label !text-xs">ผู้เบิก</label><select class="input" data-o="${i}" data-f="payer">${payerOpts(o.payer, group)}</select></div>
+            <button type="button" class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-trv-del="other|${i}" title="ลบ">${ic('trash-2')}</button></div>`).join('')}</div>`
+          : '<p class="text-sm text-slate-400">ไม่มี</p>'}
+      </div>
+    </div>
+    <div class="xl:col-span-2 xl:sticky xl:top-20"><div id="trvResult"></div></div>
+  </div>
+  <div class="xl:hidden h-16"></div>
+  <button type="button" data-trv-goto class="xl:hidden fixed inset-x-3 z-30 flex items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-brand-400 to-mint-400 text-white px-4 py-3 shadow-lg"
+    style="bottom:calc(84px + env(safe-area-inset-bottom))"><span class="text-sm">รวมทั้งสิ้น</span><span class="font-semibold text-lg tabular-nums" id="trvMiniTotal"></span><span class="text-xs flex items-center gap-1">ดูผล ${ic('chevron-down', 'w-4 h-4')}</span></button>`;
+  trvRenderResult(body);
+
+  const setPath = (obj, path, val) => { const ks = path.split('.'); let o = obj; ks.slice(0, -1).forEach(k => { o = o[k]; }); o[ks.at(-1)] = val; };
+  const onField = (e) => {
+    const x = e.target, val = x.type === 'checkbox' ? x.checked : x.value;
+    if (x.dataset.t) {
+      if (x.type === 'radio' && !x.checked) return;
+      Trv.trip[x.dataset.t] = val;
+      if (x.dataset.t === 'dep' || x.dataset.t === 'ret') Trv.trip.overnight = trvNights(Trv.trip.dep, Trv.trip.ret) > 0;
+    } else if (x.dataset.p != null) {
+      const p = Trv.trip.people[+x.dataset.p];
+      setPath(p, x.dataset.f, val);
+      if (x.dataset.f === 'ownTime' && val) { p.dep = p.dep || Trv.trip.dep; p.ret = p.ret || Trv.trip.ret; p.overnight = Trv.trip.overnight; }
+      if ((x.dataset.f === 'dep' || x.dataset.f === 'ret') && p.ownTime) p.overnight = trvNights(p.dep, p.ret) > 0;
+    } else if (x.dataset.v != null) Trv.trip.vehicles[+x.dataset.v][x.dataset.f] = val;
+    else if (x.dataset.o != null) Trv.trip.others[+x.dataset.o][x.dataset.f] = val;
+    else return;
+    // ช่องที่เปลี่ยนโครงสร้างฟอร์ม → วาดใหม่ทั้งหมด (เฉพาะตอน change เพื่อไม่ให้เสีย focus ขณะพิมพ์)
+    if (x.hasAttribute('data-re') || (x.type === 'datetime-local' && e.type === 'change')) { if (e.type === 'change') trvRenderTab($('#page-module')); }
+    else trvRenderResult(body);
+  };
+  body.oninput = onField;
+  body.onchange = (e) => { if (e.target.hasAttribute('data-re') || e.target.tagName === 'SELECT' || e.target.type === 'checkbox' || e.target.type === 'datetime-local') onField(e); };
+  body.onclick = (e) => {
+    const m = e.target.closest('[data-trv-mode]');
+    if (m) { Trv.trip.mode = m.dataset.trvMode; trvRenderTab($('#page-module')); return; }
+    const a = e.target.closest('[data-trv-add]');
+    if (a) {
+      const k = a.dataset.trvAdd, first = Trv.trip.people[0];
+      if (k === 'person') { const np = trvNewPerson(); np.group = Trv.trip.people.at(-1)?.group || 'A'; Trv.trip.people.push(np); }
+      if (k === 'vehicle') Trv.trip.vehicles.push({ type: cfg.vehicles[0].key, km: '', amount: '', payer: first.id });
+      if (k === 'other') Trv.trip.others.push({ desc: '', amount: '', payer: Trv.trip.people.length > 1 ? 'each' : first.id });
+      trvRenderTab($('#page-module')); return;
+    }
+    const rm = e.target.closest('[data-trv-rm]');
+    if (rm) {
+      const p = Trv.trip.people.splice(+rm.dataset.trvRm, 1)[0], first = Trv.trip.people[0];
+      Trv.trip.vehicles.forEach(v => { if (+v.payer === p.id) v.payer = first.id; });
+      Trv.trip.others.forEach(o => { if (+o.payer === p.id) o.payer = first.id; });
+      trvRenderTab($('#page-module')); return;
+    }
+    const d = e.target.closest('[data-trv-del]');
+    if (d) { const [k, i] = d.dataset.trvDel.split('|'); Trv.trip[k === 'vehicle' ? 'vehicles' : 'others'].splice(+i, 1); trvRenderTab($('#page-module')); return; }
+    if (e.target.closest('[data-trv-reset]')) { Trv.trip = trvNewTrip(); trvRenderTab($('#page-module')); return; }
+    if (e.target.closest('[data-trv-print]')) trvPrint();
+    if (e.target.closest('[data-trv-goto]')) $('#trvResult', body).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+}
+function trvRenderResult(body) {
+  const box = $('#trvResult', body); if (!box) return;
+  const t = Trv.trip, r = trvCompute(t);
+  if (!r) { box.innerHTML = `<div class="card p-5">${emptyState('ไม่พบชุดอัตราที่มีผล', 'alert-triangle')}</div>`; return; }
+  const training = t.mode === 'training', err = r.rows.find(x => x.error)?.error;
+  const mini = $('#trvMiniTotal', body); if (mini) mini.textContent = err ? '-' : formatMoney(r.totals.total);
+  const cols = [['allowance', 'เบี้ยเลี้ยง'], ['lodging', 'ค่าที่พัก'], ['vehicle', 'ค่าพาหนะ'], ...(training ? [['reg', 'ค่าลงทะเบียน']] : []), ['other', 'อื่น ๆ']];
+  box.innerHTML = `<div class="card p-4 sm:p-5">
+    <div class="flex items-start justify-between gap-2 mb-1"><h4 class="font-semibold text-slate-800">ผลการคำนวณ · ${TRV_MODES[t.mode].label}</h4>
+      <button type="button" class="btn btn-primary btn-sm" data-trv-print ${err ? 'disabled' : ''}>${ic('printer', 'w-4 h-4')} พิมพ์สรุป</button></div>
+    <p class="text-xs text-slate-400 mb-3">${esc(r.set.name)}</p>
+    ${err ? `<div class="rounded-2xl bg-blush-50 border border-blush-200 text-blush-600 text-sm px-3 py-2 mb-3 flex gap-2">${ic('alert-circle', 'w-4 h-4 mt-0.5 shrink-0')} ${esc(err)}</div>` : ''}
+    <div class="rounded-2xl bg-gradient-to-br from-brand-50 to-mint-50 border border-brand-100 p-4 mb-3">
+      <div class="text-xs text-slate-500">รวมทั้งสิ้น${r.rows.length > 1 ? ` (${r.rows.length} คน)` : ''}</div>
+      <div class="text-3xl font-semibold text-brand-600 leading-tight">${formatMoney(r.totals.total)}</div>
+      <div class="text-xs text-slate-500 mt-1">(${esc(bahtText(r.totals.total))})</div>
+    </div>
+    <dl class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm mb-3">${cols.map(([k, l]) => `<dt class="text-slate-500">${l}</dt><dd class="text-right text-slate-700 tabular-nums">${trvMoney(r.totals[k])}</dd>`).join('')}</dl>
+    <div class="grid gap-2">${r.rows.map(x => `<details class="rounded-2xl border border-slate-100 bg-white" ${r.rows.length === 1 ? 'open' : ''}>
+      <summary class="flex items-center gap-2 px-3 py-2 cursor-pointer"><span class="flex-1 min-w-0 truncate text-sm font-medium text-slate-700">${esc(x.name)} <span class="text-xs text-slate-400 font-normal">${esc(x.group.name)}</span></span>
+        <span class="text-sm font-semibold text-slate-800 tabular-nums">${trvMoney(x.total)}</span></summary>
+      <div class="px-3 pb-3 text-xs text-slate-600 space-y-2">
+        ${[['เบี้ยเลี้ยง', x.allowance, x.lines.allowance], ['ค่าที่พัก', x.lodging, x.lines.lodging], ['ค่าพาหนะ', x.vehicle, x.lines.vehicle], ...(training ? [['ค่าลงทะเบียน', x.reg, x.reg ? [`${trvMoney(x.reg)} บาท`] : []]] : []), ['อื่น ๆ', x.other, x.lines.other]]
+          .filter(([, , ls]) => ls.length).map(([l, amt, ls]) => `<div><div class="flex justify-between font-medium text-slate-700"><span>${l}</span><span class="tabular-nums">${trvMoney(amt)}</span></div>
+          <ul class="list-disc pl-4 text-slate-500">${ls.map(s => `<li>${esc(s)}</li>`).join('')}</ul></div>`).join('')}
+      </div></details>`).join('')}</div>
+    <p class="text-[11px] text-slate-400 mt-3">ผลการคำนวณเป็นการประมาณการตามอัตราในระบบ · ค่าที่พักแบบจ่ายจริงเบิกได้ตามใบเสร็จไม่เกินเพดาน</p>
+  </div>`;
+  refreshIcons();
+}
+
+/* ---------- พิมพ์สรุป (A4) ---------- */
+function trvPrint() {
+  const t = Trv.trip, r = trvCompute(t); if (!r) return;
+  const s = State.settings, training = t.mode === 'training';
+  const cols = [['allowance', 'เบี้ยเลี้ยง'], ['lodging', 'ค่าที่พัก'], ['vehicle', 'ค่าพาหนะ'], ...(training ? [['reg', 'ค่าลงทะเบียน']] : []), ['other', 'อื่น ๆ'], ['total', 'รวม']];
+  if (!$('#trv-print-style')) {
+    const st = document.createElement('style'); st.id = 'trv-print-style';
+    st.textContent = `#trvPrintRoot{position:fixed;left:-10000px;top:0}
+      .trv-page{width:210mm;min-height:296mm;padding:14mm 14mm 12mm;background:#fff;color:#111827;font-family:Kanit,sans-serif;font-size:12.5px;line-height:1.5;box-sizing:border-box}
+      .trv-page h1{font-size:17px;font-weight:600;text-align:center;margin:0}.trv-page .sub{text-align:center;color:#4b5563;margin-bottom:4mm}
+      .trv-page table{width:100%;border-collapse:collapse;margin:2mm 0}.trv-page th,.trv-page td{border:1px solid #9ca3af;padding:1.2mm 2mm;vertical-align:top}
+      .trv-page th{background:#eef2f7;font-weight:600}.trv-page td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+      .trv-page .info{display:grid;grid-template-columns:auto 1fr;gap:.6mm 4mm;margin-bottom:3mm}.trv-page .info b{font-weight:500;color:#374151}
+      .trv-page .tot td{font-weight:600;background:#f8fafc}.trv-page ul{margin:.5mm 0 0;padding-left:5mm;color:#374151}
+      .trv-page .foot{margin-top:4mm;font-size:10.5px;color:#6b7280;border-top:.5px solid #d1d5db;padding-top:1.5mm}
+      @media print{body.trv-printing{background:#fff!important;padding:0!important}body.trv-printing>*:not(#trvPrintRoot){display:none!important}
+        body.trv-printing #trvPrintRoot{position:static;left:auto}@page{size:A4 portrait;margin:0}}`;
+    document.head.appendChild(st);
+  }
+  let root = $('#trvPrintRoot');
+  if (!root) { root = document.createElement('div'); root.id = 'trvPrintRoot'; document.body.appendChild(root); }
+  const a = trvParse(t.dep), b = trvParse(t.ret);
+  root.innerHTML = `<div class="trv-page">
+    <h1>สรุปการคำนวณ${TRV_MODES[t.mode].title}</h1>
+    <div class="sub">${esc(s.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย')}</div>
+    <div class="info">
+      ${t.purpose ? `<b>${training ? 'หลักสูตร' : 'วัตถุประสงค์'}</b><span>${esc(t.purpose)}</span>` : ''}${t.place ? `<b>สถานที่</b><span>${esc(t.place)}</span>` : ''}
+      <b>ระยะเวลา</b><span>ออกเดินทาง ${trvDT(a)} – กลับถึง ${trvDT(b)} (${t.overnight ? 'พักแรม' : 'ไม่พักแรม'})</span>
+      <b>ค่าที่พัก</b><span>${training && t.lodgingProvided ? 'ผู้จัดจัดที่พักให้' : t.method === 'lump' ? 'เบิกแบบเหมาจ่าย' : `เบิกตามจ่ายจริงไม่เกินอัตรา${t.highCost ? ` (ท้องที่ค่าครองชีพสูง เพิ่มไม่เกิน ${r.cfg.high_cost_pct}%)` : ''}`}</span>
+      <b>ผู้เดินทาง</b><span>${r.rows.length} คน</span>
+    </div>
+    <table><thead><tr><th style="width:8mm">ที่</th><th>ชื่อ-สกุล / กลุ่มตำแหน่ง</th>${cols.map(([, l]) => `<th>${l}</th>`).join('')}</tr></thead><tbody>
+      ${r.rows.map((x, i) => `<tr><td class="n" style="text-align:center">${i + 1}</td><td>${esc(x.name)}<div style="color:#6b7280;font-size:11px">${esc(x.group.name)}</div></td>${cols.map(([k]) => `<td class="n">${trvMoney(x[k])}</td>`).join('')}</tr>`).join('')}
+      <tr class="tot"><td colspan="2" style="text-align:center">รวมทั้งสิ้น</td>${cols.map(([k]) => `<td class="n">${trvMoney(r.totals[k])}</td>`).join('')}</tr>
+    </tbody></table>
+    <div style="text-align:right;margin-bottom:3mm">(${esc(bahtText(r.totals.total))})</div>
+    <div style="font-weight:600;margin-bottom:1mm">รายละเอียดการคำนวณ</div>
+    ${r.rows.map((x, i) => `<div style="margin-bottom:2mm;break-inside:avoid"><div><b style="font-weight:500">${i + 1}. ${esc(x.name)}</b> (${esc(x.group.name)})</div>
+      <ul>${[...x.lines.allowance.map(l => 'เบี้ยเลี้ยง: ' + l), ...x.lines.lodging.map(l => 'ที่พัก: ' + l), ...x.lines.vehicle.map(l => 'พาหนะ: ' + l), ...(x.reg ? [`ค่าลงทะเบียน: ${trvMoney(x.reg)} บาท`] : []), ...x.lines.other.map(l => 'อื่น ๆ: ' + l)].map(l => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('')}
+    <div class="foot">อ้างอิง: ${esc(r.set.reference || r.set.name)} · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })} · เอกสารนี้เป็นการประมาณการ ไม่ใช่แบบฟอร์มเบิกจ่าย</div>
+  </div>`;
+  document.body.classList.add('trv-printing');
+  const done = () => { document.body.classList.remove('trv-printing'); root.innerHTML = ''; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 150);
+}
+
+/* ---------- แท็บ: คำนวณด่วน ---------- */
+function trvRenderQuick(body) {
+  if (!Trv.quick) { const d = calAddDays(calToday(), 1); Trv.quick = { a: { group: 'A', dep: `${d}T08:00`, ret: `${d}T17:00`, overnight: false, meals: '', training: false },
+    l: { group: 'A', method: 'actual', room: 'single', nights: '1', actual: '', highCost: false }, v: { type: '', km: '', amount: '' } }; }
+  const q = Trv.quick, set = trvSetFor(q.a.dep), cfg = set.config;
+  if (!q.v.type) q.v.type = cfg.vehicles[0].key;
+  const lg = trvGroup(cfg, q.l.group), vt = cfg.vehicles.find(x => x.key === q.v.type) || cfg.vehicles[0];
+  const out = (id) => `<div id="${id}" class="mt-3 rounded-2xl bg-gradient-to-br from-brand-50 to-mint-50 border border-brand-100 p-3"></div>`;
+  body.innerHTML = `<div class="grid lg:grid-cols-3 gap-4 items-start">
+    <div class="card p-4 sm:p-5"><h4 class="font-medium text-slate-700 mb-3 flex items-center gap-2">${ic('utensils', 'w-4 h-4 text-cream-500')} เบี้ยเลี้ยง</h4>
+      <div class="grid gap-3">
+        <div><label class="label">กลุ่มตำแหน่ง</label><select class="input" data-q="a.group">${trvGroupOptions(cfg, q.a.group)}</select></div>
+        <div><label class="label">ออกเดินทาง</label><input type="datetime-local" class="input" value="${esc(q.a.dep)}" data-q="a.dep"></div>
+        <div><label class="label">กลับถึง</label><input type="datetime-local" class="input" value="${esc(q.a.ret)}" data-q="a.ret"></div>
+        <label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" data-q="a.overnight" ${q.a.overnight ? 'checked' : ''}> พักแรม</label>
+        <label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" data-q="a.training" ${q.a.training ? 'checked' : ''}> ไปฝึกอบรม (หักมื้ออาหารที่ผู้จัดเลี้ยง)</label>
+        ${q.a.training ? `<div><label class="label">มื้ออาหารที่ผู้จัดเลี้ยง</label><input class="input" inputmode="numeric" value="${esc(q.a.meals)}" data-q="a.meals" placeholder="0"></div>` : ''}
+      </div>${out('trvQa')}</div>
+    <div class="card p-4 sm:p-5"><h4 class="font-medium text-slate-700 mb-3 flex items-center gap-2">${ic('bed-double', 'w-4 h-4 text-lilac-500')} ค่าที่พัก</h4>
+      <div class="grid gap-3">
+        <div><label class="label">กลุ่มตำแหน่ง</label><select class="input" data-q="l.group">${trvGroupOptions(cfg, q.l.group)}</select></div>
+        <div><label class="label">วิธีเบิก</label><select class="input" data-q="l.method"><option value="actual" ${q.l.method === 'actual' ? 'selected' : ''}>จ่ายจริง (ไม่เกินอัตรา)</option><option value="lump" ${q.l.method === 'lump' ? 'selected' : ''}>เหมาจ่าย</option></select></div>
+        ${q.l.method === 'actual' ? `<div><label class="label">ห้องพัก</label><select class="input" data-q="l.room"><option value="single" ${q.l.room === 'single' ? 'selected' : ''}>ห้องพักคนเดียว (${trvMoney(lg.lodging_single)})</option><option value="double" ${q.l.room === 'double' ? 'selected' : ''}>ห้องพักคู่ (${trvMoney(lg.lodging_double)})</option></select></div>` : ''}
+        <div><label class="label">จำนวนคืน</label><input class="input" inputmode="numeric" value="${esc(q.l.nights)}" data-q="l.nights"></div>
+        ${q.l.method === 'actual' ? `<div><label class="label">ยอดจ่ายจริง (รวมทุกคืน)</label><input class="input" inputmode="decimal" value="${esc(q.l.actual)}" data-q="l.actual" placeholder="ว่าง = ดูเพดาน"></div>
+          <label class="inline-flex items-start gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded mt-0.5" data-q="l.highCost" ${q.l.highCost ? 'checked' : ''}> ท้องที่ค่าครองชีพสูง (+${cfg.high_cost_pct}%)</label>` : ''}
+      </div>${out('trvQl')}</div>
+    <div class="card p-4 sm:p-5"><h4 class="font-medium text-slate-700 mb-3 flex items-center gap-2">${ic('car', 'w-4 h-4 text-brand-400')} ค่าพาหนะ</h4>
+      <div class="grid gap-3">
+        <div><label class="label">ประเภทพาหนะ</label><select class="input" data-q="v.type">${cfg.vehicles.map(x => `<option value="${x.key}" ${x.key === vt.key ? 'selected' : ''}>${esc(x.name)}${x.mode === 'km' ? ` (${trvMoney(x.rate)} บ./กม.)` : ''}</option>`).join('')}</select></div>
+        ${vt.mode === 'km' ? `<div><label class="label">ระยะทางไป-กลับ (กม.)</label><input class="input" inputmode="decimal" value="${esc(q.v.km)}" data-q="v.km" placeholder="0"></div>`
+          : `<div><label class="label">จำนวนเงินจ่ายจริง</label><input class="input" inputmode="decimal" value="${esc(q.v.amount)}" data-q="v.amount" placeholder="0.00"></div>`}
+      </div>${out('trvQv')}</div>
+  </div>
+  <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} ใช้${esc(set.name)} · ต้องการรวมหลายรายการหรือคำนวณหมู่คณะ ใช้แท็บ "คำนวณค่าใช้จ่าย"</p>`;
+  const show = () => {
+    const box = (id, amt, lines) => { $('#' + id, body).innerHTML = `<div class="text-xs text-slate-500">เบิกได้</div><div class="text-2xl font-semibold text-brand-600">${formatMoney(amt)}</div>
+      <ul class="list-disc pl-4 mt-1 text-xs text-slate-600">${lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul>`; };
+    const a = trvAllowance({ group: q.a.group, dep: q.a.dep, ret: q.a.ret, overnight: q.a.overnight, meals: trvNum(q.a.meals), training: q.a.training }, cfg);
+    box('trvQa', a.amount, a.lines);
+    const l = trvLodging({ group: q.l.group, method: q.l.method, room: q.l.room, nights: Math.floor(trvNum(q.l.nights)), actual: trvNum(q.l.actual), highCost: q.l.highCost }, cfg);
+    box('trvQl', q.l.method === 'actual' && !trvNum(q.l.actual) ? (l.cap || 0) : l.amount, l.lines);
+    if (q.l.method === 'actual' && !trvNum(q.l.actual)) $('#trvQl .text-xs', body).textContent = 'เพดานที่เบิกได้';
+    const v = trvVehicle(q.v, cfg);
+    box('trvQv', v.amount, [v.line]);
+  };
+  show();
+  const onQ = (e) => {
+    const x = e.target, k = x.dataset.q; if (!k) return;
+    const [sec, f] = k.split('.');
+    q[sec][f] = x.type === 'checkbox' ? x.checked : x.value;
+    if (sec === 'a' && (f === 'dep' || f === 'ret')) q.a.overnight = trvNights(q.a.dep, q.a.ret) > 0;
+    const re = x.tagName === 'SELECT' || x.type === 'checkbox' || (sec === 'a' && (f === 'dep' || f === 'ret'));
+    if (re && e.type === 'change') trvRenderQuick(body), refreshIcons(); else show();
+  };
+  body.oninput = (e) => { if (e.target.tagName !== 'SELECT' && e.target.type !== 'checkbox') onQ(e); };
+  body.onchange = onQ;
+}
+
+/* ---------- แท็บ: อัตราที่ใช้ / ตั้งค่าอัตรา ---------- */
+function trvRenderRates(body) {
+  const admin = isLoggedIn() && hasPermission('travel.manage_rates');
+  const cur = trvSetFor(calToday());
+  const setCard = (s) => {
+    const c = s.config, isCur = cur && s.id === cur.id;
+    return `<div class="card p-4 sm:p-5">
+      <div class="flex flex-wrap items-start gap-2 mb-3">
+        <div class="flex-1 min-w-0"><h4 class="font-semibold text-slate-800">${esc(s.name)}</h4>
+          <div class="text-xs text-slate-500 mt-0.5">${s.effective_from ? `มีผลตั้งแต่ ${formatThaiDate(calDate(s.effective_from), { long: true })}` : 'ชุดตั้งต้น (ใช้เมื่อไม่มีชุดอื่นที่มีผล)'}${s.updated_by_name ? ` · แก้ไขล่าสุดโดย ${esc(s.updated_by_name)} ${timeAgo(s.updated_at)}` : ''}</div>
+          ${s.reference ? `<div class="text-xs text-slate-400 mt-0.5">อ้างอิง: ${esc(s.reference)}</div>` : ''}</div>
+        <div class="flex flex-wrap gap-1.5">${isCur ? `<span class="badge bg-mint-100 text-mint-600">${ic('check-circle-2', 'w-3 h-3')} ใช้อยู่วันนี้</span>` : ''}${s.is_active ? '' : '<span class="badge bg-slate-100 text-slate-500">ปิดใช้งาน</span>'}</div>
+        ${admin ? `<div class="flex gap-1"><button class="btn-icon" data-trv-edit="${s.id}" title="แก้ไข">${ic('pencil')}</button><button class="btn-icon" data-trv-copy="${s.id}" title="สร้างชุดใหม่จากชุดนี้">${ic('copy')}</button>
+          ${Trv.sets.length > 1 ? `<button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-trv-delset="${s.id}" title="ลบ">${ic('trash-2')}</button>` : ''}</div>` : ''}
+      </div>
+      ${s.note ? `<div class="rounded-2xl bg-cream-50 border border-cream-200 px-3 py-2 text-xs text-cream-600 mb-3 flex gap-2">${ic('alert-triangle', 'w-4 h-4 shrink-0')} ${esc(s.note)}</div>` : ''}
+      <div class="overflow-x-auto rounded-2xl border border-slate-100"><table class="sfh-table w-full text-sm">
+        <thead class="bg-gradient-to-r from-brand-50 via-white to-mint-50 text-slate-500"><tr><th>กลุ่มตำแหน่ง</th><th class="text-right">เบี้ยเลี้ยง/วัน</th><th class="text-right">ที่พักคนเดียว</th><th class="text-right">ที่พักคู่</th><th class="text-right">เหมาจ่าย</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${c.groups.map(g => `<tr><td><div class="font-medium text-slate-700">${esc(g.name)}</div><div class="text-xs text-slate-400 max-w-md">${esc(g.desc)}</div>
+          <div class="text-xs text-slate-400">${g.choose_room ? 'เลือกห้องพักคนเดียวหรือห้องพักคู่ได้' : 'หมู่คณะพักรวม (เบิกอัตราห้องพักคู่)'}${g.head_extra ? ' · หัวหน้าคณะเช่าห้องประสานงานเพิ่มได้' : ''}</div></td>
+          <td class="text-right tabular-nums">${trvMoney(g.allowance)}</td><td class="text-right tabular-nums">${trvMoney(g.lodging_single)}</td><td class="text-right tabular-nums">${trvMoney(g.lodging_double)}</td><td class="text-right tabular-nums">${trvMoney(g.lodging_lump)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="grid sm:grid-cols-3 gap-3 mt-3 text-sm">
+        <div class="rounded-2xl bg-slate-50 p-3"><div class="font-medium text-slate-700 mb-1">การนับวันเบี้ยเลี้ยง</div><ul class="text-xs text-slate-600 list-disc pl-4">
+          <li>${c.day_rules.day_hours} ชม. = 1 วัน</li><li>พักแรม: เศษเกิน ${c.day_rules.overnight_full_over} ชม. = 1 วัน</li>
+          <li>ไม่พักแรม: เศษเกิน ${c.day_rules.noovernight_full_over} ชม. = 1 วัน, เกิน ${c.day_rules.noovernight_half_over} ชม. = ครึ่งวัน</li></ul></div>
+        <div class="rounded-2xl bg-slate-50 p-3"><div class="font-medium text-slate-700 mb-1">ค่าพาหนะ</div><ul class="text-xs text-slate-600 list-disc pl-4">
+          ${c.vehicles.map(v => `<li>${esc(v.name)}: ${v.mode === 'km' ? `${trvMoney(v.rate)} บาท/กม.` : 'จ่ายจริง'}</li>`).join('')}</ul></div>
+        <div class="rounded-2xl bg-slate-50 p-3"><div class="font-medium text-slate-700 mb-1">อื่น ๆ</div><ul class="text-xs text-slate-600 list-disc pl-4">
+          <li>ท้องที่ค่าครองชีพสูง: เพิ่มเพดานที่พักจ่ายจริงไม่เกิน ${c.high_cost_pct}%</li><li>ไปฝึกอบรม: หักเบี้ยเลี้ยงมื้อละ 1/${c.training?.meal_divisor || 3} ของอัตราต่อวัน</li></ul></div>
+      </div></div>`;
+  };
+  body.innerHTML = `${admin ? `<div class="flex justify-end mb-3"><button class="btn btn-primary" data-trv-copy="${(cur || Trv.sets[0]).id}">${ic('plus')} สร้างชุดอัตราใหม่</button></div>` : ''}
+    <div class="grid gap-4">${Trv.sets.map(setCard).join('')}</div>`;
+  body.onclick = (e) => {
+    const ed = e.target.closest('[data-trv-edit]'); if (ed) { trvOpenRateForm(Trv.sets.find(s => s.id === ed.dataset.trvEdit), false); return; }
+    const cp = e.target.closest('[data-trv-copy]'); if (cp) { trvOpenRateForm(Trv.sets.find(s => s.id === cp.dataset.trvCopy), true); return; }
+    const dl = e.target.closest('[data-trv-delset]'); if (dl) trvDeleteSet(Trv.sets.find(s => s.id === dl.dataset.trvDelset));
+  };
+}
+function trvOpenRateForm(src, asNew) {
+  if (!requirePermission('travel.manage_rates')) return;
+  const c = JSON.parse(JSON.stringify(src.config));
+  const num = (name, v, attrs = '') => `<input class="input !py-1.5 text-right" inputmode="decimal" name="${name}" value="${esc(v)}" ${attrs}>`;
+  const vehRow = (v, i) => `<div class="grid grid-cols-[1.6fr,1fr,0.8fr,auto] gap-2 items-center" data-veh="${i}">
+      <input class="input !py-1.5" name="veh_name_${i}" value="${esc(v.name)}" placeholder="ชื่อพาหนะ">
+      <select class="input !py-1.5" name="veh_mode_${i}"><option value="km" ${v.mode === 'km' ? 'selected' : ''}>ตาม กม.</option><option value="actual" ${v.mode !== 'km' ? 'selected' : ''}>จ่ายจริง</option></select>
+      ${num(`veh_rate_${i}`, v.rate ?? '', 'placeholder="บาท/กม."')}
+      <button type="button" class="btn-icon hover:!text-blush-500" data-rm-veh="${i}">${ic('x')}</button></div>`;
+  const m = openModal({
+    title: asNew ? 'สร้างชุดอัตราใหม่' : 'แก้ไขชุดอัตรา', icon: 'table-2', size: 'xl',
+    body: `<form class="grid gap-4" novalidate>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div class="sm:col-span-2"><label class="label">ชื่อชุดอัตรา *</label><input class="input" name="name" value="${esc(asNew ? '' : src.name)}" placeholder="เช่น อัตราตามระเบียบ มท. (ฉบับที่ 5)"></div>
+        <div class="sm:col-span-2"><label class="label">ระเบียบ/หนังสืออ้างอิง</label><input class="input" name="reference" value="${esc(src.reference || '')}"></div>
+        <div><label class="label">มีผลตั้งแต่วันที่</label><input type="date" class="input" name="effective_from" value="${esc(asNew ? calToday() : (src.effective_from || ''))}">
+          <p class="text-xs text-slate-400 mt-1">ว่าง = ชุดตั้งต้น · ระบบเลือกชุดตามวันออกเดินทาง</p></div>
+        <div class="flex items-end"><label class="inline-flex items-center gap-2 text-sm text-slate-600 pb-2.5"><input type="checkbox" name="is_active" class="rounded" ${asNew || src.is_active ? 'checked' : ''}> เปิดใช้งาน</label></div>
+        <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(asNew ? '' : (src.note || ''))}"></div>
+      </div>
+      <div><div class="font-medium text-slate-700 mb-2">อัตราตามกลุ่มตำแหน่ง (บาท)</div>
+        <div class="grid gap-3">${c.groups.map((g, i) => `<div class="rounded-2xl border border-slate-100 p-3">
+          <div class="grid gap-2 sm:grid-cols-[1fr,repeat(4,minmax(0,0.8fr))] items-end">
+            <div><label class="label !text-xs">ชื่อกลุ่ม</label><input class="input !py-1.5" name="g_name_${i}" value="${esc(g.name)}"></div>
+            <div><label class="label !text-xs">เบี้ยเลี้ยง/วัน</label>${num(`g_allowance_${i}`, g.allowance)}</div>
+            <div><label class="label !text-xs">ที่พักคนเดียว</label>${num(`g_single_${i}`, g.lodging_single)}</div>
+            <div><label class="label !text-xs">ที่พักคู่</label>${num(`g_double_${i}`, g.lodging_double)}</div>
+            <div><label class="label !text-xs">เหมาจ่าย</label>${num(`g_lump_${i}`, g.lodging_lump)}</div>
+          </div>
+          <textarea class="input mt-2 !text-xs" rows="2" name="g_desc_${i}">${esc(g.desc)}</textarea>
+          <div class="flex flex-wrap gap-4 mt-2 text-xs text-slate-600">
+            <label class="inline-flex items-center gap-1.5"><input type="checkbox" class="rounded" name="g_choose_${i}" ${g.choose_room ? 'checked' : ''}> เลือกห้องเดี่ยว/ห้องคู่ได้</label>
+            <label class="inline-flex items-center gap-1.5"><input type="checkbox" class="rounded" name="g_head_${i}" ${g.head_extra ? 'checked' : ''}> หัวหน้าคณะเช่าห้องประสานงานเพิ่มได้</label></div>
+        </div>`).join('')}</div></div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700 mb-2">การนับวันเบี้ยเลี้ยง (ชั่วโมง)</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <label>นับเป็น 1 วัน ทุก${num('r_day', c.day_rules.day_hours)}</label><label>พักแรม: เศษเกิน = 1 วัน${num('r_on', c.day_rules.overnight_full_over)}</label>
+            <label>ไม่พักแรม: เศษเกิน = 1 วัน${num('r_off_full', c.day_rules.noovernight_full_over)}</label><label>ไม่พักแรม: เศษเกิน = ครึ่งวัน${num('r_off_half', c.day_rules.noovernight_half_over)}</label></div></div>
+        <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700 mb-2">อื่น ๆ</div>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <label>ท้องที่ค่าครองชีพสูง เพิ่มได้ (%)${num('high_cost_pct', c.high_cost_pct)}</label><label>ฝึกอบรม: หักมื้อละ 1/ … ของอัตรา${num('meal_divisor', c.training?.meal_divisor || 3)}</label></div></div>
+      </div>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="flex items-center justify-between mb-2"><div class="font-medium text-slate-700">ค่าพาหนะ</div><button type="button" class="btn btn-soft btn-sm" data-add-veh>${ic('plus', 'w-4 h-4')} เพิ่ม</button></div>
+        <div class="grid gap-2" data-vehs>${c.vehicles.map(vehRow).join('')}</div></div>
+    </form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>`,
+  });
+  const f = $('form', m.el), F = f.elements;
+  let vehs = c.vehicles.map(v => ({ ...v }));
+  const readVehs = () => { vehs = vehs.map((v, i) => ({ ...v, name: F[`veh_name_${i}`].value.trim(), mode: F[`veh_mode_${i}`].value, rate: trvNum(F[`veh_rate_${i}`].value) })); };
+  const drawVehs = () => { $('[data-vehs]', m.el).innerHTML = vehs.map(vehRow).join(''); refreshIcons(); };
+  m.el.addEventListener('click', (e) => {
+    if (e.target.closest('[data-add-veh]')) { readVehs(); vehs.push({ key: 'v' + Date.now().toString(36), name: '', mode: 'actual' }); drawVehs(); return; }
+    const r = e.target.closest('[data-rm-veh]'); if (r) { readVehs(); vehs.splice(+r.dataset.rmVeh, 1); drawVehs(); }
+  });
+  $('[data-save]', m.el).onclick = async () => {
+    readVehs();
+    const n = (k) => { const v = Number(String(F[k].value).replace(/,/g, '')); return isFinite(v) && v >= 0 ? v : NaN; };
+    const cfg = {
+      ...c,
+      groups: c.groups.map((g, i) => ({ ...g, name: F[`g_name_${i}`].value.trim() || g.name, desc: F[`g_desc_${i}`].value.trim(),
+        allowance: n(`g_allowance_${i}`), lodging_single: n(`g_single_${i}`), lodging_double: n(`g_double_${i}`), lodging_lump: n(`g_lump_${i}`),
+        choose_room: F[`g_choose_${i}`].checked, head_extra: F[`g_head_${i}`].checked })),
+      day_rules: { day_hours: n('r_day'), overnight_full_over: n('r_on'), noovernight_full_over: n('r_off_full'), noovernight_half_over: n('r_off_half') },
+      high_cost_pct: n('high_cost_pct'), training: { ...(c.training || {}), meal_divisor: n('meal_divisor') },
+      vehicles: vehs.filter(v => v.name).map(v => v.mode === 'km' ? { key: v.key, name: v.name, mode: 'km', rate: v.rate } : { key: v.key, name: v.name, mode: 'actual' }),
+    };
+    const name = F.name.value.trim();
+    if (!name) { showToast('กรุณากรอกชื่อชุดอัตรา', 'warning'); F.name.focus(); return; }
+    const nums = [...cfg.groups.flatMap(g => [g.allowance, g.lodging_single, g.lodging_double, g.lodging_lump]), ...Object.values(cfg.day_rules), cfg.high_cost_pct, cfg.training.meal_divisor];
+    if (nums.some(x => !isFinite(x))) { showToast('กรุณากรอกตัวเลขให้ถูกต้อง (ห้ามติดลบ)', 'warning'); return; }
+    if (!cfg.day_rules.day_hours || !cfg.training.meal_divisor) { showToast('ชั่วโมงต่อวันและตัวหารมื้ออาหารต้องมากกว่า 0', 'warning'); return; }
+    if (!cfg.vehicles.length) { showToast('ต้องมีประเภทพาหนะอย่างน้อย 1 รายการ', 'warning'); return; }
+    if (cfg.vehicles.some(v => v.mode === 'km' && !(v.rate > 0))) { showToast('พาหนะที่คิดตาม กม. ต้องระบุอัตรา', 'warning'); return; }
+    const u = currentUser();
+    const row = { name, reference: F.reference.value.trim() || null, effective_from: F.effective_from.value || null, is_active: F.is_active.checked, note: F.note.value.trim() || null, config: cfg };
+    const res = asNew
+      ? await db(s => s.from('travel_rate_sets').insert({ ...row, created_by: u.id, created_by_name: u.full_name }).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' })
+      : await db(s => s.from('travel_rate_sets').update({ ...row, updated_by_name: u.full_name }).eq('id', src.id).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
+    if (!res.ok) return;
+    await logAudit(asNew ? 'create' : 'update', 'travel_rate_sets', res.data.id, { name });
+    showToast('บันทึกชุดอัตราแล้ว', 'success');
+    m.close();
+    if (await trvLoadSets()) trvRenderTab($('#page-module'));
+  };
+}
+async function trvDeleteSet(s) {
+  if (!requirePermission('travel.manage_rates') || !s) return;
+  if (Trv.sets.length <= 1) { showToast('ต้องมีชุดอัตราอย่างน้อย 1 ชุด', 'warning'); return; }
+  const ok = await confirmModal({ title: 'ลบชุดอัตรา', message: `ต้องการลบ <b>${esc(s.name)}</b> ใช่หรือไม่?` });
+  if (!ok) return;
+  const res = await db(q => q.from('travel_rate_sets').delete().eq('id', s.id), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
+  if (!res.ok) return;
+  await logAudit('delete', 'travel_rate_sets', s.id, { name: s.name });
+  showToast('ลบชุดอัตราแล้ว', 'success');
+  if (await trvLoadSets()) trvRenderTab($('#page-module'));
+}
 /* ===== END MODULE: travel ===== */
 
 
@@ -5728,7 +6315,7 @@ const MODULES = {
   announcements: { render: renderAnnouncements },
   calendar:      { render: renderCalendar },
   saraban:       { render: renderSaraban },
-  travel:        { render: renderComingSoon },
+  travel:        { render: renderTravel },
   register:      { render: renderComingSoon },
   payroll:       { render: renderPayroll },
 };
