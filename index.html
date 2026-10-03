@@ -4745,6 +4745,7 @@ function trvRenderCalc(body) {
     if (d) { const [k, i] = d.dataset.trvDel.split('|'); Trv.trip[k === 'vehicle' ? 'vehicles' : 'others'].splice(+i, 1); trvRenderTab($('#page-module')); return; }
     if (e.target.closest('[data-trv-reset]')) { Trv.trip = trvNewTrip(); trvRenderTab($('#page-module')); return; }
     if (e.target.closest('[data-trv-print]')) trvPrint();
+    if (e.target.closest('[data-trv-pdf]')) trvDownloadPdf();
     if (e.target.closest('[data-trv-goto]')) $('#trvResult', body).scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 }
@@ -4757,7 +4758,8 @@ function trvRenderResult(body) {
   const cols = [['allowance', 'เบี้ยเลี้ยง'], ['lodging', 'ค่าที่พัก'], ['vehicle', 'ค่าพาหนะ'], ...(training ? [['reg', 'ค่าลงทะเบียน']] : []), ['other', 'อื่น ๆ']];
   box.innerHTML = `<div class="card p-4 sm:p-5">
     <div class="flex items-start justify-between gap-2 mb-1"><h4 class="font-semibold text-slate-800">ผลการคำนวณ · ${TRV_MODES[t.mode].label}</h4>
-      <button type="button" class="btn btn-primary btn-sm" data-trv-print ${err ? 'disabled' : ''}>${ic('printer', 'w-4 h-4')} พิมพ์สรุป</button></div>
+      <div class="flex flex-wrap justify-end gap-1.5"><button type="button" class="btn btn-ghost btn-sm" data-trv-pdf ${err ? 'disabled' : ''}>${ic('file-down', 'w-4 h-4')} PDF</button>
+        <button type="button" class="btn btn-primary btn-sm" data-trv-print ${err ? 'disabled' : ''}>${ic('printer', 'w-4 h-4')} พิมพ์สรุป</button></div></div>
     <p class="text-xs text-slate-400 mb-3">${esc(r.set.name)}</p>
     ${err ? `<div class="rounded-2xl bg-blush-50 border border-blush-200 text-blush-600 text-sm px-3 py-2 mb-3 flex gap-2">${ic('alert-circle', 'w-4 h-4 mt-0.5 shrink-0')} ${esc(err)}</div>` : ''}
     <div class="rounded-2xl bg-gradient-to-br from-brand-50 to-mint-50 border border-brand-100 p-4 mb-3">
@@ -4780,8 +4782,9 @@ function trvRenderResult(body) {
 }
 
 /* ---------- พิมพ์สรุป (A4) ---------- */
-function trvPrint() {
-  const t = Trv.trip, r = trvCompute(t); if (!r) return;
+/** สร้างหน้าสรุป A4 ใน #trvPrintRoot (ใช้ทั้งพิมพ์และดาวน์โหลด PDF) */
+function trvBuildSummary() {
+  const t = Trv.trip, r = trvCompute(t); if (!r) return null;
   const s = State.settings, training = t.mode === 'training';
   const cols = [['allowance', 'เบี้ยเลี้ยง'], ['lodging', 'ค่าที่พัก'], ['vehicle', 'ค่าพาหนะ'], ...(training ? [['reg', 'ค่าลงทะเบียน']] : []), ['other', 'อื่น ๆ'], ['total', 'รวม']];
   if (!$('#trv-print-style')) {
@@ -4820,10 +4823,58 @@ function trvPrint() {
       <ul>${[...x.lines.allowance.map(l => 'เบี้ยเลี้ยง: ' + l), ...x.lines.lodging.map(l => 'ที่พัก: ' + l), ...x.lines.vehicle.map(l => 'พาหนะ: ' + l), ...(x.reg ? [`ค่าลงทะเบียน: ${trvMoney(x.reg)} บาท`] : []), ...x.lines.other.map(l => 'อื่น ๆ: ' + l)].map(l => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('')}
     <div class="foot">อ้างอิง: ${esc(r.set.reference || r.set.name)} · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })} · เอกสารนี้เป็นการประมาณการ ไม่ใช่แบบฟอร์มเบิกจ่าย</div>
   </div>`;
+  return root;
+}
+function trvPrint() {
+  const root = trvBuildSummary(); if (!root) return;
   document.body.classList.add('trv-printing');
   const done = () => { document.body.classList.remove('trv-printing'); root.innerHTML = ''; window.removeEventListener('afterprint', done); };
   window.addEventListener('afterprint', done);
   setTimeout(() => window.print(), 150);
+}
+
+/** โหลดสคริปต์จาก CDN ครั้งเดียว (ใช้ตอนกดดาวน์โหลด PDF เท่านั้น) */
+function trvLoadScript(src, ready) {
+  if (ready()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src; el.async = true;
+    el.onload = () => (ready() ? resolve() : reject(new Error('โหลดตัวสร้าง PDF ไม่สำเร็จ')));
+    el.onerror = () => reject(new Error('โหลดตัวสร้าง PDF ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ต'));
+    document.head.appendChild(el);
+  });
+}
+/** ดาวน์โหลดใบสรุปเป็นไฟล์ PDF (A4) – แปลงหน้าสรุปเป็นภาพด้วย html2canvas แล้วใส่ลง jsPDF (ภาษาไทยแสดงถูกต้อง) */
+async function trvDownloadPdf() {
+  const root = trvBuildSummary(); if (!root) return;
+  showLoader(true, 'กำลังสร้างไฟล์ PDF...');
+  try {
+    await Promise.all([
+      trvLoadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js', () => !!window.html2canvas),
+      trvLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', () => !!window.jspdf?.jsPDF),
+    ]);
+    if (document.fonts?.ready) await document.fonts.ready;
+    const page = $('.trv-page', root);
+    root.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;';   // ต้องอยู่ในจอขณะแปลงเป็นภาพ
+    const canvas = await html2canvas(page, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false, windowWidth: page.scrollWidth });
+    const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    const W = 210, H = 297, imgH = canvas.height * W / canvas.width;
+    const img = canvas.toDataURL('image/jpeg', 0.92);
+    // เนื้อหายาวเกิน 1 หน้า → เลื่อนภาพขึ้นทีละหน้า
+    for (let y = 0, i = 0; y < imgH - 0.5; y += H, i++) {
+      if (i) pdf.addPage();
+      pdf.addImage(img, 'JPEG', 0, -y, W, imgH);
+    }
+    const t = Trv.trip, d = trvParse(t.dep);
+    pdf.save(`สรุปค่าใช้จ่าย${t.mode === 'training' ? 'ไปฝึกอบรม' : 'ไปราชการ'}_${d ? calKey(d) : calToday()}.pdf`);
+    showToast('ดาวน์โหลดไฟล์ PDF แล้ว', 'success');
+  } catch (e) {
+    console.error('[SFH] pdf', e);
+    showToast(e.message || 'สร้างไฟล์ PDF ไม่สำเร็จ', 'error');
+  } finally {
+    root.style.cssText = ''; root.innerHTML = '';
+    showLoader(false);
+  }
 }
 
 /* ---------- แท็บ: คำนวณด่วน ---------- */
