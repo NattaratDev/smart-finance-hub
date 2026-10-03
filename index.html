@@ -4803,7 +4803,7 @@ function trvPrint() {
   const a = trvParse(t.dep), b = trvParse(t.ret);
   root.innerHTML = `<div class="trv-page">
     <h1>สรุปการคำนวณ${TRV_MODES[t.mode].title}</h1>
-    <div class="sub">${esc(s.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย')}</div>
+    <div class="sub">${isLoggedIn() ? esc(s.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย') : ''}</div>
     <div class="info">
       ${t.purpose ? `<b>${training ? 'หลักสูตร' : 'วัตถุประสงค์'}</b><span>${esc(t.purpose)}</span>` : ''}${t.place ? `<b>สถานที่</b><span>${esc(t.place)}</span>` : ''}
       <b>ระยะเวลา</b><span>ออกเดินทาง ${trvDT(a)} – กลับถึง ${trvDT(b)} (${t.overnight ? 'พักแรม' : 'ไม่พักแรม'})</span>
