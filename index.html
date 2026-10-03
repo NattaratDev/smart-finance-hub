@@ -1427,6 +1427,7 @@ async function renderHome(el) {
       </div>
     </section>
     ${!sb ? configErrorCard() : ''}
+    <div id="homeCal"></div>
     <section class="mb-8">
       <div class="flex items-end justify-between mb-4"><div><h3 class="section-title">${ic('grid-3x3', 'w-5 h-5 text-brand-400')} บริการของเรา</h3>
         <p class="text-sm text-slate-500">บริการที่เปิดให้บุคคลทั่วไปใช้งาน</p></div></div>
@@ -1450,6 +1451,7 @@ async function renderHome(el) {
   $('#homeServices', el).innerHTML = services.length ? services.map(serviceCard).join('') : `<div class="card sm:col-span-2 lg:col-span-3">${emptyState('ยังไม่มีบริการที่เปิดให้บุคคลทั่วไปในขณะนี้', 'inbox')}</div>`;
   refreshIcons();
   if (!sb) { $('#homeStats', el).innerHTML = ''; return; }
+  calHomeWidget($('#homeCal', el));   // ความเคลื่อนไหวกองคลัง (โหลดแยก ไม่รอ)
 
   const [st, news] = await Promise.all([
     db(q => q.from('v_public_stats').select('*').maybeSingle(), { loader: false, error: 'โหลดสถิติไม่สำเร็จ' }),
@@ -1592,8 +1594,9 @@ function newsListItem(a) {
 }
 async function renderDashboard(el) {
   if (!requirePermission('dashboard.view')) return;
-  el.innerHTML = greetingBanner() + `<div id="dashBody"><div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${skeletonCards(4)}</div></div>`;
+  el.innerHTML = greetingBanner() + `<div id="dashCal"></div><div id="dashBody"><div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${skeletonCards(4)}</div></div>`;
   refreshIcons();
+  calHomeWidget($('#dashCal', el));   // ความเคลื่อนไหวกองคลัง (โหลดแยก ไม่รอ)
   const body = $('#dashBody', el);
   if (isSuperAdmin()) await dashSuper(body);
   else if (isOrgAdmin()) await dashOrg(body);
@@ -3559,6 +3562,871 @@ function openSarabanTypes(onDone) {
 /* ===== END MODULE: saraban ===== */
 
 
+/* ===== MODULE: calendar (ปฏิทินกองคลัง) ===== */
+// ปฏิทินกิจกรรม · งานที่ผู้บริหารมอบหมาย · รักษาราชการแทน · ผู้ไม่อยู่ปฏิบัติงาน (ลา/ไปราชการ/อบรม)
+// ตารางที่ใช้: cal_events, cal_tasks, cal_task_assignees, cal_acting, cal_absences, cal_activity (module_calendar.sql)
+// ทุกคน (รวมบุคคลทั่วไป) อ่านจาก View v_public_cal_* · org_admin / staff เป็นผู้บันทึก
+// การลา: แสดงเพียง "ลา" + ช่วงวันที่ ไม่บันทึก/ไม่แสดงประเภทหรือเหตุผลการลา (PDPA)
+Object.assign(TABLE_LABELS, { cal_events: 'กิจกรรม (ปฏิทิน)', cal_tasks: 'งานมอบหมาย', cal_acting: 'รักษาราชการแทน', cal_absences: 'การไม่อยู่ปฏิบัติงาน' });
+
+const CAL_TYPES = {
+  event:   { label: 'กิจกรรม', icon: 'calendar-check', color: '#3B8FD4', table: 'cal_events' },
+  task:    { label: 'งานมอบหมาย', icon: 'clipboard-check', color: '#E08A1E', table: 'cal_tasks' },
+  acting:  { label: 'รักษาราชการแทน', icon: 'user-cog', color: '#8670D6', table: 'cal_acting' },
+  absence: { label: 'ไม่อยู่ปฏิบัติงาน', icon: 'user-minus', color: '#D95C8A', table: 'cal_absences' },
+};
+const CAL_EVENT_CATS = { meeting: 'ประชุม', training: 'อบรม/สัมมนา', event: 'งานพิธี/กิจกรรม', deadline: 'กำหนดส่งงาน', other: 'อื่น ๆ' };
+const CAL_TASK_STATUS = {
+  pending:     { label: 'รอดำเนินการ', icon: 'circle-dashed', cls: 'bg-slate-100 text-slate-600' },
+  in_progress: { label: 'กำลังดำเนินการ', icon: 'loader', cls: 'bg-brand-100 text-brand-600' },
+  done:        { label: 'เสร็จแล้ว', icon: 'check-circle-2', cls: 'bg-mint-100 text-mint-600' },
+  cancelled:   { label: 'ยกเลิก', icon: 'x-circle', cls: 'bg-slate-100 text-slate-400 line-through' },
+};
+const CAL_PRIORITY = {
+  normal: { label: 'ปกติ', cls: 'bg-slate-100 text-slate-500' },
+  high:   { label: 'สำคัญ', cls: 'bg-cream-100 text-cream-600' },
+  urgent: { label: 'ด่วน', cls: 'bg-blush-100 text-blush-500' },
+};
+const CAL_ABSENCE = {
+  leave:    { label: 'ลา', icon: 'user-minus' },
+  official: { label: 'ไปราชการ', icon: 'briefcase' },
+  training: { label: 'อบรม/สัมมนา', icon: 'graduation-cap' },
+};
+const CAL_PERIOD = { full: 'ทั้งวัน', morning: 'ครึ่งวันเช้า', afternoon: 'ครึ่งวันบ่าย' };
+const CAL_ASSIGNERS = ['นายกเทศมนตรี', 'รองนายกเทศมนตรี', 'ปลัดเทศบาล', 'รองปลัดเทศบาล', 'ผู้อำนวยการกองคลัง'];
+const CAL_DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+const Cal = {
+  tab: 'calendar', view: 'month', month: null, sel: null, types: new Set(Object.keys(CAL_TYPES)), person: '', mine: false,
+  data: { event: [], task: [], acting: [], absence: [] }, activity: [], users: null, docs: null,
+};
+
+/* ---------- วันที่ (ใช้สตริง YYYY-MM-DD ตามเวลาเครื่อง) ---------- */
+const calKey = (d) => toInputDate(d);
+const calToday = () => calKey(new Date());
+const calDate = (k) => new Date(String(k).slice(0, 10) + 'T00:00:00');
+const calAddDays = (k, n) => { const d = calDate(k); d.setDate(d.getDate() + n); return calKey(d); };
+const calDaysBetween = (a, b) => Math.round((calDate(b) - calDate(a)) / 86400000);
+const calInRange = (r, k) => r.start_date <= k && k <= (r.end_date || r.start_date);
+function calRangeText(s, e) {
+  if (!s) return '-';
+  if (!e || e === s) return formatThaiDate(calDate(s));
+  const a = calDate(s), b = calDate(e);
+  if (a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()) return `${a.getDate()}–${formatThaiDate(b)}`;
+  if (a.getFullYear() === b.getFullYear()) return `${a.getDate()} ${TH_MONTHS_SHORT[a.getMonth()]} – ${formatThaiDate(b)}`;
+  return `${formatThaiDate(a)} – ${formatThaiDate(b)}`;
+}
+const calTime = (t) => t ? String(t).slice(0, 5) + ' น.' : '';
+const calEventTime = (e) => e.all_day ? 'ทั้งวัน' : [calTime(e.start_time), e.end_time ? '– ' + calTime(e.end_time) : ''].join(' ').trim() || 'ทั้งวัน';
+
+/* ---------- สิทธิ์ ---------- */
+const calCanCreate = () => isLoggedIn() && hasPermission('calendar.create');
+const calCan = (r, action) => isLoggedIn() && hasPermission('calendar.' + action) && canEditRecord(r, 'calendar.manage_all');
+const calIsAssignee = (t) => !!currentUser() && (t.assignees || []).some(a => a.user_id && a.user_id === currentUser().id);
+const calCanStatus = (t) => isLoggedIn() && hasPermission('calendar.update') && (canEditRecord(t, 'calendar.manage_all') || calIsAssignee(t));
+
+/* ---------- สถานะงาน ---------- */
+const calTaskOpen = (t) => t.status === 'pending' || t.status === 'in_progress';
+const calTaskOverdue = (t, today = calToday()) => calTaskOpen(t) && t.due_date && t.due_date < today;
+function calDueText(t) {
+  if (!t.due_date) return '<span class="text-slate-400">ไม่กำหนด</span>';
+  const n = calDaysBetween(calToday(), t.due_date);
+  let hint = '';
+  if (calTaskOpen(t)) hint = n < 0 ? `<span class="text-blush-500">เลยกำหนด ${-n} วัน</span>` : n === 0 ? '<span class="text-cream-600">ครบกำหนดวันนี้</span>' : n <= 3 ? `<span class="text-cream-600">อีก ${n} วัน</span>` : `<span class="text-slate-400">อีก ${n} วัน</span>`;
+  return `<span class="text-slate-700">${formatThaiDate(calDate(t.due_date))}</span>${hint ? `<div class="text-xs">${hint}</div>` : ''}`;
+}
+const calStatusBadge = (s) => { const m = CAL_TASK_STATUS[s] || CAL_TASK_STATUS.pending; return `<span class="badge ${m.cls}">${ic(m.icon, 'w-3 h-3')} ${m.label}</span>`; };
+const calPriorityBadge = (p) => p && p !== 'normal' ? `<span class="badge ${CAL_PRIORITY[p].cls}">${ic('flag', 'w-3 h-3')} ${CAL_PRIORITY[p].label}</span>` : '';
+const calTypeBadge = (type) => { const m = CAL_TYPES[type]; return `<span class="badge border" style="background:${hexToRgba(m.color, .1)};color:${m.color};border-color:${hexToRgba(m.color, .25)}">${ic(m.icon, 'w-3 h-3')} ${m.label}</span>`; };
+function calActingState(a, today = calToday()) {
+  if (calInRange(a, today)) return { key: 'current', html: `<span class="badge bg-lilac-100 text-lilac-600">${ic('badge-check', 'w-3 h-3')} กำลังรักษาราชการแทน</span>` };
+  if (a.start_date > today) return { key: 'upcoming', html: `<span class="badge bg-cream-100 text-cream-600">${ic('clock', 'w-3 h-3')} เริ่ม ${formatThaiDate(calDate(a.start_date))}</span>` };
+  return { key: 'past', html: '<span class="badge bg-slate-100 text-slate-400">สิ้นสุดแล้ว</span>' };
+}
+const calAssigneeNames = (t) => (t.assignees || []).map(a => a.name).join(', ');
+
+/** ชื่อเรื่องสั้นของแต่ละรายการ (ใช้ในปฏิทินและความเคลื่อนไหว) */
+function calTitle(type, r) {
+  if (type === 'acting') return `${r.acting_name} รักษาราชการแทน ${r.position_title}`;
+  if (type === 'absence') return `${r.person_name} · ${CAL_ABSENCE[r.kind]?.label || 'ไม่อยู่'}${r.period !== 'full' ? ` (${CAL_PERIOD[r.period]})` : ''}`;
+  return r.title;
+}
+/** บุคคลที่เกี่ยวข้องกับรายการ (ใช้กรองตามบุคคล / "เฉพาะของฉัน") */
+function calPeople(type, r) {
+  if (type === 'task') return (r.assignees || []).map(a => ({ id: a.user_id, name: a.name }));
+  if (type === 'acting') return [{ id: r.acting_user_id, name: r.acting_name }, { id: r.holder_user_id, name: r.holder_name }].filter(p => p.name);
+  if (type === 'absence') return [{ id: r.user_id, name: r.person_name }];
+  return [];
+}
+function calMatch(type, r) {
+  if (!Cal.types.has(type)) return false;
+  if (type === 'task' && r.status === 'cancelled') return false;
+  const ppl = calPeople(type, r);
+  if (Cal.person) {
+    const hit = ppl.some(p => p.name === Cal.person) || (type === 'event' && String(r.attendees || '').includes(Cal.person));
+    if (!hit) return false;
+  }
+  if (Cal.mine && isLoggedIn()) {
+    const u = currentUser();
+    const hit = ppl.some(p => p.id === u.id) || r.created_by === u.id || (type === 'event' && String(r.attendees || '').includes(u.full_name));
+    if (!hit) return false;
+  }
+  return true;
+}
+/** รายการทั้งหมดในวันที่ k (เรียงตามประเภท) */
+function calItemsOn(k) {
+  const out = [];
+  Cal.data.acting.forEach(r => { if (calInRange(r, k) && calMatch('acting', r)) out.push({ type: 'acting', r }); });
+  Cal.data.absence.forEach(r => { if (calInRange(r, k) && calMatch('absence', r)) out.push({ type: 'absence', r }); });
+  Cal.data.event.forEach(r => { if (calInRange(r, k) && calMatch('event', r)) out.push({ type: 'event', r }); });
+  Cal.data.task.forEach(r => { if (r.due_date === k && calMatch('task', r)) out.push({ type: 'task', r }); });
+  return out;
+}
+
+/* ---------- โหลดข้อมูล ---------- */
+async function calLoad({ loader = true } = {}) {
+  const r = await dbMany([
+    s => s.from('v_public_cal_events').select('*').order('start_date').limit(5000),
+    s => s.from('v_public_cal_tasks').select('*').order('due_date', { ascending: true, nullsFirst: false }).limit(5000),
+    s => s.from('v_public_cal_acting').select('*').order('start_date', { ascending: false }).limit(5000),
+    s => s.from('v_public_cal_absences').select('*').order('start_date', { ascending: false }).limit(5000),
+    s => s.from('v_public_cal_activity').select('*').order('created_at', { ascending: false }).limit(60),
+  ], { loader, loaderText: 'กำลังโหลดปฏิทิน...', error: 'โหลดปฏิทินไม่สำเร็จ' });
+  if (!r.ok) return false;
+  [Cal.data.event, Cal.data.task, Cal.data.acting, Cal.data.absence, Cal.activity] = r.data;
+  return true;
+}
+/** ผู้ใช้ในหน่วยงาน (ใช้เป็นรายการแนะนำชื่อ/ตำแหน่ง) */
+async function calLoadUsers() {
+  if (Cal.users) return Cal.users;
+  const u = currentUser();
+  let q = sb.from('users').select('id, full_name, position, org_id').eq('is_active', true).order('full_name');
+  if (!isSuperAdmin() && u?.org_id) q = q.eq('org_id', u.org_id);
+  const r = await db(() => q, { loader: false, silent: true });
+  Cal.users = r.data || [];
+  return Cal.users;
+}
+/** หนังสือ/คำสั่งในงานสารบรรณที่เลือกเชื่อมโยงได้ (เฉพาะผู้มีสิทธิ์ดูเอกสารภายใน) */
+async function calLoadDocs() {
+  if (Cal.docs) return Cal.docs;
+  if (!hasPermission('saraban.view')) return (Cal.docs = []);
+  const u = currentUser();
+  let q = sb.from('saraban_documents').select('id, doc_no, title, access_level, org_id').neq('access_level', 'restricted').order('created_at', { ascending: false }).limit(800);
+  if (!isSuperAdmin() && u?.org_id) q = q.or(`access_level.eq.public,org_id.eq.${u.org_id}`);
+  const r = await db(() => q, { loader: false, silent: true });
+  Cal.docs = (r.data || []).map(d => ({ ...d, label: `${d.doc_no || 'ไม่มีเลขที่'} · ${d.title}` }));
+  return Cal.docs;
+}
+/** บันทึกความเคลื่อนไหว (ไม่ทำให้การบันทึกหลักล้มเหลว) */
+async function calLog(type, rec, action, extra = {}) {
+  const u = currentUser();
+  try {
+    const { error } = await sb.from('cal_activity').insert({
+      org_id: rec.org_id || u?.org_id || null, item_type: type, item_id: rec.id || null, action,
+      title: calTitle(type, rec), by_user_id: u?.id || null, by_name: u?.full_name || null, ...extra,
+    });
+    if (error) console.warn('[SFH] cal_activity', error);
+  } catch (e) { console.warn('[SFH] cal_activity', e); }
+}
+function calActivityHtml(a) {
+  const m = CAL_TYPES[a.item_type] || CAL_TYPES.event;
+  const verb = { create: 'บันทึก', update: 'แก้ไข', delete: 'ลบ', status: 'อัปเดตสถานะ', comment: 'บันทึกความคืบหน้า' }[a.action] || a.action;
+  const st = a.action === 'status' && a.to_status ? ` → ${calStatusBadge(a.to_status)}` : '';
+  return `<li class="flex gap-3 py-2.5">
+    <span class="w-8 h-8 rounded-xl grid place-items-center shrink-0" style="background:${hexToRgba(m.color, .12)};color:${m.color}">${ic(m.icon, 'w-4 h-4')}</span>
+    <div class="min-w-0 flex-1 text-sm">
+      <div class="text-slate-700"><b class="font-medium">${esc(a.by_name || 'ระบบ')}</b> ${verb}${{ event: 'กิจกรรม', task: 'งาน' }[a.item_type] || ''}
+        ${a.item_id && a.action !== 'delete' ? `<button type="button" class="text-left text-brand-600 hover:underline" data-cal-open="${a.item_type}|${a.item_id}">"${esc(a.title)}"</button>` : `"${esc(a.title)}"`}${st}</div>
+      ${a.detail ? `<div class="text-xs text-slate-500 mt-0.5 whitespace-pre-line">${esc(a.detail)}</div>` : ''}
+      <div class="text-xs text-slate-400 mt-0.5">${timeAgo(a.created_at)}</div>
+    </div></li>`;
+}
+
+/* ---------- ชิ้นส่วนรายการ ---------- */
+function calChip(it) {
+  const m = CAL_TYPES[it.type];
+  const done = it.type === 'task' && it.r.status === 'done';
+  const late = it.type === 'task' && calTaskOverdue(it.r);
+  return `<div class="truncate rounded-md px-1.5 py-0.5 text-[11px] leading-tight ${done ? 'line-through opacity-60' : ''}" style="background:${hexToRgba(late ? '#D95C8A' : m.color, .13)};color:${late ? '#B8456F' : m.color}" title="${esc(calTitle(it.type, it.r))}">${it.type === 'event' && !it.r.all_day && it.r.start_time ? String(it.r.start_time).slice(0, 5) + ' ' : ''}${esc(calTitle(it.type, it.r))}</div>`;
+}
+function calItemCard(it) {
+  const { type, r } = it, m = CAL_TYPES[type];
+  let sub = '', badges = '';
+  if (type === 'event') { sub = [calEventTime(r), r.location].filter(Boolean).map(esc).join(' · '); badges = `<span class="badge bg-slate-100 text-slate-500">${esc(CAL_EVENT_CATS[r.category] || '')}</span>`; }
+  if (type === 'task') { sub = `ผู้รับผิดชอบ: ${esc(calAssigneeNames(r) || '-')} · มอบหมายโดย ${esc(r.assigned_by)}`; badges = calStatusBadge(r.status) + calPriorityBadge(r.priority) + (calTaskOverdue(r) ? `<span class="badge bg-blush-100 text-blush-500">${ic('alarm-clock', 'w-3 h-3')} เลยกำหนด</span>` : ''); }
+  if (type === 'acting') { sub = `${calRangeText(r.start_date, r.end_date)}${r.order_no ? ' · คำสั่ง ' + esc(r.order_no) : ''}`; badges = calActingState(r).html; }
+  if (type === 'absence') { sub = `${calRangeText(r.start_date, r.end_date)}${r.place ? ' · ' + esc(r.place) : ''}`; badges = `<span class="badge bg-blush-50 text-blush-500">${ic(CAL_ABSENCE[r.kind]?.icon || 'user-minus', 'w-3 h-3')} ${CAL_ABSENCE[r.kind]?.label || ''}</span>`; }
+  return `<button type="button" class="w-full text-left rounded-2xl border border-slate-100 bg-white p-3 hover:border-brand-200 hover:bg-brand-50/40 transition flex gap-3" data-cal-open="${type}|${r.id}">
+    <span class="w-1.5 self-stretch rounded-full shrink-0" style="background:${m.color}"></span>
+    <span class="min-w-0 flex-1">
+      <span class="flex items-center gap-1.5 text-xs" style="color:${m.color}">${ic(m.icon, 'w-3.5 h-3.5')} ${m.label}</span>
+      <span class="block font-medium text-slate-800 leading-snug mt-0.5">${esc(calTitle(type, r))}</span>
+      ${sub ? `<span class="block text-xs text-slate-500 mt-0.5">${sub}</span>` : ''}
+      ${badges ? `<span class="flex flex-wrap gap-1 mt-1.5">${badges}</span>` : ''}
+    </span></button>`;
+}
+
+/* ---------- หน้าหลักของโมดูล ---------- */
+async function renderCalendar(el, mod) {
+  const now = new Date();
+  Object.assign(Cal, { month: new Date(now.getFullYear(), now.getMonth(), 1), sel: calToday(), types: new Set(Object.keys(CAL_TYPES)), person: '', mine: false, users: null, docs: null });
+  el.innerHTML = pageHeader({
+    title: mod?.name || 'ปฏิทินกองคลัง', icon: 'calendar-days', tone: 'lilac',
+    subtitle: 'กิจกรรม งานที่ผู้บริหารมอบหมาย การรักษาราชการแทน และผู้ไม่อยู่ปฏิบัติงาน – ทุกคนติดตามความเคลื่อนไหวได้',
+    actions: calCanCreate() ? `<button class="btn btn-primary" data-cal-add="">${ic('plus')} เพิ่มรายการ</button>` : '',
+  }) + `<div class="flex gap-1 mb-5 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
+      ${[['calendar', 'calendar-days', 'ปฏิทิน'], ['task', 'clipboard-check', 'งานมอบหมาย'], ['acting', 'user-cog', 'รักษาราชการแทน'], ['absence', 'user-minus', 'ไม่อยู่ปฏิบัติงาน'], ['activity', 'activity', 'ความเคลื่อนไหว']]
+        .map(([k, icon, label]) => `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-cal-tab="${k}" role="tab">${ic(icon, 'w-4 h-4')} <span>${label}</span><span data-cal-count="${k}"></span></button>`).join('')}
+    </div>
+    <div id="calBody">${skeletonCards(1, 'h-96')}</div>`;
+  refreshIcons();
+  if (!(await calLoad())) { $('#calBody', el).innerHTML = errorState('โหลดปฏิทินไม่สำเร็จ'); return; }
+  const refresh = async () => { if (await calLoad({ loader: false })) calRender(el); };
+  el._calRefresh = refresh;
+  calRender(el);
+
+  el.onclick = async (e) => {
+    const t = e.target.closest('[data-cal-tab]');
+    if (t) { Cal.tab = t.dataset.calTab; calRender(el); return; }
+    const nav = e.target.closest('[data-cal-nav]');
+    if (nav) {
+      const v = nav.dataset.calNav;
+      if (v === 'today') { const d = new Date(); Cal.month = new Date(d.getFullYear(), d.getMonth(), 1); Cal.sel = calToday(); }
+      else Cal.month = new Date(Cal.month.getFullYear(), Cal.month.getMonth() + (v === 'next' ? 1 : -1), 1);
+      calRender(el); return;
+    }
+    const vw = e.target.closest('[data-cal-view]');
+    if (vw) { Cal.view = vw.dataset.calView; calRender(el); return; }
+    const ty = e.target.closest('[data-cal-type]');
+    if (ty) {
+      const k = ty.dataset.calType;
+      if (Cal.types.has(k) && Cal.types.size > 1) Cal.types.delete(k); else Cal.types.add(k);
+      calRender(el); return;
+    }
+    const day = e.target.closest('[data-cal-day]');
+    if (day) {
+      Cal.sel = day.dataset.calDay;
+      const d = calDate(Cal.sel);
+      if (d.getMonth() !== Cal.month.getMonth()) Cal.month = new Date(d.getFullYear(), d.getMonth(), 1);
+      calRender(el);
+      if (window.innerWidth < 1024) $('#calDayPanel', el)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    const op = e.target.closest('[data-cal-open]');
+    if (op) { const [type, id] = op.dataset.calOpen.split('|'); calOpenById(type, id, refresh); return; }
+    const add = e.target.closest('[data-cal-add]');
+    if (add) { calChooseAdd(add.dataset.calAdd || '', add.dataset.date || (Cal.tab === 'calendar' ? Cal.sel : calToday()), refresh); return; }
+    const ed = e.target.closest('[data-cal-edit]');
+    if (ed) { const [type, id] = ed.dataset.calEdit.split('|'); const r = Cal.data[type].find(x => x.id === id); if (r) calOpenForm(type, r, null, refresh); return; }
+    const del = e.target.closest('[data-cal-del]');
+    if (del) { const [type, id] = del.dataset.calDel.split('|'); const r = Cal.data[type].find(x => x.id === id); if (r) calDelete(type, r, refresh); }
+  };
+  el.onchange = (e) => {
+    if (e.target.id === 'calPerson') { Cal.person = e.target.value; calRender(el); }
+    if (e.target.id === 'calMine') { Cal.mine = e.target.checked; calRender(el); }
+  };
+}
+function calRender(el) {
+  $$('[data-cal-tab]', el).forEach(b => {
+    const on = b.dataset.calTab === Cal.tab;
+    b.setAttribute('aria-selected', on);
+    b.classList.toggle('bg-gradient-to-r', on); b.classList.toggle('from-lilac-400', on); b.classList.toggle('to-brand-400', on);
+    b.classList.toggle('text-white', on); b.classList.toggle('shadow-sm', on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('hover:bg-slate-50', !on);
+  });
+  const today = calToday();
+  const counts = {
+    task: Cal.data.task.filter(calTaskOpen).length,
+    acting: Cal.data.acting.filter(a => calInRange(a, today)).length,
+    absence: Cal.data.absence.filter(a => calInRange(a, today)).length,
+  };
+  $$('[data-cal-count]', el).forEach(s => {
+    const n = counts[s.dataset.calCount];
+    const on = s.closest('[data-cal-tab]').dataset.calTab === Cal.tab;
+    s.innerHTML = n ? `<span class="rounded-full px-1.5 text-xs ${on ? 'bg-white/25' : 'bg-slate-100 text-slate-500'}">${n}</span>` : '';
+  });
+  const body = $('#calBody', el);
+  if (Cal.tab === 'calendar') calRenderCalendar(body);
+  else if (Cal.tab === 'task') calRenderTasks(body);
+  else if (Cal.tab === 'acting') calRenderActing(body);
+  else if (Cal.tab === 'absence') calRenderAbsence(body);
+  else calRenderActivity(body);
+  refreshIcons();
+}
+
+/* ---------- แท็บ: ปฏิทิน ---------- */
+function calRenderCalendar(body) {
+  const y = Cal.month.getFullYear(), mo = Cal.month.getMonth(), today = calToday();
+  const people = [...new Set(Object.entries(Cal.data).flatMap(([t, rows]) => rows.flatMap(r => calPeople(t, r).map(p => p.name))).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'th'));
+  if (Cal.person && !people.includes(Cal.person)) Cal.person = '';
+  const toolbar = `<div class="flex flex-col xl:flex-row xl:items-center gap-3 mb-4">
+    <div class="flex items-center gap-2">
+      <button class="btn-icon border border-slate-200 bg-white" data-cal-nav="prev" aria-label="เดือนก่อนหน้า">${ic('chevron-left')}</button>
+      <h3 class="text-lg font-semibold text-slate-800 min-w-[10.5rem] text-center">${TH_MONTHS[mo]} ${y + 543}</h3>
+      <button class="btn-icon border border-slate-200 bg-white" data-cal-nav="next" aria-label="เดือนถัดไป">${ic('chevron-right')}</button>
+      <button class="btn btn-ghost btn-sm" data-cal-nav="today">วันนี้</button>
+      <div class="ml-auto xl:ml-2 inline-flex rounded-xl border border-slate-200 bg-white p-0.5">
+        ${[['month', 'calendar-days', 'เดือน'], ['list', 'list', 'รายการ']].map(([k, i, l]) => `<button class="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs ${Cal.view === k ? 'bg-brand-400 text-white' : 'text-slate-500 hover:bg-slate-50'}" data-cal-view="${k}">${ic(i, 'w-3.5 h-3.5')} ${l}</button>`).join('')}
+      </div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 xl:ml-auto">
+      ${Object.entries(CAL_TYPES).map(([k, m]) => { const on = Cal.types.has(k); return `<button type="button" data-cal-type="${k}" class="inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-xs transition ${on ? '' : 'opacity-50'}" style="${on ? `background:${hexToRgba(m.color, .1)};border-color:${hexToRgba(m.color, .35)};color:${m.color}` : 'background:#fff;border-color:#E2E8F0;color:#94A3B8'}" aria-pressed="${on}">
+        <span class="w-2.5 h-2.5 rounded-full" style="background:${on ? m.color : '#CBD5E1'}"></span>${m.label}</button>`; }).join('')}
+      <select id="calPerson" class="input !w-auto !py-1.5 !text-xs min-w-[9rem]"><option value="">ทุกคน</option>${people.map(p => `<option ${p === Cal.person ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      ${isLoggedIn() ? `<label class="inline-flex items-center gap-1.5 text-xs text-slate-600"><input type="checkbox" id="calMine" class="rounded" ${Cal.mine ? 'checked' : ''}> เฉพาะของฉัน</label>` : ''}
+    </div>
+  </div>`;
+
+  let main;
+  if (Cal.view === 'month') {
+    const first = new Date(y, mo, 1), start = new Date(y, mo, 1 - first.getDay());
+    const days = new Date(y, mo + 1, 0).getDate();
+    const cells = Math.ceil((first.getDay() + days) / 7) * 7;
+    let html = '';
+    for (let i = 0; i < cells; i++) {
+      const d = new Date(start); d.setDate(start.getDate() + i);
+      const k = calKey(d), inMonth = d.getMonth() === mo, items = calItemsOn(k);
+      const isToday = k === today, isSel = k === Cal.sel, wkend = d.getDay() === 0 || d.getDay() === 6;
+      html += `<button type="button" data-cal-day="${k}" class="relative text-left min-h-[3.4rem] sm:min-h-[6.2rem] p-1 sm:p-1.5 border-b border-r border-slate-100 transition
+          ${isSel ? 'bg-brand-50 ring-2 ring-inset ring-brand-300' : wkend ? 'bg-slate-50/70 hover:bg-brand-50/50' : 'bg-white hover:bg-brand-50/50'} ${inMonth ? '' : 'opacity-45'}" aria-label="${formatThaiDate(d, { long: true })} ${items.length} รายการ">
+        <span class="inline-grid place-items-center w-6 h-6 rounded-full text-xs ${isToday ? 'bg-brand-400 text-white font-semibold' : wkend ? 'text-blush-400' : 'text-slate-600'}">${d.getDate()}</span>
+        <span class="hidden sm:flex flex-col gap-0.5 mt-0.5">${items.slice(0, 3).map(calChip).join('')}${items.length > 3 ? `<span class="text-[11px] text-slate-400 px-1">+${items.length - 3} รายการ</span>` : ''}</span>
+        <span class="sm:hidden flex flex-wrap gap-0.5 mt-1 px-0.5">${items.slice(0, 6).map(it => `<span class="w-1.5 h-1.5 rounded-full" style="background:${calTaskOverdue(it.r) && it.type === 'task' ? '#D95C8A' : CAL_TYPES[it.type].color}"></span>`).join('')}</span>
+      </button>`;
+    }
+    main = `<div class="card overflow-hidden !p-0">
+      <div class="grid grid-cols-7 bg-gradient-to-r from-brand-50 via-white to-lilac-50 text-center text-xs font-medium text-slate-500 border-b border-slate-100">
+        ${CAL_DOW.map((n, i) => `<div class="py-2 ${i === 0 || i === 6 ? 'text-blush-400' : ''}">${n}</div>`).join('')}</div>
+      <div class="grid grid-cols-7 border-l border-slate-100">${html}</div></div>`;
+  } else {
+    const days = new Date(y, mo + 1, 0).getDate();
+    let html = '';
+    for (let dd = 1; dd <= days; dd++) {
+      const d = new Date(y, mo, dd), k = calKey(d), items = calItemsOn(k);
+      if (!items.length) continue;
+      html += `<div class="flex gap-3 py-3 border-b border-slate-100 last:border-0">
+        <button type="button" data-cal-day="${k}" class="w-14 shrink-0 text-center rounded-2xl py-2 ${k === today ? 'bg-brand-400 text-white' : 'bg-slate-50 text-slate-600'}">
+          <div class="text-xs">${CAL_DOW[d.getDay()]}</div><div class="text-xl font-semibold leading-none">${dd}</div></button>
+        <div class="flex-1 min-w-0 grid gap-2">${items.map(calItemCard).join('')}</div></div>`;
+    }
+    main = `<div class="card p-4">${html || emptyState(`ไม่มีรายการในเดือน${TH_MONTHS[mo]} ${y + 543}`, 'calendar-x')}</div>`;
+  }
+
+  const sel = Cal.sel, selItems = calItemsOn(sel);
+  const panel = `<div id="calDayPanel" class="card p-4 lg:sticky lg:top-20">
+    <div class="flex items-start justify-between gap-2 mb-3">
+      <div><div class="text-xs text-slate-400">${sel === today ? 'วันนี้' : 'วันที่เลือก'}</div>
+        <h4 class="font-semibold text-slate-800">${formatThaiDate(calDate(sel), { long: true, weekday: true })}</h4></div>
+      ${calCanCreate() ? `<button class="btn btn-soft btn-sm" data-cal-add="" data-date="${sel}">${ic('plus', 'w-4 h-4')} เพิ่ม</button>` : ''}
+    </div>
+    <div class="grid gap-2">${selItems.length ? selItems.map(calItemCard).join('') : emptyState('ไม่มีรายการในวันนี้', 'calendar-check-2')}</div>
+  </div>`;
+  body.innerHTML = toolbar + `<div class="grid lg:grid-cols-3 gap-4 items-start"><div class="lg:col-span-2">${main}</div>${panel}</div>`;
+}
+
+/* ---------- แท็บ: งานมอบหมาย ---------- */
+function calRenderTasks(body) {
+  const rows = Cal.data.task, today = calToday();
+  const n = (f) => rows.filter(f).length;
+  const stats = `<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    ${statCard({ label: 'รอดำเนินการ', value: formatNumber(n(t => t.status === 'pending')), icon: 'circle-dashed', tone: 'cream' })}
+    ${statCard({ label: 'กำลังดำเนินการ', value: formatNumber(n(t => t.status === 'in_progress')), icon: 'loader', tone: 'brand' })}
+    ${statCard({ label: 'เลยกำหนด', value: formatNumber(n(t => calTaskOverdue(t, today))), icon: 'alarm-clock', tone: 'blush' })}
+    ${statCard({ label: 'เสร็จแล้ว', value: formatNumber(n(t => t.status === 'done')), icon: 'check-circle-2', tone: 'mint' })}
+  </div>`;
+  body.innerHTML = stats + '<div id="calTaskTable"></div>';
+  const actions = (t) => `<button class="btn-icon" data-cal-open="task|${t.id}" title="ดูรายละเอียด/อัปเดตสถานะ">${ic('eye')}</button>
+    ${calCan(t, 'update') ? `<button class="btn-icon" data-cal-edit="task|${t.id}" title="แก้ไข">${ic('pencil')}</button>` : ''}
+    ${calCan(t, 'delete') ? `<button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-cal-del="task|${t.id}" title="ลบ">${ic('trash-2')}</button>` : ''}`;
+  const scope = [{ value: 'open', label: 'ยังไม่เสร็จ' }, { value: 'overdue', label: 'เลยกำหนด' }];
+  if (isLoggedIn()) scope.push({ value: 'mine', label: 'งานของฉัน' });
+  const table = createDataTable($('#calTaskTable', body), {
+    pageSize: 10,
+    searchKeys: ['title', 'detail', 'assigned_by', '_names'],
+    searchPlaceholder: 'ค้นหาชื่องาน, ผู้มอบหมาย, ผู้รับผิดชอบ...',
+    filters: [
+      { key: 'scope', label: 'งานทั้งหมด', options: scope, match: (t, v) => v === 'open' ? calTaskOpen(t) : v === 'overdue' ? calTaskOverdue(t, today) : calIsAssignee(t) },
+      { key: 'status', label: 'ทุกสถานะ', options: Object.entries(CAL_TASK_STATUS).map(([k, m]) => ({ value: k, label: m.label })) },
+      { key: 'priority', label: 'ทุกระดับความสำคัญ', options: Object.entries(CAL_PRIORITY).map(([k, m]) => ({ value: k, label: m.label })) },
+    ],
+    columns: [
+      { key: 'title', label: 'งานที่มอบหมาย', render: t => `<button type="button" class="text-left font-medium text-slate-700 hover:text-brand-600 line-clamp-2 max-w-md" data-cal-open="task|${t.id}">${esc(t.title)}</button>
+        <div class="text-xs text-slate-400 mt-0.5">มอบหมายโดย ${esc(t.assigned_by)} · ${formatThaiDate(calDate(t.assign_date))}</div>
+        <div class="flex flex-wrap gap-1 mt-1">${calPriorityBadge(t.priority)}${calTaskOverdue(t, today) ? `<span class="badge bg-blush-100 text-blush-500">${ic('alarm-clock', 'w-3 h-3')} เลยกำหนด</span>` : ''}</div>` },
+      { key: '_names', label: 'ผู้รับผิดชอบ', render: t => `<div class="text-sm text-slate-600 max-w-[14rem]">${(t.assignees || []).map(a => esc(a.name)).join('<br>') || '-'}</div>` },
+      { key: 'due_date', label: 'กำหนดส่ง', class: 'whitespace-nowrap', render: calDueText },
+      { key: 'status', label: 'สถานะ', class: 'whitespace-nowrap', render: t => calStatusBadge(t.status) },
+    ],
+    actions,
+    card: (t) => `<div class="rounded-2xl border ${calTaskOverdue(t, today) ? 'border-blush-200' : 'border-slate-100'} bg-white p-4 shadow-sm">
+      <button type="button" class="text-left font-medium text-slate-800 leading-snug" data-cal-open="task|${t.id}">${esc(t.title)}</button>
+      <div class="text-xs text-slate-400 mt-1">มอบหมายโดย ${esc(t.assigned_by)} · ผู้รับผิดชอบ: ${esc(calAssigneeNames(t) || '-')}</div>
+      <div class="flex flex-wrap gap-1.5 mt-2">${calStatusBadge(t.status)}${calPriorityBadge(t.priority)}</div>
+      <div class="flex items-end justify-between gap-2 mt-3 pt-3 border-t border-slate-100"><div class="text-sm">${calDueText(t)}</div><div class="flex gap-1">${actions(t)}</div></div>
+    </div>`,
+    emptyText: 'ยังไม่มีงานมอบหมาย',
+  });
+  // งานที่ยังไม่เสร็จขึ้นก่อน เรียงตามกำหนดส่ง
+  const rank = { in_progress: 0, pending: 0, done: 1, cancelled: 2 };
+  table.setRows(rows.map(t => ({ ...t, _names: calAssigneeNames(t) }))
+    .sort((a, b) => rank[a.status] - rank[b.status] || String(a.due_date || '9999').localeCompare(String(b.due_date || '9999')) || String(b.created_at).localeCompare(String(a.created_at))));
+}
+
+/* ---------- แท็บ: รักษาราชการแทน ---------- */
+function calRenderActing(body) {
+  const today = calToday();
+  const current = Cal.data.acting.filter(a => calInRange(a, today));
+  body.innerHTML = `${current.length ? `<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 mb-4">${current.map(a => `<button type="button" data-cal-open="acting|${a.id}" class="card hover-lift p-4 text-left border-l-4" style="border-left-color:#8670D6">
+      <div class="text-xs text-lilac-600 flex items-center gap-1">${ic('badge-check', 'w-3.5 h-3.5')} รักษาราชการแทนวันนี้</div>
+      <div class="font-semibold text-slate-800 mt-1">${esc(a.position_title)}</div>
+      <div class="text-sm text-slate-600 mt-0.5">${esc(a.acting_name)}${a.acting_position ? ` <span class="text-slate-400">(${esc(a.acting_position)})</span>` : ''}</div>
+      <div class="text-xs text-slate-400 mt-1">${calRangeText(a.start_date, a.end_date)}</div></button>`).join('')}</div>` : ''}
+    <div id="calActTable"></div>`;
+  const actions = (a) => `<button class="btn-icon" data-cal-open="acting|${a.id}" title="ดูรายละเอียด">${ic('eye')}</button>
+    ${calCan(a, 'update') ? `<button class="btn-icon" data-cal-edit="acting|${a.id}" title="แก้ไข">${ic('pencil')}</button>` : ''}
+    ${calCan(a, 'delete') ? `<button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-cal-del="acting|${a.id}" title="ลบ">${ic('trash-2')}</button>` : ''}`;
+  const table = createDataTable($('#calActTable', body), {
+    pageSize: 10, searchKeys: ['position_title', 'acting_name', 'holder_name', 'order_no', 'note'],
+    searchPlaceholder: 'ค้นหาตำแหน่ง, ผู้รักษาราชการแทน, เลขที่คำสั่ง...',
+    filters: [{ key: 'state', label: 'ทุกช่วงเวลา', options: [{ value: 'current', label: 'กำลังรักษาราชการแทน' }, { value: 'upcoming', label: 'กำลังจะถึง' }, { value: 'past', label: 'สิ้นสุดแล้ว' }], match: (a, v) => calActingState(a, today).key === v }],
+    columns: [
+      { key: 'position_title', label: 'ตำแหน่ง', render: a => `<div class="font-medium text-slate-700">${esc(a.position_title)}</div>${a.holder_name ? `<div class="text-xs text-slate-400">ผู้ดำรงตำแหน่ง: ${esc(a.holder_name)}</div>` : ''}` },
+      { key: 'acting_name', label: 'ผู้รักษาราชการแทน', render: a => `<div class="text-slate-700">${esc(a.acting_name)}</div>${a.acting_position ? `<div class="text-xs text-slate-400">${esc(a.acting_position)}</div>` : ''}` },
+      { key: 'start_date', label: 'ช่วงวันที่', class: 'whitespace-nowrap', render: a => `<div class="text-slate-600">${calRangeText(a.start_date, a.end_date)}</div><div class="mt-1">${calActingState(a, today).html}</div>` },
+      { key: 'order_no', label: 'คำสั่ง', render: a => esc(a.order_no || '-') },
+    ],
+    actions, emptyText: 'ยังไม่มีการบันทึกรักษาราชการแทน',
+  });
+  const rank = { current: 0, upcoming: 1, past: 2 };
+  table.setRows([...Cal.data.acting].sort((a, b) => rank[calActingState(a, today).key] - rank[calActingState(b, today).key] || (rank[calActingState(a, today).key] === 1 ? a.start_date.localeCompare(b.start_date) : b.start_date.localeCompare(a.start_date))));
+}
+
+/* ---------- แท็บ: ไม่อยู่ปฏิบัติงาน ---------- */
+function calRenderAbsence(body) {
+  const today = calToday();
+  const now = Cal.data.absence.filter(a => calInRange(a, today));
+  body.innerHTML = `<div class="flex items-start gap-2 rounded-2xl bg-blush-50 border border-blush-100 px-4 py-2.5 mb-4 text-xs text-slate-600">
+      ${ic('shield-check', 'w-4 h-4 text-blush-400 shrink-0 mt-0.5')}<span>แสดงเฉพาะว่า "ไม่อยู่ปฏิบัติงาน" ในช่วงวันใด ระบบไม่บันทึกและไม่แสดงประเภทหรือเหตุผลการลา</span></div>
+    ${now.length ? `<h4 class="font-medium text-slate-700 mb-2">ไม่อยู่ปฏิบัติงานวันนี้ (${now.length} คน)</h4>
+      <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3 mb-5">${now.map(a => calItemCard({ type: 'absence', r: a })).join('')}</div>` : ''}
+    <div id="calAbsTable"></div>`;
+  const actions = (a) => `<button class="btn-icon" data-cal-open="absence|${a.id}" title="ดูรายละเอียด">${ic('eye')}</button>
+    ${calCan(a, 'update') ? `<button class="btn-icon" data-cal-edit="absence|${a.id}" title="แก้ไข">${ic('pencil')}</button>` : ''}
+    ${calCan(a, 'delete') ? `<button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-cal-del="absence|${a.id}" title="ลบ">${ic('trash-2')}</button>` : ''}`;
+  const table = createDataTable($('#calAbsTable', body), {
+    pageSize: 10, searchKeys: ['person_name', 'person_position', 'place'], searchPlaceholder: 'ค้นหาชื่อ, ตำแหน่ง, สถานที่...',
+    filters: [
+      { key: 'kind', label: 'ทุกประเภท', options: Object.entries(CAL_ABSENCE).map(([k, m]) => ({ value: k, label: m.label })) },
+      { key: 'when', label: 'ทุกช่วงเวลา', options: [{ value: 'now', label: 'วันนี้' }, { value: 'upcoming', label: 'กำลังจะถึง' }, { value: 'past', label: 'ที่ผ่านมา' }],
+        match: (a, v) => v === 'now' ? calInRange(a, today) : v === 'upcoming' ? a.start_date > today : a.end_date < today },
+    ],
+    columns: [
+      { key: 'person_name', label: 'ชื่อ-สกุล', render: a => `<div class="font-medium text-slate-700">${esc(a.person_name)}</div>${a.person_position ? `<div class="text-xs text-slate-400">${esc(a.person_position)}</div>` : ''}` },
+      { key: 'kind', label: 'ประเภท', render: a => `<span class="badge bg-blush-50 text-blush-500">${ic(CAL_ABSENCE[a.kind]?.icon || 'user-minus', 'w-3 h-3')} ${CAL_ABSENCE[a.kind]?.label || ''}</span>` },
+      { key: 'start_date', label: 'ช่วงวันที่', class: 'whitespace-nowrap', render: a => `<div class="text-slate-600">${calRangeText(a.start_date, a.end_date)}</div><div class="text-xs text-slate-400">${CAL_PERIOD[a.period] || ''}</div>` },
+      { key: 'place', label: 'สถานที่', render: a => esc(a.place || '-') },
+    ],
+    actions, emptyText: 'ยังไม่มีการบันทึก',
+  });
+  table.setRows([...Cal.data.absence].sort((a, b) => {
+    const ra = a.end_date < today ? 1 : 0, rb = b.end_date < today ? 1 : 0;
+    return ra - rb || (ra ? b.start_date.localeCompare(a.start_date) : a.start_date.localeCompare(b.start_date));
+  }));
+}
+
+/* ---------- แท็บ: ความเคลื่อนไหว ---------- */
+function calRenderActivity(body) {
+  body.innerHTML = `<div class="card p-5"><h4 class="font-medium text-slate-700 mb-1">ความเคลื่อนไหวล่าสุด</h4>
+    <p class="text-xs text-slate-400 mb-2">การบันทึก แก้ไข และอัปเดตสถานะงาน 60 รายการล่าสุด</p>
+    <ul class="divide-y divide-slate-100">${Cal.activity.length ? Cal.activity.map(calActivityHtml).join('') : emptyState('ยังไม่มีความเคลื่อนไหว', 'activity')}</ul></div>`;
+}
+
+/* ---------- รายละเอียด ---------- */
+async function calOpenById(type, id, onChanged) {
+  let r = Cal.data[type]?.find(x => x.id === id);
+  if (!r) {
+    const view = { event: 'v_public_cal_events', task: 'v_public_cal_tasks', acting: 'v_public_cal_acting', absence: 'v_public_cal_absences' }[type];
+    const res = await db(s => s.from(view).select('*').eq('id', id).maybeSingle(), { loader: false, error: 'โหลดรายการไม่สำเร็จ' });
+    r = res.data;
+  }
+  if (!r) { showToast('ไม่พบรายการนี้ (อาจถูกลบแล้ว)', 'warning'); return; }
+  calOpenDetail(type, r, onChanged);
+}
+function calDetailRow(label, value) {
+  return value ? `<div class="grid grid-cols-[7.5rem,1fr] gap-2 py-2 border-b border-slate-100 last:border-0 text-sm"><dt class="text-slate-400">${label}</dt><dd class="text-slate-700 min-w-0 break-words">${value}</dd></div>` : '';
+}
+function calOpenDetail(type, r, onChanged) {
+  const m = CAL_TYPES[type];
+  let rows = '';
+  if (type === 'event') rows = calDetailRow('ประเภท', esc(CAL_EVENT_CATS[r.category])) + calDetailRow('วันที่', calRangeText(r.start_date, r.end_date)) + calDetailRow('เวลา', esc(calEventTime(r)))
+    + calDetailRow('สถานที่', esc(r.location)) + calDetailRow('ผู้เข้าร่วม', esc(r.attendees)) + calDetailRow('รายละเอียด', r.description ? `<span class="whitespace-pre-line">${esc(r.description)}</span>` : '');
+  if (type === 'task') rows = calDetailRow('สถานะ', calStatusBadge(r.status) + ' ' + calPriorityBadge(r.priority)) + calDetailRow('มอบหมายโดย', esc(r.assigned_by))
+    + calDetailRow('วันที่มอบหมาย', formatThaiDate(calDate(r.assign_date))) + calDetailRow('กำหนดส่ง', calDueText(r))
+    + calDetailRow('ผู้รับผิดชอบ', (r.assignees || []).map(a => `<div>${esc(a.name)}${a.position ? ` <span class="text-slate-400 text-xs">(${esc(a.position)})</span>` : ''}</div>`).join('') || '-')
+    + calDetailRow('รายละเอียด', r.detail ? `<span class="whitespace-pre-line">${esc(r.detail)}</span>` : '') + (r.done_at ? calDetailRow('เสร็จเมื่อ', formatThaiDate(r.done_at, { time: true })) : '');
+  if (type === 'acting') rows = calDetailRow('ตำแหน่ง', `<b class="font-medium">${esc(r.position_title)}</b>`) + calDetailRow('ผู้ดำรงตำแหน่ง', esc(r.holder_name))
+    + calDetailRow('ผู้รักษาราชการแทน', `${esc(r.acting_name)}${r.acting_position ? ` <span class="text-slate-400 text-xs">(${esc(r.acting_position)})</span>` : ''}`)
+    + calDetailRow('ช่วงวันที่', calRangeText(r.start_date, r.end_date) + ' ' + calActingState(r).html) + calDetailRow('เลขที่คำสั่ง', esc(r.order_no))
+    + calDetailRow('หมายเหตุ', r.note ? `<span class="whitespace-pre-line">${esc(r.note)}</span>` : '');
+  if (type === 'absence') rows = calDetailRow('ชื่อ-สกุล', esc(r.person_name)) + calDetailRow('ตำแหน่ง', esc(r.person_position))
+    + calDetailRow('ประเภท', esc(CAL_ABSENCE[r.kind]?.label)) + calDetailRow('ช่วงวันที่', `${calRangeText(r.start_date, r.end_date)} · ${CAL_PERIOD[r.period] || ''}`) + calDetailRow('สถานที่', esc(r.place));
+  rows += calDetailRow('บันทึกโดย', `${esc(r.created_by_name || '-')} <span class="text-xs text-slate-400">· ${formatThaiDate(r.created_at, { time: true })}</span>${r.updated_by_name ? `<div class="text-xs text-slate-400">แก้ไขล่าสุดโดย ${esc(r.updated_by_name)} · ${timeAgo(r.updated_at)}</div>` : ''}`);
+
+  const statusBox = type === 'task' && calCanStatus(r) ? `<div class="mt-4 rounded-2xl bg-slate-50 border border-slate-100 p-3">
+      <div class="text-sm font-medium text-slate-700 mb-2">อัปเดตความคืบหน้า</div>
+      <div class="flex flex-wrap gap-1.5 mb-2" data-st-group>${Object.entries(CAL_TASK_STATUS).map(([k, s]) => `<button type="button" data-st="${k}" class="inline-flex items-center gap-1 rounded-xl border px-2.5 py-1 text-xs transition ${k === r.status ? 'bg-brand-400 text-white border-brand-400' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${ic(s.icon, 'w-3.5 h-3.5')} ${s.label}</button>`).join('')}</div>
+      <textarea class="input" rows="2" data-st-note placeholder="บันทึกความคืบหน้า (ไม่บังคับ) เช่น ส่งร่างรายงานให้ ผอ.กองคลังตรวจแล้ว"></textarea>
+      <div class="flex justify-end mt-2"><button type="button" class="btn btn-primary btn-sm" data-st-save>${ic('save', 'w-4 h-4')} บันทึก</button></div>
+    </div>` : '';
+  const md = calCan(r, 'update'), mdel = calCan(r, 'delete');
+  const mm = openModal({
+    title: esc(type === 'task' || type === 'event' ? r.title : m.label), icon: m.icon, size: 'lg',
+    body: `<div class="mb-3">${calTypeBadge(type)}</div><dl>${rows}</dl>
+      <div data-doc-box></div>${statusBox}
+      ${type === 'task' ? '<div class="mt-4"><div class="text-sm font-medium text-slate-700 mb-1">ประวัติการดำเนินงาน</div><ul class="divide-y divide-slate-100" data-history><li class="py-3 text-sm text-slate-400">กำลังโหลด...</li></ul></div>' : ''}`,
+    footer: `${mdel ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}
+      <button type="button" class="btn btn-ghost" data-close>ปิด</button>
+      ${md ? `<button type="button" class="btn btn-primary" data-edit>${ic('pencil')} แก้ไข</button>` : ''}`,
+  });
+  calDocBox($('[data-doc-box]', mm.el), r);
+  $('[data-edit]', mm.el)?.addEventListener('click', () => { mm.close(); calOpenForm(type, r, null, onChanged); });
+  $('[data-del]', mm.el)?.addEventListener('click', async () => { mm.close(); await calDelete(type, r, onChanged); });
+  if (type === 'task') {
+    db(s => s.from('v_public_cal_activity').select('*').eq('item_type', 'task').eq('item_id', r.id).order('created_at', { ascending: false }).limit(50), { loader: false, silent: true })
+      .then(h => { const ul = $('[data-history]', mm.el); if (ul) { ul.innerHTML = h.data?.length ? h.data.map(calActivityHtml).join('') : '<li class="py-3 text-sm text-slate-400">ยังไม่มีประวัติ</li>'; refreshIcons(); } });
+  }
+  if (statusBox) {
+    let st = r.status;
+    $('[data-st-group]', mm.el).addEventListener('click', (e) => {
+      const b = e.target.closest('[data-st]'); if (!b) return;
+      st = b.dataset.st;
+      $$('[data-st]', mm.el).forEach(x => { const on = x.dataset.st === st; x.classList.toggle('bg-brand-400', on); x.classList.toggle('text-white', on); x.classList.toggle('border-brand-400', on); x.classList.toggle('bg-white', !on); x.classList.toggle('text-slate-600', !on); });
+    });
+    $('[data-st-save]', mm.el).addEventListener('click', async () => {
+      const note = $('[data-st-note]', mm.el).value.trim();
+      if (st === r.status && !note) { showToast('กรุณาเลือกสถานะใหม่หรือบันทึกความคืบหน้า', 'warning'); return; }
+      if (st !== r.status) {
+        const res = await db(s => s.from('cal_tasks').update({ status: st, updated_by_name: currentUser().full_name }).eq('id', r.id), { loaderText: 'กำลังบันทึก...', error: 'อัปเดตสถานะไม่สำเร็จ' });
+        if (!res.ok) return;
+        await logAudit('update_status', 'cal_tasks', r.id, { from: r.status, to: st });
+      }
+      await calLog('task', r, st !== r.status ? 'status' : 'comment', { from_status: st !== r.status ? r.status : null, to_status: st !== r.status ? st : null, detail: note || null });
+      showToast('บันทึกความคืบหน้าแล้ว', 'success');
+      mm.close();
+      if (onChanged) await onChanged();
+    });
+  }
+}
+/** แสดงหนังสือ/คำสั่งในงานสารบรรณที่เชื่อมโยง พร้อมไฟล์แนบ (ตามสิทธิ์การเข้าถึงเอกสาร) */
+async function calDocBox(box, r) {
+  if (!box || !r.saraban_doc_id) return;
+  const pub = r.saraban_access === 'public';
+  const internal = !pub && sarabanCanInternal() && (r.saraban_access !== 'restricted' || hasPermission('saraban.view_all'));
+  if (!pub && !internal) {
+    box.innerHTML = `<div class="mt-3 rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 text-xs text-slate-500 flex items-center gap-2">${ic('lock', 'w-4 h-4')} มีหนังสือ/คำสั่งที่เกี่ยวข้อง (เอกสารภายใน เฉพาะเจ้าหน้าที่)</div>`;
+    refreshIcons(); return;
+  }
+  const res = await dbMany([
+    s => pub ? s.from('v_public_saraban').select('id, doc_no, title').eq('id', r.saraban_doc_id).maybeSingle() : s.from('saraban_documents').select('id, doc_no, title').eq('id', r.saraban_doc_id).maybeSingle(),
+    s => (pub ? s.from('v_public_saraban_files') : s.from('saraban_files')).select('id, file_name, file_path, file_size, mime_type').eq('doc_id', r.saraban_doc_id).order('sort_order'),
+  ], { loader: false, silent: true });
+  if (!res.ok || !res.data[0]) return;
+  const [doc, files] = res.data;
+  box.innerHTML = `<div class="mt-3 rounded-2xl bg-cream-50 border border-cream-200 p-3">
+    <div class="text-xs text-cream-600 flex items-center gap-1 mb-1">${ic('archive', 'w-3.5 h-3.5')} หนังสือ/คำสั่งที่เกี่ยวข้อง (งานสารบรรณ)</div>
+    <div class="text-sm text-slate-700"><b class="font-medium">${esc(doc.doc_no || '')}</b> ${esc(doc.title)}</div>
+    ${(files || []).length ? `<div class="grid gap-1.5 mt-2">${files.map(f => { const fm = sarabanFileMeta(f.file_name, f.mime_type); return `<a href="${esc(sarabanDownloadUrl(f))}" target="_blank" rel="noopener" class="flex items-center gap-2 rounded-xl bg-white border border-slate-100 px-2.5 py-1.5 text-sm hover:border-brand-200">
+      <span style="color:${fm.color}">${ic(fm.icon, 'w-4 h-4')}</span><span class="flex-1 min-w-0 truncate text-slate-700">${esc(f.file_name)}</span><span class="text-xs text-slate-400">${formatBytes(f.file_size)}</span>${ic('download', 'w-4 h-4 text-slate-400')}</a>`; }).join('')}</div>` : ''}
+  </div>`;
+  refreshIcons();
+}
+
+/* ---------- เพิ่ม / แก้ไข / ลบ ---------- */
+function calChooseAdd(type, date, onSaved) {
+  if (!requirePermission('calendar.create')) return;
+  if (type) { calOpenForm(type, null, date, onSaved); return; }
+  const hints = { event: 'ประชุม อบรม งานพิธี กำหนดส่งงาน', task: 'งานที่ผู้บริหารสั่งการ พร้อมผู้รับผิดชอบ', acting: 'ตามคำสั่งให้รักษาราชการแทน', absence: 'ลา / ไปราชการ / อบรม (ไม่ระบุเหตุผล)' };
+  const m = openModal({
+    title: 'เพิ่มรายการ', icon: 'plus', size: 'md',
+    body: `<p class="text-sm text-slate-500 mb-3">วันที่ ${formatThaiDate(calDate(date), { long: true })}</p>
+      <div class="grid gap-2 sm:grid-cols-2">${Object.entries(CAL_TYPES).map(([k, t]) => `<button type="button" data-pick="${k}" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50 transition flex gap-3">
+        <span class="w-10 h-10 rounded-xl grid place-items-center shrink-0" style="background:${hexToRgba(t.color, .12)};color:${t.color}">${ic(t.icon, 'w-5 h-5')}</span>
+        <span><span class="block font-medium text-slate-700">${t.label}</span><span class="block text-xs text-slate-400">${hints[k]}</span></span></button>`).join('')}</div>`,
+  });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-pick]'); if (b) { m.close(); calOpenForm(b.dataset.pick, null, date, onSaved); } });
+}
+/** ช่องชื่อบุคคล: แนะนำจากรายชื่อผู้ใช้ และเติมตำแหน่งให้อัตโนมัติ */
+function calPersonField(inp, posInp, users) {
+  attachSuggest(inp, () => users.map(u => u.full_name));
+  inp.addEventListener('input', () => {
+    const u = users.find(x => x.full_name === inp.value.trim());
+    inp.dataset.uid = u ? u.id : '';
+    if (u && posInp && !posInp.value.trim()) posInp.value = u.position || '';
+  });
+}
+/** ช่องเชื่อมโยงหนังสือในงานสารบรรณ */
+function calDocField(inp, docs, onPick) {
+  if (!inp) return;
+  attachSuggest(inp, () => docs.map(d => d.label));
+  inp.addEventListener('input', () => {
+    const d = docs.find(x => x.label === inp.value);
+    inp.dataset.docId = d ? d.id : '';
+    if (d && onPick) onPick(d);
+  });
+}
+async function calOpenForm(type, rec, presetDate, onSaved) {
+  const editing = !!rec;
+  if (!requirePermission(editing ? 'calendar.update' : 'calendar.create')) return;
+  if (editing && !calCan(rec, 'update')) { showToast('แก้ไขได้เฉพาะรายการที่ตนเองบันทึก', 'warning'); return; }
+  const [users, docs] = await Promise.all([calLoadUsers(), calLoadDocs()]);
+  const r = rec || {}, d0 = presetDate || calToday(), m = CAL_TYPES[type];
+  const docLabel = r.saraban_doc_id ? (docs.find(x => x.id === r.saraban_doc_id)?.label || (r.saraban_doc_no ? `${r.saraban_doc_no} · ${r.saraban_title}` : '(เอกสารที่เชื่อมโยงไว้)')) : '';
+  const docField = hasPermission('saraban.view') ? `<div class="sm:col-span-2"><label class="label">หนังสือ/คำสั่งที่เกี่ยวข้อง (งานสารบรรณ)</label>
+      <input class="input" name="doc" value="${esc(docLabel)}" data-doc-id="${esc(r.saraban_doc_id || '')}" placeholder="พิมพ์เลขที่หรือชื่อเรื่องเพื่อค้นหา (ไม่บังคับ)">
+      <p class="text-xs text-slate-400 mt-1">ผู้ชมเห็นไฟล์ได้เฉพาะเอกสารระดับ "สาธารณะ"</p></div>` : '';
+  let fields = '';
+  if (type === 'event') fields = `
+    <div class="sm:col-span-2"><label class="label">ชื่อกิจกรรม *</label><input class="input" name="title" value="${esc(r.title || '')}" required maxlength="300"></div>
+    <div><label class="label">ประเภท</label><select class="input" name="category">${Object.entries(CAL_EVENT_CATS).map(([k, l]) => `<option value="${k}" ${k === (r.category || 'meeting') ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="flex items-end"><label class="inline-flex items-center gap-2 text-sm text-slate-600 pb-2.5"><input type="checkbox" name="all_day" class="rounded" ${r.all_day !== false ? 'checked' : ''}> ทั้งวัน (ไม่ระบุเวลา)</label></div>
+    <div><label class="label">วันที่เริ่ม *</label><input type="date" class="input" name="start_date" value="${esc(r.start_date || d0)}" required></div>
+    <div><label class="label">วันที่สิ้นสุด</label><input type="date" class="input" name="end_date" value="${esc(r.end_date || r.start_date || d0)}"></div>
+    <div data-time><label class="label">เวลาเริ่ม</label><input type="time" class="input" name="start_time" value="${esc(String(r.start_time || '').slice(0, 5))}"></div>
+    <div data-time><label class="label">เวลาสิ้นสุด</label><input type="time" class="input" name="end_time" value="${esc(String(r.end_time || '').slice(0, 5))}"></div>
+    <div class="sm:col-span-2"><label class="label">สถานที่</label><input class="input" name="location" value="${esc(r.location || '')}" maxlength="300"></div>
+    <div class="sm:col-span-2"><label class="label">ผู้เข้าร่วม</label><input class="input" name="attendees" value="${esc(r.attendees || '')}" placeholder="เช่น เจ้าหน้าที่กองคลังทุกคน"></div>
+    <div class="sm:col-span-2"><label class="label">รายละเอียด</label><textarea class="input" name="description" rows="3">${esc(r.description || '')}</textarea></div>${docField}`;
+  if (type === 'task') fields = `
+    <div class="sm:col-span-2"><label class="label">ชื่องานที่มอบหมาย *</label><input class="input" name="title" value="${esc(r.title || '')}" required maxlength="300"></div>
+    <div class="sm:col-span-2"><label class="label">ผู้มอบหมาย/ผู้สั่งการ *</label><input class="input" name="assigned_by" value="${esc(r.assigned_by || '')}" required placeholder="เช่น นายกเทศมนตรี, ปลัดเทศบาล"></div>
+    <div class="sm:col-span-2"><label class="label">ผู้รับผิดชอบ *</label>
+      <div class="rounded-2xl border border-slate-200 bg-white p-2 focus-within:border-brand-300 focus-within:ring-4 focus-within:ring-brand-100">
+        <div class="flex flex-wrap gap-1.5" data-chips></div>
+        <div class="flex gap-2 mt-1"><input class="flex-1 min-w-0 px-2 py-1.5 text-sm outline-none" data-assignee placeholder="พิมพ์ชื่อแล้วเลือก หรือกด Enter เพื่อเพิ่ม">
+          <button type="button" class="btn btn-soft btn-sm" data-add-assignee>${ic('user-plus', 'w-4 h-4')} เพิ่ม</button></div>
+      </div></div>
+    <div><label class="label">วันที่มอบหมาย</label><input type="date" class="input" name="assign_date" value="${esc(r.assign_date || d0)}"></div>
+    <div><label class="label">กำหนดส่ง</label><input type="date" class="input" name="due_date" value="${esc(r.due_date || '')}"></div>
+    <div><label class="label">ความสำคัญ</label><select class="input" name="priority">${Object.entries(CAL_PRIORITY).map(([k, p]) => `<option value="${k}" ${k === (r.priority || 'normal') ? 'selected' : ''}>${p.label}</option>`).join('')}</select></div>
+    <div><label class="label">สถานะ</label><select class="input" name="status">${Object.entries(CAL_TASK_STATUS).map(([k, s]) => `<option value="${k}" ${k === (r.status || 'pending') ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
+    <div class="sm:col-span-2"><label class="label">รายละเอียดการสั่งการ</label><textarea class="input" name="detail" rows="3">${esc(r.detail || '')}</textarea></div>${docField}`;
+  if (type === 'acting') fields = `
+    <div class="sm:col-span-2"><label class="label">ตำแหน่งที่ให้รักษาราชการแทน *</label><input class="input" name="position_title" value="${esc(r.position_title || '')}" required placeholder="เช่น ผู้อำนวยการกองคลัง"></div>
+    <div class="sm:col-span-2"><label class="label">ผู้ดำรงตำแหน่ง</label><input class="input" name="holder_name" value="${esc(r.holder_name || '')}" data-uid="${esc(r.holder_user_id || '')}" placeholder="เว้นว่างได้ กรณีตำแหน่งว่าง"></div>
+    <div><label class="label">ผู้รักษาราชการแทน *</label><input class="input" name="acting_name" value="${esc(r.acting_name || '')}" data-uid="${esc(r.acting_user_id || '')}" required></div>
+    <div><label class="label">ตำแหน่งของผู้รักษาราชการแทน</label><input class="input" name="acting_position" value="${esc(r.acting_position || '')}"></div>
+    <div><label class="label">ตั้งแต่วันที่ *</label><input type="date" class="input" name="start_date" value="${esc(r.start_date || d0)}" required></div>
+    <div><label class="label">ถึงวันที่ *</label><input type="date" class="input" name="end_date" value="${esc(r.end_date || r.start_date || d0)}" required></div>
+    <div class="sm:col-span-2"><label class="label">เลขที่คำสั่ง</label><input class="input" name="order_no" value="${esc(r.order_no || '')}" placeholder="เช่น ที่ 245/2569"></div>
+    ${docField}
+    <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><textarea class="input" name="note" rows="2">${esc(r.note || '')}</textarea></div>`;
+  if (type === 'absence') fields = `
+    <div><label class="label">ชื่อ-สกุล *</label><input class="input" name="person_name" value="${esc(r.person_name || '')}" data-uid="${esc(r.user_id || '')}" required></div>
+    <div><label class="label">ตำแหน่ง</label><input class="input" name="person_position" value="${esc(r.person_position || '')}"></div>
+    <div class="sm:col-span-2"><label class="label">ประเภท *</label><div class="grid grid-cols-3 gap-2">${Object.entries(CAL_ABSENCE).map(([k, a]) => `<label class="flex items-center justify-center gap-1.5 rounded-2xl border border-slate-200 px-2 py-2 text-sm cursor-pointer has-[:checked]:border-blush-300 has-[:checked]:bg-blush-50 has-[:checked]:text-blush-600">
+      <input type="radio" name="kind" value="${k}" class="sr-only" ${k === (r.kind || 'leave') ? 'checked' : ''}>${ic(a.icon, 'w-4 h-4')} ${a.label}</label>`).join('')}</div>
+      <p class="text-xs text-slate-400 mt-1">${ic('shield-check', 'w-3.5 h-3.5 inline')} กรณีลา ระบบไม่บันทึกประเภทหรือเหตุผลการลา จะแสดงเพียงว่า "ลา"</p></div>
+    <div><label class="label">ตั้งแต่วันที่ *</label><input type="date" class="input" name="start_date" value="${esc(r.start_date || d0)}" required></div>
+    <div><label class="label">ถึงวันที่</label><input type="date" class="input" name="end_date" value="${esc(r.end_date || r.start_date || d0)}"></div>
+    <div><label class="label">ช่วงเวลา</label><select class="input" name="period">${Object.entries(CAL_PERIOD).map(([k, l]) => `<option value="${k}" ${k === (r.period || 'full') ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div data-place><label class="label">สถานที่</label><input class="input" name="place" value="${esc(r.place || '')}" placeholder="เช่น ศาลากลางจังหวัดสุโขทัย"></div>`;
+
+  const md = openModal({
+    title: `${editing ? 'แก้ไข' : 'เพิ่ม'}${m.label}`, icon: m.icon, size: 'lg',
+    body: `<form class="grid gap-3 sm:grid-cols-2" novalidate>${fields}</form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>`,
+  });
+  const f = $('form', md.el), F = f.elements;
+  const userPos = [...new Set(users.map(u => u.position).filter(Boolean))];
+
+  // ผู้รับผิดชอบหลายคน (ชิป)
+  const assignees = (r.assignees || []).map(a => ({ ...a }));
+  const drawChips = () => {
+    const box = $('[data-chips]', md.el); if (!box) return;
+    box.innerHTML = assignees.map((a, i) => `<span class="inline-flex items-center gap-1 rounded-xl bg-brand-50 border border-brand-100 pl-2.5 pr-1 py-1 text-xs text-brand-700">
+      ${a.user_id ? ic('user-check', 'w-3.5 h-3.5') : ic('user', 'w-3.5 h-3.5')} ${esc(a.name)}
+      <button type="button" class="w-5 h-5 grid place-items-center rounded-lg hover:bg-brand-100" data-rm="${i}" aria-label="ลบ ${esc(a.name)}">${ic('x', 'w-3 h-3')}</button></span>`).join('') || '<span class="text-xs text-slate-400 px-1">ยังไม่ได้เลือกผู้รับผิดชอบ</span>';
+    refreshIcons();
+  };
+  const addAssignee = (name) => {
+    name = String(name || '').trim(); if (!name) return;
+    if (assignees.some(a => a.name === name)) { showToast('เพิ่มชื่อนี้แล้ว', 'info'); return; }
+    const u = users.find(x => x.full_name === name);
+    assignees.push({ user_id: u?.id || null, name, position: u?.position || null });
+    drawChips();
+  };
+  if (type === 'task') {
+    const ai = $('[data-assignee]', md.el);
+    attachSuggest(ai, () => users.map(u => u.full_name).filter(n => !assignees.some(a => a.name === n)));
+    ai.addEventListener('input', () => { if (ai._sgPicking) { addAssignee(ai.value); ai.value = ''; } });
+    ai.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.defaultPrevented) { e.preventDefault(); addAssignee(ai.value); ai.value = ''; suggestClose(); } });
+    $('[data-add-assignee]', md.el).onclick = () => { addAssignee(ai.value); ai.value = ''; ai.focus(); };
+    $('[data-chips]', md.el).addEventListener('click', (e) => { const b = e.target.closest('[data-rm]'); if (b) { assignees.splice(+b.dataset.rm, 1); drawChips(); } });
+    drawChips();
+    const used = [...new Set(Cal.data.task.map(t => t.assigned_by).filter(Boolean))];
+    attachSuggest(F.assigned_by, () => [...new Set([...CAL_ASSIGNERS, ...used])]);
+  }
+  if (type === 'event') {
+    const sync = () => $$('[data-time]', f).forEach(x => x.classList.toggle('hidden', F.all_day.checked));
+    F.all_day.addEventListener('change', sync); sync();
+  }
+  if (type === 'acting') {
+    attachSuggest(F.position_title, () => [...new Set([...Cal.data.acting.map(a => a.position_title), ...userPos])]);
+    calPersonField(F.holder_name, null, users);
+    F.holder_name.addEventListener('input', () => { const u = users.find(x => x.full_name === F.holder_name.value.trim()); if (u?.position && !F.position_title.value.trim()) F.position_title.value = u.position; });
+    calPersonField(F.acting_name, F.acting_position, users);
+    attachSuggest(F.acting_position, () => userPos);
+  }
+  if (type === 'absence') {
+    calPersonField(F.person_name, F.person_position, users);
+    attachSuggest(F.person_position, () => userPos);
+    const sync = () => { const leave = F.kind.value === 'leave'; $('[data-place]', f).classList.toggle('hidden', leave); if (leave) F.place.value = ''; };
+    $$('[name=kind]', f).forEach(x => x.addEventListener('change', sync)); sync();
+  }
+  if (F.doc) calDocField(F.doc, docs, (d) => { if (type === 'acting' && F.order_no && !F.order_no.value.trim() && d.doc_no) F.order_no.value = d.doc_no; });
+  // วันที่สิ้นสุดตามวันที่เริ่ม (ถ้าก่อนวันเริ่ม)
+  if (F.start_date && F.end_date) F.start_date.addEventListener('change', () => { if (!F.end_date.value || F.end_date.value < F.start_date.value) F.end_date.value = F.start_date.value; });
+
+  $('[data-save]', md.el).onclick = async () => {
+    const v = (n) => (F[n]?.value ?? '').trim();
+    const u = currentUser();
+    let payload = {}, need = [];
+    if (type === 'event') {
+      payload = { title: v('title'), category: v('category'), start_date: v('start_date'), end_date: v('end_date') || v('start_date'), all_day: F.all_day.checked,
+        start_time: F.all_day.checked ? null : (v('start_time') || null), end_time: F.all_day.checked ? null : (v('end_time') || null),
+        location: v('location') || null, attendees: v('attendees') || null, description: v('description') || null };
+      need = [['title', 'ชื่อกิจกรรม'], ['start_date', 'วันที่เริ่ม']];
+      if (!payload.all_day && payload.start_time && payload.end_time && payload.start_date === payload.end_date && payload.end_time < payload.start_time) { showToast('เวลาสิ้นสุดต้องไม่ก่อนเวลาเริ่ม', 'warning'); return; }
+    }
+    if (type === 'task') {
+      const pending = $('[data-assignee]', md.el).value.trim();
+      if (pending) { addAssignee(pending); $('[data-assignee]', md.el).value = ''; }
+      payload = { title: v('title'), assigned_by: v('assigned_by'), assign_date: v('assign_date') || calToday(), due_date: v('due_date') || null,
+        priority: v('priority'), status: v('status'), detail: v('detail') || null };
+      need = [['title', 'ชื่องาน'], ['assigned_by', 'ผู้มอบหมาย']];
+      if (!assignees.length) { showToast('กรุณาเพิ่มผู้รับผิดชอบอย่างน้อย 1 คน', 'warning'); $('[data-assignee]', md.el).focus(); return; }
+      if (payload.due_date && payload.due_date < payload.assign_date) { showToast('กำหนดส่งต้องไม่ก่อนวันที่มอบหมาย', 'warning'); return; }
+    }
+    if (type === 'acting') {
+      payload = { position_title: v('position_title'), holder_name: v('holder_name') || null, holder_user_id: v('holder_name') ? (F.holder_name.dataset.uid || null) : null,
+        acting_name: v('acting_name'), acting_user_id: F.acting_name.dataset.uid || null, acting_position: v('acting_position') || null,
+        start_date: v('start_date'), end_date: v('end_date'), order_no: v('order_no') || null, note: v('note') || null };
+      need = [['position_title', 'ตำแหน่ง'], ['acting_name', 'ผู้รักษาราชการแทน'], ['start_date', 'ตั้งแต่วันที่'], ['end_date', 'ถึงวันที่']];
+    }
+    if (type === 'absence') {
+      const kind = F.kind.value;
+      payload = { person_name: v('person_name'), user_id: F.person_name.dataset.uid || null, person_position: v('person_position') || null, kind,
+        start_date: v('start_date'), end_date: v('end_date') || v('start_date'), period: v('period'), place: kind === 'leave' ? null : (v('place') || null) };
+      need = [['person_name', 'ชื่อ-สกุล'], ['start_date', 'ตั้งแต่วันที่']];
+    }
+    const miss = need.find(([k]) => !payload[k]);
+    if (miss) { showToast(`กรุณากรอก${miss[1]}`, 'warning'); F[miss[0]]?.focus?.(); return; }
+    if (payload.end_date && payload.start_date && payload.end_date < payload.start_date) { showToast('วันที่สิ้นสุดต้องไม่ก่อนวันที่เริ่ม', 'warning'); return; }
+    if (F.doc) payload.saraban_doc_id = F.doc.value.trim() ? (F.doc.dataset.docId || (F.doc.value === docLabel ? r.saraban_doc_id : null) || null) : null;
+    if (type === 'acting') {   // เตือนเมื่อช่วงวันที่ซ้อนกับการรักษาราชการแทนตำแหน่งเดียวกัน
+      const dup = Cal.data.acting.find(a => a.id !== r.id && a.position_title === payload.position_title && a.start_date <= payload.end_date && payload.start_date <= a.end_date);
+      if (dup && !(await confirmModal({ title: 'ช่วงวันที่ซ้อนกัน', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
+        message: `ตำแหน่ง <b>${esc(payload.position_title)}</b> มีผู้รักษาราชการแทนอยู่แล้ว คือ <b>${esc(dup.acting_name)}</b> (${calRangeText(dup.start_date, dup.end_date)})<br>ต้องการบันทึกต่อหรือไม่?` }))) return;
+    }
+    const table = m.table;
+    let res;
+    if (editing) {
+      res = await db(s => s.from(table).update({ ...payload, updated_by_name: u.full_name }).eq('id', r.id).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
+    } else {
+      res = await db(s => s.from(table).insert({ ...payload, org_id: u.org_id || null, created_by: u.id, created_by_name: u.full_name }).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
+    }
+    if (!res.ok) return;
+    const saved = res.data;
+    if (type === 'task') {
+      const del = await db(s => s.from('cal_task_assignees').delete().eq('task_id', saved.id), { loader: false, error: 'บันทึกผู้รับผิดชอบไม่สำเร็จ' });
+      if (!del.ok) return;
+      const ins = await db(s => s.from('cal_task_assignees').insert(assignees.map((a, i) => ({ task_id: saved.id, user_id: a.user_id || null, name: a.name, position: a.position || null, sort_order: i }))), { loader: false, error: 'บันทึกผู้รับผิดชอบไม่สำเร็จ' });
+      if (!ins.ok) return;
+      if (editing && r.status !== saved.status) await calLog('task', saved, 'status', { from_status: r.status, to_status: saved.status });
+    }
+    await calLog(type, saved, editing ? 'update' : 'create');
+    await logAudit(editing ? 'update' : 'create', table, saved.id, { title: calTitle(type, saved) });
+    showToast(editing ? 'บันทึกการแก้ไขแล้ว' : `เพิ่ม${m.label}แล้ว`, 'success');
+    md.close();
+    if (onSaved) await onSaved();
+  };
+}
+async function calDelete(type, r, onDone) {
+  if (!calCan(r, 'delete')) { showToast('ลบได้เฉพาะรายการที่ตนเองบันทึก', 'warning'); return; }
+  const m = CAL_TYPES[type];
+  const ok = await confirmModal({ title: `ลบ${m.label}`, message: `ต้องการลบ <b>${esc(calTitle(type, r))}</b> ใช่หรือไม่?<br><span class="text-xs text-slate-400">ลบแล้วไม่สามารถกู้คืนได้</span>`, confirmText: 'ลบ' });
+  if (!ok) return;
+  const res = await db(s => s.from(m.table).delete().eq('id', r.id), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
+  if (!res.ok) return;
+  await calLog(type, r, 'delete');
+  await logAudit('delete', m.table, r.id, { title: calTitle(type, r) });
+  showToast('ลบรายการแล้ว', 'success');
+  if (onDone) await onDone();
+}
+
+/* ---------- การ์ดสรุปบนหน้าแรก / แดชบอร์ด ---------- */
+async function calHomeWidget(box) {
+  if (!box) return;
+  if (!sb || !hasPermission('calendar.view_public')) { box.innerHTML = ''; return; }
+  const today = calToday(), in7 = calAddDays(today, 7), in3 = calAddDays(today, 3);
+  box.innerHTML = `<section class="mb-8"><div class="skeleton h-72 rounded-3xl"></div></section>`;
+  const r = await dbMany([
+    s => s.from('v_public_cal_acting').select('*').lte('start_date', today).gte('end_date', today).order('position_title'),
+    s => s.from('v_public_cal_absences').select('*').lte('start_date', today).gte('end_date', today).order('person_name'),
+    s => s.from('v_public_cal_events').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('start_time', { nullsFirst: true }).limit(8),
+    s => s.from('v_public_cal_tasks').select('*').in('status', ['pending', 'in_progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(200),
+    s => s.from('v_public_cal_activity').select('*').order('created_at', { ascending: false }).limit(5),
+  ], { loader: false, silent: true });
+  if (!r.ok) { box.innerHTML = ''; return; }
+  const [acting, absent, events, tasks, acts] = r.data;
+  const pool = { acting, absence: absent, event: events, task: tasks };
+  const overdue = tasks.filter(t => calTaskOverdue(t, today));
+  const soon = tasks.filter(t => t.due_date && t.due_date >= today && t.due_date <= in3);
+  const mine = isLoggedIn() ? tasks.filter(calIsAssignee) : [];
+  const showTasks = [...overdue, ...soon, ...tasks.filter(t => !overdue.includes(t) && !soon.includes(t))].slice(0, 5);
+  const canOpen = State.menus.some(x => x.menu_key === 'calendar');
+  const li = (inner, open) => `<li><button type="button" class="w-full text-left flex gap-2.5 rounded-xl px-2 py-2 hover:bg-white/80 transition" data-cal-open="${open}">${inner}</button></li>`;
+  const empty = (t) => `<li class="px-2 py-3 text-sm text-slate-400">${t}</li>`;
+  const block = (icon, color, title, count, inner, cls = '') => `<div class="rounded-2xl p-3 ${cls}" style="background:${hexToRgba(color, .07)}">
+    <div class="flex items-center gap-2 mb-1 px-1"><span style="color:${color}">${ic(icon, 'w-4 h-4')}</span><h4 class="font-medium text-slate-700 text-sm flex-1">${title}</h4>${count != null ? `<span class="rounded-full px-2 text-xs text-white" style="background:${color}">${count}</span>` : ''}</div>
+    <ul>${inner}</ul></div>`;
+
+  box.innerHTML = `<section class="mb-8">
+    <div class="flex items-end justify-between gap-3 mb-4">
+      <div><h3 class="section-title">${ic('calendar-days', 'w-5 h-5 text-lilac-500')} ความเคลื่อนไหวกองคลัง</h3>
+        <p class="text-sm text-slate-500">${formatThaiDate(new Date(), { long: true, weekday: true })}</p></div>
+      ${canOpen ? `<button class="btn btn-soft btn-sm" data-nav="calendar">เปิดปฏิทิน ${ic('arrow-right', 'w-4 h-4')}</button>` : ''}
+    </div>
+    <div class="card p-3 md:p-4 grid gap-3">
+      <div class="grid md:grid-cols-2 gap-3">
+        ${block('user-cog', '#8670D6', 'รักษาราชการแทนวันนี้', acting.length || null, acting.length ? acting.map(a => li(`<span class="min-w-0 flex-1"><span class="block text-sm font-medium text-slate-700">${esc(a.position_title)}</span>
+          <span class="block text-sm text-slate-600">${esc(a.acting_name)} <span class="text-xs text-slate-400">(ถึง ${formatThaiDate(calDate(a.end_date))})</span></span></span>`, `acting|${a.id}`)).join('') : empty('วันนี้ไม่มีการรักษาราชการแทน'))}
+        ${block('user-minus', '#D95C8A', 'ไม่อยู่ปฏิบัติงานวันนี้', absent.length || null, absent.length ? absent.map(a => li(`<span class="min-w-0 flex-1 text-sm"><span class="text-slate-700">${esc(a.person_name)}</span>
+          <span class="badge bg-white text-blush-500 ml-1">${CAL_ABSENCE[a.kind]?.label || ''}${a.period !== 'full' ? ' · ' + CAL_PERIOD[a.period] : ''}</span></span>`, `absence|${a.id}`)).join('') : empty('วันนี้ทุกคนปฏิบัติงานตามปกติ'))}
+      </div>
+      <div class="grid lg:grid-cols-3 gap-3">
+        ${block('calendar-check', '#3B8FD4', 'กิจกรรม 7 วันข้างหน้า', events.length || null, events.length ? events.map(e => { const d = calDate(e.start_date < today ? today : e.start_date); return li(`<span class="w-10 shrink-0 text-center rounded-xl bg-white py-1"><span class="block text-[10px] text-slate-400">${TH_MONTHS_SHORT[d.getMonth()]}</span><span class="block text-base font-semibold text-brand-600 leading-none">${d.getDate()}</span></span>
+          <span class="min-w-0 flex-1"><span class="block text-sm text-slate-700 line-clamp-2">${esc(e.title)}</span><span class="block text-xs text-slate-400 truncate">${esc([calEventTime(e), e.location].filter(Boolean).join(' · '))}</span></span>`, `event|${e.id}`); }).join('') : empty('ไม่มีกิจกรรมในสัปดาห์นี้'))}
+        ${block('clipboard-check', '#E08A1E', 'งานมอบหมายที่ต้องติดตาม', tasks.length || null, `${mine.length ? `<li class="px-2 pb-1"><span class="badge bg-brand-100 text-brand-600">${ic('user-check', 'w-3 h-3')} งานของฉัน ${mine.length} งาน</span></li>` : ''}
+          ${overdue.length ? `<li class="px-2 pb-1"><span class="badge bg-blush-100 text-blush-500">${ic('alarm-clock', 'w-3 h-3')} เลยกำหนด ${overdue.length} งาน</span></li>` : ''}
+          ${showTasks.length ? showTasks.map(t => li(`<span class="min-w-0 flex-1"><span class="block text-sm text-slate-700 line-clamp-2">${esc(t.title)}</span>
+            <span class="block text-xs ${calTaskOverdue(t, today) ? 'text-blush-500' : 'text-slate-400'} truncate">${t.due_date ? 'ส่ง ' + formatThaiDate(calDate(t.due_date)) : 'ไม่กำหนดวันส่ง'} · ${esc(calAssigneeNames(t))}</span></span>`, `task|${t.id}`)).join('') : empty('ไม่มีงานค้าง')}`)}
+        ${block('activity', '#3AA57C', 'ความเคลื่อนไหวล่าสุด', null, acts.length ? acts.map(a => `<li class="px-2 py-1.5 text-sm"><span class="text-slate-700"><b class="font-medium">${esc(a.by_name || 'ระบบ')}</b>
+          ${{ create: 'บันทึก', update: 'แก้ไข', delete: 'ลบ', status: 'อัปเดตสถานะ', comment: 'บันทึกความคืบหน้า' }[a.action] || ''} ${esc(a.title)}</span>${a.action === 'status' && a.to_status ? ` ${calStatusBadge(a.to_status)}` : ''}
+          <span class="block text-xs text-slate-400">${timeAgo(a.created_at)}</span></li>`).join('') : empty('ยังไม่มีความเคลื่อนไหว'))}
+      </div>
+    </div></section>`;
+  refreshIcons();
+  box.onclick = (e) => {
+    const op = e.target.closest('[data-cal-open]');
+    if (!op) return;
+    e.stopPropagation();
+    const [type, id] = op.dataset.calOpen.split('|');
+    const rec = pool[type]?.find(x => x.id === id);
+    if (rec) calOpenDetail(type, rec, () => calHomeWidget(box)); else calOpenById(type, id, () => calHomeWidget(box));
+  };
+}
+/* ===== END MODULE: calendar ===== */
+
+
 /* ===== MODULE: travel (โปรแกรมคำนวณค่าใช้จ่ายไปราชการ) ===== */
 // Phase 1: ยังไม่พัฒนา → ใช้ renderComingSoon
 // รอบถัดไป: เขียน function renderTravel(el, mod, menu) { ... } แล้วเปลี่ยน MODULES.travel.render = renderTravel
@@ -4854,6 +5722,7 @@ function pmDelete(el, s) {
    เพิ่มโมดูลใหม่: เพิ่ม key + render ที่นี่ และเพิ่มแถวในตาราง modules / menus / permissions */
 const MODULES = {
   announcements: { render: renderAnnouncements },
+  calendar:      { render: renderCalendar },
   saraban:       { render: renderSaraban },
   travel:        { render: renderComingSoon },
   register:      { render: renderComingSoon },
