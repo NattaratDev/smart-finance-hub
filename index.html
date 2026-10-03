@@ -410,8 +410,100 @@ function openModal({ title = '', body = '', footer = '', size = 'md', icon = nul
   document.addEventListener('keydown', onKey);
   $('#modalRoot').appendChild(wrap);
   document.body.classList.add('overflow-hidden');
+  enhanceDatalists(wrap);
   refreshIcons();
   return { el: wrap, body: $('.modal-body', wrap), close };
+}
+
+/* ===== CORE: ช่องกรอกพร้อมรายการแนะนำ =====
+   ใช้แทน <datalist> ของเบราว์เซอร์ ซึ่งมักแสดงรายการผิดตำแหน่งเมื่ออยู่ในหน้าต่าง Modal ที่เลื่อนได้
+   รายการแสดงชิดใต้ช่องเสมอ (ถ้าพื้นที่ด้านล่างไม่พอจะเปิดขึ้นด้านบน) · ใช้แป้น ↑ ↓ Enter Esc ได้ */
+const Suggest = { panel: null, input: null, list: [], active: -1 };
+function suggestPanel() {
+  if (Suggest.panel) return Suggest.panel;
+  const p = document.createElement('div');
+  p.className = 'fixed z-[85] hidden max-h-60 overflow-y-auto rounded-2xl border border-slate-200 bg-white py-1 text-sm shadow-soft';
+  p.setAttribute('role', 'listbox');
+  p.addEventListener('mousedown', (e) => {          // mousedown + preventDefault: ไม่ให้ช่องกรอกเสีย focus ก่อนเลือก
+    const o = e.target.closest('[data-sg]');
+    e.preventDefault();
+    if (o) suggestPick(+o.dataset.sg);
+  });
+  document.body.appendChild(p);
+  window.addEventListener('resize', suggestPlace);
+  document.addEventListener('scroll', suggestPlace, true);   // true = จับการเลื่อนของ Modal ด้วย
+  return (Suggest.panel = p);
+}
+function suggestPlace() {
+  const p = Suggest.panel, inp = Suggest.input;
+  if (!p || !inp || p.classList.contains('hidden')) return;
+  const r = inp.getBoundingClientRect();
+  if (!r.width || !document.body.contains(inp)) { suggestClose(); return; }
+  const h = p.offsetHeight, below = window.innerHeight - r.bottom;   // offsetHeight รวมเส้นขอบ (สูงสุด 240px จาก max-h-60)
+  p.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - Math.max(r.width, 200) - 8))}px`;
+  p.style.width = `${Math.max(r.width, 200)}px`;
+  p.style.top = `${below < h + 8 && r.top > below ? r.top - h - 4 : r.bottom + 4}px`;
+}
+function suggestOpen(inp) {
+  const p = suggestPanel();
+  const q = inp.value.trim().toLowerCase();
+  const all = inp._sgOptions();
+  const list = (q ? all.filter(o => o.toLowerCase().includes(q)) : all).slice(0, 60);
+  if (!list.length || (list.length === 1 && list[0] === inp.value)) { suggestClose(); return; }
+  Object.assign(Suggest, { input: inp, list, active: -1 });
+  const mark = (o) => {
+    const i = q ? o.toLowerCase().indexOf(q) : -1;
+    return i < 0 ? esc(o) : `${esc(o.slice(0, i))}<b class="text-brand-600">${esc(o.slice(i, i + q.length))}</b>${esc(o.slice(i + q.length))}`;
+  };
+  p.innerHTML = list.map((o, i) => `<div data-sg="${i}" role="option" class="px-3 py-2 cursor-pointer truncate text-slate-700 hover:bg-brand-50">${mark(o)}</div>`).join('');
+  p.classList.remove('hidden');
+  p.scrollTop = 0;
+  suggestPlace();
+}
+function suggestClose() {
+  if (Suggest.panel) Suggest.panel.classList.add('hidden');
+  Suggest.input = null; Suggest.active = -1;
+}
+function suggestPick(i) {
+  const inp = Suggest.input;
+  if (!inp || Suggest.list[i] == null) return;
+  inp.value = Suggest.list[i];
+  suggestClose();
+  inp._sgPicking = true;
+  inp.dispatchEvent(new Event('input', { bubbles: true }));   // ให้ฟอร์มรับรู้ค่าใหม่ (เช่น คำนวณยอด)
+  inp._sgPicking = false;
+}
+function suggestMove(step) {
+  const p = Suggest.panel;
+  if (!Suggest.list.length) return;
+  Suggest.active = (Suggest.active + step + Suggest.list.length) % Suggest.list.length;
+  $$('[data-sg]', p).forEach((el, i) => el.classList.toggle('bg-brand-50', i === Suggest.active));
+  $(`[data-sg="${Suggest.active}"]`, p)?.scrollIntoView({ block: 'nearest' });
+}
+/** ผูกรายการแนะนำกับช่องกรอก – getOptions() คืน array ของข้อความ */
+function attachSuggest(inp, getOptions) {
+  if (inp._sgOptions) return;
+  inp._sgOptions = getOptions;
+  inp.setAttribute('autocomplete', 'off');
+  inp.addEventListener('focus', () => suggestOpen(inp));
+  inp.addEventListener('input', () => { if (!inp._sgPicking) suggestOpen(inp); });
+  inp.addEventListener('blur', () => setTimeout(() => { if (Suggest.input === inp) suggestClose(); }, 120));
+  inp.addEventListener('keydown', (e) => {
+    const open = Suggest.input === inp && !Suggest.panel.classList.contains('hidden');
+    if (e.key === 'ArrowDown') { e.preventDefault(); if (!open) suggestOpen(inp); else suggestMove(1); }
+    else if (e.key === 'ArrowUp' && open) { e.preventDefault(); suggestMove(-1); }
+    else if (e.key === 'Enter' && open && Suggest.active >= 0) { e.preventDefault(); suggestPick(Suggest.active); }
+    else if (e.key === 'Escape' && open) { e.preventDefault(); e.stopPropagation(); suggestClose(); }
+  });
+}
+/** เปลี่ยน <input list="..."> ภายใน root ให้ใช้รายการแนะนำของระบบแทน datalist ของเบราว์เซอร์ */
+function enhanceDatalists(root) {
+  $$('input[list]', root).forEach(inp => {
+    const dl = document.getElementById(inp.getAttribute('list'));
+    if (!dl) return;
+    inp.removeAttribute('list');
+    attachSuggest(inp, () => [...dl.options].map(o => o.value).filter(Boolean));
+  });
 }
 
 /** Modal ยืนยัน → Promise<boolean> */
@@ -4429,6 +4521,7 @@ function openPayrollSlipEditor(el, slip) {
         <input class="input !py-2 w-32 text-right" inputmode="decimal" placeholder="0.00" value="${x.amount === '' ? '' : esc(x.amount)}" data-ps-k="${k}" data-ps-i="${i}" data-ps-f="amount">
         <button type="button" class="btn-icon hover:!text-blush-500" data-ps-del="${k}" data-ps-i="${i}" title="นำออก">${ic('x', 'w-4 h-4')}</button></div>`).join('')
       : `<div class="text-sm text-slate-400 text-center py-2">– ไม่มีรายการ –</div>`;
+    enhanceDatalists($(`[data-ps-rows="${k}"]`, m.el));
     refreshIcons();
   };
   drawRows('incomes'); drawRows('deductions'); drawTotals();
@@ -4687,6 +4780,7 @@ function openPmEditor(el, slip, { copy = false } = {}) {
         <input class="input !py-2 w-32 text-right" inputmode="decimal" placeholder="0.00" value="${x.amount === '' ? '' : esc(x.amount)}" data-pme-k="${k}" data-pme-i="${i}" data-pme-f="amount">
         <button type="button" class="btn-icon hover:!text-blush-500" data-pme-del="${k}" data-pme-i="${i}" title="นำออก">${ic('x', 'w-4 h-4')}</button></div>`).join('')
       : `<div class="text-sm text-slate-400 text-center py-2">– ไม่มีรายการ –</div>`;
+    enhanceDatalists($(`[data-pme-rows="${k}"]`, m.el));
     refreshIcons();
   };
   const current = () => {
