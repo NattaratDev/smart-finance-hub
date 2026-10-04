@@ -5335,7 +5335,7 @@ function rentPickPerson(el) {
 function rentOpenEnt(ent, person, el) {
   const e = ent || {}, p = person || rentPerson(e.person_id); if (!p) return;
   const fyStart = rentMonthFirst(Rg.fy - 544, 10);
-  const rate = rentRateFor(p, e.start_date || fyStart);
+  const rate = rentRateFor(p, e.start_date && e.start_date > fyStart ? e.start_date : fyStart);
   const m = openModal({
     title: `${ent ? 'สิทธิ์ค่าเช่าบ้าน' : 'เพิ่มสิทธิ์ค่าเช่าบ้าน'} · ${esc(p.full_name)}`, icon: 'home', size: 'lg',
     body: `<div class="rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 mb-3 text-sm">
@@ -5344,7 +5344,8 @@ function rentOpenEnt(ent, person, el) {
       <form class="grid gap-3 sm:grid-cols-2" novalidate>
         <div><label class="label">ปีงบประมาณ</label><input class="input" value="${Rg.fy}" disabled></div>
         <div><label class="label">ประเภท</label><select class="input" name="housing_type">${Object.entries(RENT_HOUSING).map(([k, l]) => `<option value="${k}" ${k === (e.housing_type || 'rent') ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-        <div><label class="label">มีสิทธิ์ตั้งแต่วันที่ *</label><input type="date" class="input" name="start_date" value="${esc(e.start_date || fyStart)}" min="${fyStart}" max="${rentMonthLast(Rg.fy - 543, 9)}"></div>
+        <div><label class="label">มีสิทธิ์ตั้งแต่วันที่ *</label><input type="date" class="input" name="start_date" value="${esc(e.start_date || fyStart)}" max="${rentMonthLast(Rg.fy - 543, 9)}">
+          <p class="text-xs text-slate-400 mt-1">กรอกย้อนหลังได้ (เช่น วันที่ได้รับสิทธิ์ครั้งแรก) · ทะเบียนปีนี้คุมเฉพาะเดือน ต.ค.–ก.ย. ของปีงบ ${Rg.fy}</p></div>
         <div><label class="label">สิ้นสุดสิทธิ์ (ถ้ามี)</label><input type="date" class="input" name="end_date" value="${esc(e.end_date || '')}"></div>
         <div><label class="label">ค่าเช่า/ค่าผ่อนจริงต่อเดือน</label><input class="input" inputmode="decimal" name="monthly_rent" value="${esc(e.monthly_rent ?? '')}" placeholder="0.00"></div>
         <div><label class="label">สิทธิ์เบิก เดือนละไม่เกิน *</label><div class="flex gap-2"><input class="input" inputmode="decimal" name="rate_cap" value="${esc(e.rate_cap ?? (rate.ok ? rate.rate : ''))}" placeholder="0.00">
