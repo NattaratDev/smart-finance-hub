@@ -5619,11 +5619,21 @@ function rentOpenRates(src, el) {
 
 /* ---------- พิมพ์ / PDF / Excel ---------- */
 function rentPrintMenu(mode) {
+  const months = rentMonths(Rg.fy), today = calToday();
+  const def = months.filter(mo => rentMonthFirst(mo.y, mo.m) <= today).at(-1) || months[0];
   const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
     body: `<div class="grid gap-2">
       <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="summary"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวมทั้งหน่วยงาน</div><div class="text-xs text-slate-400">A4 แนวนอน · ทุกคน × 12 เดือน</div></button>
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า (ทุกคน)</div></button></div>` });
-  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (b) { m.close(); rentPrint(b.dataset.k, null, mode); } });
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า (ทุกคน)</div></button>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · รายชื่อผู้เบิกในเดือนที่เลือก พร้อมยอดรวม</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="month">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${mode === 'pdf' ? 'PDF' : 'พิมพ์'}</button></div>
+        <label class="inline-flex items-center gap-2 text-xs text-slate-600 mt-2"><input type="checkbox" class="rounded" data-unrec checked> แสดงผู้มีสิทธิ์ที่ยังไม่บันทึกการเบิกด้วย</label></div></div>` });
+  m.el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-k]'); if (!b) return;
+    const opts = b.dataset.k === 'month' ? (([y, mo]) => ({ y, m: mo, unrecorded: $('[data-unrec]', m.el).checked }))($('[data-month]', m.el).value.split('|').map(Number)) : {};
+    m.close(); rentPrint(b.dataset.k, null, mode, opts);
+  });
 }
 const RENT_PRINT_CSS = `#rgPrintRoot{position:fixed;left:-10000px;top:0}
   .rg-page{background:#fff;color:#111827;font-family:Kanit,sans-serif;font-size:11.5px;line-height:1.45;box-sizing:border-box;position:relative}
@@ -5637,13 +5647,33 @@ const RENT_PRINT_CSS = `#rgPrintRoot{position:fixed;left:-10000px;top:0}
   @media print{body.rg-printing{background:#fff!important;padding:0!important}body.rg-printing>*:not(#rgPrintRoot){display:none!important}
     body.rg-printing #rgPrintRoot{position:static;left:auto}.rg-page{page-break-after:always;break-after:page}.rg-page:last-child{page-break-after:auto;break-after:auto}}`;
 /** สร้างหน้าเอกสาร → คืน { root, orientation } */
-function rentBuildPages(kind, entIds) {
+function rentBuildPages(kind, entIds, opts = {}) {
   if (!$('#rg-print-style')) { const st = document.createElement('style'); st.id = 'rg-print-style'; st.textContent = RENT_PRINT_CSS; document.head.appendChild(st); }
   let root = $('#rgPrintRoot'); if (!root) { root = document.createElement('div'); root.id = 'rgPrintRoot'; document.body.appendChild(root); }
   const s = State.settings, months = rentMonths(Rg.fy), printed = formatThaiDate(new Date(), { time: true });
   const rows = rentRows().filter(r => !entIds || entIds.includes(r.e.id));
   const title = `ทะเบียนคุมการเบิกจ่ายค่าเช่าบ้าน ปีงบประมาณ ${Rg.fy}`, org = esc(s.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย');
   const sumP = (e) => months.reduce((a, mo) => a + (+(rentClaim(e.id, mo.y, mo.m)?.amount || 0)), 0);
+  const sign = `<div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>`;
+  if (kind === 'month') {   // รายงานประจำเดือน
+    const { y, m } = opts, monthText = `${TH_MONTHS[m - 1]} ${y + 543}`;
+    const list = rows.map(r => ({ ...r, c: rentClaim(r.e.id, y, m) })).filter(r => r.c || (opts.unrecorded && rentCovered(r.e, y, m)));
+    const total = list.reduce((a, r) => a + (+(r.c?.amount || 0)), 0), paid = list.reduce((a, r) => a + (r.c?.status === 'paid' ? +r.c.amount : 0), 0);
+    const per = 22, pages = [];
+    for (let i = 0; i < list.length; i += per) pages.push(list.slice(i, i + per));
+    if (!pages.length) pages.push([]);
+    root.innerHTML = pages.map((chunk, pi) => `<div class="rg-page port"><h1>รายงานการเบิกจ่ายค่าเช่าบ้าน ประจำเดือน${monthText}</h1><div class="sub">ปีงบประมาณ ${Rg.fy} · ${org}</div>
+      <table><thead><tr><th style="width:8mm">ที่</th><th>ชื่อ-สกุล / ตำแหน่ง</th><th style="width:18mm">สิทธิ์/เดือน</th><th style="width:20mm">จำนวนเงิน</th><th style="width:26mm">เลขที่ฎีกา/ใบสำคัญ</th><th style="width:20mm">วันที่จ่าย</th><th style="width:20mm">สถานะ</th><th style="width:18mm">หมายเหตุ</th></tr></thead><tbody>
+        ${chunk.map((r, i) => `<tr><td class="n" style="text-align:center">${pi * per + i + 1}</td><td>${esc(r.p.full_name)}<div style="color:#6b7280;font-size:9.5px">${esc(rentPositionText(r.p) || r.p.unit_name || '')}</div></td>
+          <td class="n">${rentMoney(rentLimit(r.e))}</td><td class="n" style="font-weight:500">${r.c ? rentMoney(r.c.amount) : ''}</td><td>${esc(r.c?.doc_no || '')}</td>
+          <td>${r.c?.paid_date ? formatThaiDate(calDate(r.c.paid_date)) : ''}</td><td style="text-align:center">${r.c ? RENT_STATUS[r.c.status].label : 'ยังไม่บันทึก'}</td><td>${esc(r.c?.note || '')}</td></tr>`).join('')}
+        ${!list.length ? '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:4mm">ไม่มีรายการในเดือนนี้</td></tr>' : ''}
+        ${pi === pages.length - 1 && list.length ? `<tr class="tot"><td colspan="3" style="text-align:center">รวม ${list.filter(r => r.c).length} ราย</td><td class="n">${rentMoney(total)}</td><td colspan="4">(${esc(bahtText(total))})</td></tr>` : ''}
+      </tbody></table>
+      ${pi === pages.length - 1 ? `<div style="margin-top:2mm;font-size:10.5px;color:#374151">เบิกแล้ว ${rentMoney(paid)} บาท${total - paid ? ` · รอเบิก ${rentMoney(total - paid)} บาท` : ''}${opts.unrecorded ? ` · ยังไม่บันทึก ${list.filter(r => !r.c).length} ราย` : ''}</div>${sign}` : ''}
+      <div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
+    return { root, orientation: 'portrait', count: list.length };
+  }
   if (kind === 'summary') {
     const per = 16, pages = [];
     for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
@@ -5674,12 +5704,13 @@ function rentBuildPages(kind, entIds) {
     <div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>${esc(p.full_name)}</span></div></div>`; }).join('');
   return { root, orientation: 'portrait', count: rows.length };
 }
-async function rentPrint(kind, entIds, mode) {
-  const { root, orientation, count } = rentBuildPages(kind, entIds);
+async function rentPrint(kind, entIds, mode, opts = {}) {
+  const { root, orientation, count } = rentBuildPages(kind, entIds, opts);
   if (!count) { showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
-  rpcSecure('sfh_rent_log', { p_kind: `${mode}_${kind}`, p_details: { fiscal_year: Rg.fy, count } }, { loader: false });
+  rpcSecure('sfh_rent_log', { p_kind: `${mode}_${kind}`, p_details: { fiscal_year: Rg.fy, count, ...(kind === 'month' ? { year: opts.y, month: opts.m } : {}) } }, { loader: false });
   if (mode === 'pdf') {
-    await sfhPagesToPdf($$('.rg-page', root), `ทะเบียนค่าเช่าบ้าน_${kind === 'summary' ? 'รวม' : 'รายบุคคล'}_ปีงบ${Rg.fy}.pdf`, orientation);
+    const label = kind === 'summary' ? 'รวม' : kind === 'month' ? `ประจำเดือน${TH_MONTHS[opts.m - 1]}${opts.y + 543}` : 'รายบุคคล';
+    await sfhPagesToPdf($$('.rg-page', root), `ทะเบียนค่าเช่าบ้าน_${label}_ปีงบ${Rg.fy}.pdf`, orientation);
     root.innerHTML = '';
     return;
   }
