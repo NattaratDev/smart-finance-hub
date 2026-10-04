@@ -5099,7 +5099,7 @@ Object.assign(TABLE_LABELS, { rent_people: 'บุคลากร (ค่าเ�
 
 const REGISTERS = [
   { key: 'rent', name: 'ทะเบียนคุมเบิกค่าเช่าบ้าน', icon: 'home', color: '#3B8FD4', perm: 'register.manage_rent', desc: 'คุมการเบิกค่าเช่าบ้านรายเดือนตามปีงบประมาณ พร้อมเพดานตามบัญชีอัตรา' },
-  { key: 'tuition', name: 'ทะเบียนคุมเบิกค่าเล่าเรียนบุตร', icon: 'graduation-cap', color: '#5CC49A', soon: true, desc: 'คุมการเบิกค่าเล่าเรียนบุตรรายภาคเรียน' },
+  { key: 'tuition', name: 'ทะเบียนคุมเบิกค่าเล่าเรียนบุตร', icon: 'graduation-cap', color: '#5CC49A', perm: 'register.manage_tuition', desc: 'คุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตรรายภาคเรียนตามปีการศึกษา พร้อมเพดานตามอัตรา' },
 ];
 const RENT_HOUSING = { rent: 'เช่าบ้าน', hire_purchase: 'เช่าซื้อ', loan: 'ผ่อนชำระเงินกู้' };
 const RENT_STATUS = { paid: { label: 'เบิกแล้ว', cls: 'bg-mint-100 text-mint-600' }, pending: { label: 'รอเบิก', cls: 'bg-cream-100 text-cream-600' } };
@@ -5193,7 +5193,7 @@ async function renderRegister(el, mod) {
   Rg.view = 'hub';
   el.onclick = (e) => {
     const c = e.target.closest('[data-rg-open]');
-    if (c) { if (c.dataset.rgOpen === 'rent') rentOpen(el, mod); return; }
+    if (c) { if (c.dataset.rgOpen === 'rent') rentOpen(el, mod); else if (c.dataset.rgOpen === 'tuition') eduOpen(el, mod); return; }
   };
   el.innerHTML = pageHeader({ title: mod?.name || 'ทะเบียนคุมต่าง ๆ', icon: 'book-marked', tone: 'cream',
     subtitle: 'ทะเบียนคุมการเบิกจ่ายของบุคลากร · ข้อมูลส่วนบุคคล เข้าถึงได้เฉพาะเจ้าหน้าที่ที่ได้รับสิทธิ์' })
@@ -5336,6 +5336,10 @@ function rentFieldText(kind, v, rec) {
   if (kind === 'housing') return RENT_HOUSING[v] || esc(v);
   if (kind === 'status') return RENT_STATUS[v]?.label || esc(v);
   if (kind === 'bool') return v ? 'ใช่' : 'ไม่ใช่';
+  if (kind === 'sem') return EDU_SEM[v] || esc(v);
+  if (kind === 'ratekey') return esc(eduItem(v)?.name || v);
+  if (kind === 'role') return v === 'mother' ? 'มารดา' : 'บิดา';
+  if (kind === 'spstatus') return EDU_SPOUSE[v] || esc(v);
   const types = rentSetFor()?.config.types || [];
   if (kind === 'ptype') return esc(types.find(t => t.key === v)?.name || v);
   if (kind === 'plevel') return esc(types.find(t => t.key === rec?.position_type)?.levels.find(l => l.key === v)?.name || v);
@@ -5819,7 +5823,7 @@ async function sfhPagesToPdf(pages, filename, orientation = 'portrait') {
     const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation });
     const W = orientation === 'landscape' ? 297 : 210, H = orientation === 'landscape' ? 210 : 297;
     for (let i = 0; i < pages.length; i++) {
-      showLoader(true, `กำลังสร้างไฟล์ PDF... (${i + 1}/${pages.length})`);
+      $('#loaderText').textContent = `กำลังสร้างไฟล์ PDF... (${i + 1}/${pages.length})`;   // อัปเดตข้อความเท่านั้น (showLoader นับจำนวนครั้ง)
       const canvas = await window.htmlToImage.toCanvas(pages[i], { pixelRatio: 2, backgroundColor: '#ffffff', ...(fontEmbedCSS ? { fontEmbedCSS } : {}) });
       if (i) pdf.addPage('a4', orientation);
       pdf.addImage(canvas.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, W, Math.min(H, canvas.height * W / canvas.width));
@@ -5848,6 +5852,560 @@ async function rentExportExcel() {
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, `ปีงบ ${Rg.fy}`);
   XLSX.writeFile(wb, `ทะเบียนค่าเช่าบ้าน_ปีงบ${Rg.fy}.xlsx`);
   rpcSecure('sfh_rent_log', { p_kind: 'excel', p_details: { fiscal_year: Rg.fy, count: rows.length } }, { loader: false });
+  showToast('ส่งออก Excel แล้ว', 'success');
+}
+/* ---------- ทะเบียนคุมเบิกค่าเล่าเรียนบุตร ---------- */
+// ระเบียบ มท. ว่าด้วยเงินสวัสดิการเกี่ยวกับการศึกษาบุตรของ อปท. พ.ศ. 2563 · อัตราตาม ว 257/2559
+// คุมตามปีการศึกษา (เพดานรายปีการศึกษา) · รายงานตามวันที่วางฎีกา (รายเดือน/ปีงบประมาณ)
+// ข้อมูลผ่าน RPC sfh_edu_* (ตรวจ token + register.manage_tuition) · บุคลากรใช้ชุดเดียวกับทะเบียนค่าเช่าบ้าน
+Object.assign(TABLE_LABELS, { edu_children: 'บุตร (ค่าเล่าเรียน)', edu_claims: 'การเบิกค่าเล่าเรียนบุตร', edu_spouses: 'คู่สมรส (ค่าเล่าเรียน)', edu_rate_sets: 'อัตราค่าเล่าเรียนบุตร' });
+const EDU_SEM = { '1': 'ภาคเรียนที่ 1', '2': 'ภาคเรียนที่ 2', year: 'รายปี' };
+const EDU_SPOUSE = { none: 'ไม่เป็นข้าราชการหรือลูกจ้างประจำ', gov: 'เป็นข้าราชการ/ลูกจ้างประจำ', other: 'พนักงาน/ลูกจ้างรัฐวิสาหกิจ หรือหน่วยงานอื่น' };
+const EDU_CLAIM_FIELDS = [['semester', 'ภาคเรียน', 'sem'], ['school_name', 'สถานศึกษา', 'text'], ['school_district', 'อำเภอ', 'text'], ['school_province', 'จังหวัด', 'text'],
+  ['grade', 'ชั้นที่ศึกษา', 'text'], ['rate_key', 'ประเภท/ระดับ', 'ratekey'], ['amount_paid', 'จำนวนเงินตามใบเสร็จ', 'money'], ['spouse_received', 'คู่สมรสได้รับแล้ว', 'money'],
+  ['amount_claim', 'จำนวนเงินที่เบิก', 'money'], ['status', 'สถานะ', 'status'], ['doc_no', 'เลขที่ฎีกา', 'text'], ['doc_date', 'วันที่วางฎีกา', 'date'], ['note', 'หมายเหตุ', 'text']];
+const EDU_CHILD_FIELDS = [['full_name', 'ชื่อบุตร', 'text'], ['birth_date', 'วันเกิด', 'date'], ['order_father', 'บุตรลำดับที่ (ของบิดา)', 'num'], ['order_mother', 'บุตรลำดับที่ (ของมารดา)', 'num'],
+  ['is_substitute', 'เป็นบุตรแทนที่', 'bool'], ['sub_order', 'แทนที่บุตรลำดับที่', 'num'], ['sub_name', 'ชื่อบุตรที่ถึงแก่กรรม', 'text'], ['sub_birth_date', 'วันเกิด (บุตรที่ถึงแก่กรรม)', 'date'],
+  ['sub_death_date', 'วันถึงแก่กรรม', 'date'], ['is_active', 'ยังใช้สิทธิ์', 'bool'], ['note', 'หมายเหตุ', 'text']];
+const EDU_SPOUSE_FIELDS = [['claimant_role', 'ผู้มีสิทธิเป็น', 'role'], ['spouse_name', 'ชื่อคู่สมรส', 'text'], ['spouse_status', 'สถานะคู่สมรส', 'spstatus'],
+  ['spouse_position', 'ตำแหน่ง', 'text'], ['spouse_unit', 'สังกัด', 'text'], ['note', 'หมายเหตุ', 'text']];
+const Ed = { ay: null, tab: 'register', people: [], spouses: [], children: [], claims: [], years: [], rates: [], filter: '' };
+
+const eduCurrentAY = () => { const d = new Date(); const y = d.getFullYear(); return (calKey(d) >= `${y}-05-16` ? y : y - 1) + 543; };
+const eduAYStart = (ay) => `${ay - 543}-05-16`;
+const eduSemOpen = (ay, sem) => sem === '2' ? `${ay - 543}-11-01` : eduAYStart(ay);
+function eduSet(ay = Ed.ay) {
+  const d = eduAYStart(ay), act = Ed.rates.filter(s => s.is_active);
+  return act.filter(s => s.effective_from && s.effective_from <= d).sort((a, b) => b.effective_from.localeCompare(a.effective_from))[0]
+    || act.find(s => !s.effective_from) || act[0] || null;
+}
+const eduItem = (key, ay = Ed.ay) => eduSet(ay)?.config.items.find(i => i.key === key) || null;
+function eduAge(birth, ay = Ed.ay) {
+  if (!birth) return null;
+  const at = calDate(eduAYStart(ay)), b = calDate(birth);
+  let a = at.getFullYear() - b.getFullYear();
+  if (at.getMonth() < b.getMonth() || (at.getMonth() === b.getMonth() && at.getDate() < b.getDate())) a--;
+  return a;
+}
+const eduSpouse = (pid) => Ed.spouses.find(s => s.person_id === pid) || null;
+const eduPerson = (id) => Ed.people.find(p => p.id === id);
+const eduChild = (id) => Ed.children.find(c => c.id === id);
+const eduOrder = (c) => { const role = eduSpouse(c.person_id)?.claimant_role || 'father'; return c[`order_${role}`] ?? c.order_father ?? c.order_mother ?? null; };
+const eduClaimsOf = (cid) => Ed.claims.filter(x => x.child_id === cid);
+const eduClaim = (cid, sem) => Ed.claims.find(x => x.child_id === cid && x.semester === sem);
+const eduTotal = (cid) => eduClaimsOf(cid).reduce((a, x) => a + (+x.amount_claim), 0);
+const eduCap = (cid) => { const last = [...eduClaimsOf(cid)].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0]; return last ? (eduItem(last.rate_key)?.cap ?? null) : null; };
+/** ข้อควรตรวจสอบตามระเบียบ (แจ้งเตือน – ไม่บังคับ) */
+function eduWarnings(c, ay = Ed.ay) {
+  const w = [], age = eduAge(c.birth_date, ay), ord = eduOrder(c), sp = eduSpouse(c.person_id);
+  if (!c.birth_date) w.push('ยังไม่ได้ระบุวันเกิดบุตร');
+  else if (age < 3 || age > 25) w.push(`อายุ ${age} ปี ณ วันเปิดปีการศึกษา ${ay} (ต้องครบ 3 ปีแต่ไม่เกิน 25 ปี)`);
+  if (ord > 3 && !c.is_substitute) w.push(`เป็นบุตรลำดับที่ ${ord} (เบิกได้เฉพาะบุตรลำดับที่ 1–3 เว้นแต่เป็นบุตรแทนที่)`);
+  if (sp?.spouse_status === 'gov') w.push('คู่สมรสเป็นข้าราชการ/ลูกจ้างประจำ – ให้ใช้สิทธิ์ฝ่ายเดียว');
+  return w;
+}
+
+/* ---------- โหลดข้อมูล ---------- */
+async function eduLoad({ loader = true } = {}) {
+  const [r, rates] = await Promise.all([
+    rpcSecure('sfh_edu_list', { p_ay: Ed.ay }, { loader, loaderText: 'กำลังโหลดทะเบียน...', error: 'โหลดทะเบียนไม่สำเร็จ' }),
+    Ed.rates.length ? Promise.resolve({ ok: true, data: Ed.rates }) : db(s => s.from('edu_rate_sets').select('*'), { loader: false, error: 'โหลดบัญชีอัตราไม่สำเร็จ' }),
+  ]);
+  if (!r.ok) return false;
+  Object.assign(Ed, { people: r.data.people || [], spouses: r.data.spouses || [], children: r.data.children || [], claims: r.data.claims || [], years: r.data.years || [] });
+  if (rates.ok) Ed.rates = rates.data || [];
+  return true;
+}
+const eduRefresh = async (el) => { if (await eduLoad({ loader: false })) eduRender(el); };
+
+/* ---------- หน้าหลัก ---------- */
+async function eduOpen(el, mod) {
+  if (!requirePermission('register.manage_tuition')) return;
+  Ed.ay = Ed.ay || eduCurrentAY(); Ed.tab = Ed.tab || 'register';
+  el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-ed-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
+    + pageHeader({ title: 'ทะเบียนคุมเบิกค่าเล่าเรียนบุตร', icon: 'graduation-cap', tone: 'mint', subtitle: 'เงินสวัสดิการเกี่ยวกับการศึกษาบุตร ตามระเบียบ มท. พ.ศ. 2563 · ข้อมูลส่วนบุคคล (PDPA)',
+      actions: `<label class="flex items-center gap-2 text-sm text-slate-600">ปีการศึกษา <select class="input !w-auto !py-2" data-ed-ay></select></label>` })
+    + `<div class="flex gap-1 mb-4 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
+        ${[['register', 'table', 'ทะเบียนคุม'], ['family', 'users-round', 'ผู้มีสิทธิ์และบุตร'], ['rates', 'list-ordered', 'บัญชีอัตรา']].map(([k, i, l]) =>
+          `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-ed-tab="${k}" role="tab">${ic(i, 'w-4 h-4')} ${l}</button>`).join('')}
+      </div><div id="edBody">${skeletonCards(1, 'h-96')}</div>`;
+  refreshIcons();
+  el.onclick = (e) => {
+    if (e.target.closest('[data-ed-back]')) { renderRegister(el, mod); return; }
+    const t = e.target.closest('[data-ed-tab]'); if (t) { Ed.tab = t.dataset.edTab; eduRender(el); }
+  };
+  el.onchange = async (e) => { if (e.target.matches('[data-ed-ay]')) { Ed.ay = +e.target.value; if (await eduLoad()) eduRender(el); } };
+  if (!(await eduLoad())) { $('#edBody', el).innerHTML = errorState('โหลดทะเบียนไม่สำเร็จ', 'ตรวจสอบสิทธิ์ register.manage_tuition หรือรันไฟล์ module_register_tuition.sql'); return; }
+  eduRender(el);
+}
+function eduRender(el) {
+  const cur = eduCurrentAY(), years = [...new Set([...Ed.years, cur - 1, cur, cur + 1, Ed.ay])].sort((a, b) => b - a);
+  $('[data-ed-ay]', el).innerHTML = years.map(y => `<option value="${y}" ${y === Ed.ay ? 'selected' : ''}>${y}</option>`).join('');
+  $$('[data-ed-tab]', el).forEach(b => {
+    const on = b.dataset.edTab === Ed.tab;
+    b.setAttribute('aria-selected', on);
+    b.classList.toggle('bg-gradient-to-r', on); b.classList.toggle('from-mint-400', on); b.classList.toggle('to-brand-400', on);
+    b.classList.toggle('text-white', on); b.classList.toggle('shadow-sm', on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('hover:bg-slate-50', !on);
+  });
+  const body = $('#edBody', el);
+  body.onclick = body.oninput = null;
+  if (Ed.tab === 'register') eduRenderRegister(body, el);
+  else if (Ed.tab === 'family') eduRenderFamily(body, el);
+  else eduRenderRates(body, el);
+  refreshIcons();
+}
+
+/* ---------- แท็บ: ทะเบียนคุม ---------- */
+/** บุตรที่แสดงในทะเบียน: มีรายการเบิกในปีนี้ หรือยังใช้สิทธิ์และอายุอยู่ในเกณฑ์ */
+function eduRows() {
+  return Ed.children.filter(c => eduClaimsOf(c.id).length || (c.is_active && (() => { const a = eduAge(c.birth_date); return a == null || (a >= 3 && a <= 25); })()))
+    .map(c => ({ c, p: eduPerson(c.person_id) || { full_name: '(ไม่พบบุคลากร)' } }))
+    .sort((a, b) => a.p.full_name.localeCompare(b.p.full_name, 'th') || String(a.c.birth_date).localeCompare(String(b.c.birth_date)));
+}
+function eduCell(c, sem) {
+  const x = eduClaim(c.id, sem), hasYear = !!eduClaim(c.id, 'year'), hasSem = !!(eduClaim(c.id, '1') || eduClaim(c.id, '2'));
+  if (!x && ((sem === 'year' && hasSem) || (sem !== 'year' && hasYear))) return '<td class="text-center text-slate-300 bg-slate-50/60">–</td>';
+  const inner = x ? `<span class="block tabular-nums ${x.status === 'paid' ? 'text-mint-600' : 'text-cream-600'}">${rentMoney(x.amount_claim)}</span>${x.doc_no ? `<span class="block text-[10px] text-slate-400 truncate max-w-[6rem]">${esc(x.doc_no)}</span>` : ''}`
+    : `<span class="text-slate-300">${ic('plus', 'w-3.5 h-3.5')}</span>`;
+  return `<td class="text-center p-0"><button type="button" class="w-full min-h-[2.75rem] px-1.5 py-1 hover:bg-mint-50 ${x?.status === 'pending' ? 'bg-cream-50' : ''}" data-ed-cell="${c.id}|${sem}">${inner}</button></td>`;
+}
+function eduRenderRegister(body, el) {
+  const q = Ed.filter.trim(), all = eduRows();
+  const rows = q ? all.filter(r => (r.p.full_name + ' ' + r.c.full_name + ' ' + eduClaimsOf(r.c.id).map(x => x.school_name).join(' ')).includes(q)) : all;
+  const paid = Ed.claims.filter(x => x.status === 'paid').reduce((a, x) => a + (+x.amount_claim), 0), pending = Ed.claims.filter(x => x.status === 'pending').reduce((a, x) => a + (+x.amount_claim), 0);
+  const warnN = all.filter(r => eduWarnings(r.c).length).length;
+  const school = (c) => { const x = [...eduClaimsOf(c.id)].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0]; return x ? `<div class="text-sm text-slate-600 max-w-[14rem] truncate">${esc(x.school_name)}</div><div class="text-[11px] text-slate-400 max-w-[14rem] truncate">${esc(eduItem(x.rate_key)?.name || x.rate_name || '')}</div>` : '<span class="text-xs text-slate-300">-</span>'; };
+  body.innerHTML = `
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      ${statCard({ label: `บุตรที่เบิก ปีการศึกษา ${Ed.ay}`, value: formatNumber(new Set(Ed.claims.map(x => x.child_id)).size), icon: 'graduation-cap', tone: 'mint', hint: `ผู้มีสิทธิ์ ${new Set(Ed.claims.map(x => eduChild(x.child_id)?.person_id)).size} คน` })}
+      ${statCard({ label: 'เบิกแล้ว', value: rentMoney(paid), icon: 'check-circle-2', tone: 'brand', hint: 'บาท' })}
+      ${statCard({ label: 'รอเบิก', value: rentMoney(pending), icon: 'hourglass', tone: 'cream', hint: 'บาท' })}
+      ${statCard({ label: 'ข้อควรตรวจสอบ', value: formatNumber(warnN), icon: 'alert-triangle', tone: 'blush', hint: 'อายุ/ลำดับบุตร/คู่สมรส' })}
+    </div>
+    <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
+      <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
+        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อผู้มีสิทธิ์ ชื่อบุตร สถานศึกษา..." value="${esc(Ed.filter)}" data-ed-q></div>
+      <div class="flex flex-wrap gap-2">
+        <button class="btn btn-primary" data-ed-act="claim">${ic('file-plus')} บันทึกการเบิก</button>
+        <button class="btn btn-ghost" data-ed-act="print">${ic('printer')} พิมพ์</button>
+        <button class="btn btn-ghost" data-ed-act="pdf">${ic('file-down')} PDF</button>
+        <button class="btn btn-ghost" data-ed-act="excel" ${Ed.claims.length ? '' : 'disabled'}>${ic('file-spreadsheet')} Excel</button>
+      </div>
+    </div>
+    ${!all.length ? `<div class="card">${emptyState('ยังไม่มีข้อมูลบุตร · ไปที่แท็บ "ผู้มีสิทธิ์และบุตร" เพื่อเพิ่มบุตรของบุคลากร', 'graduation-cap')}</div>` : `
+    <div class="hidden md:block card !p-0 overflow-x-auto"><table class="sfh-table w-full text-sm min-w-[980px]">
+      <thead class="bg-gradient-to-r from-mint-50 via-white to-brand-50 text-slate-500"><tr><th>ผู้มีสิทธิ์ / บุตร</th><th>สถานศึกษา</th>
+        <th class="text-center">ภาค 1</th><th class="text-center">ภาค 2</th><th class="text-center">รายปี</th><th class="text-right">รวม</th><th class="text-right">เพดาน</th><th class="text-right">คงเหลือ</th></tr></thead>
+      <tbody class="divide-y divide-slate-100">${rows.map(({ c, p }) => { const tot = eduTotal(c.id), cap = eduCap(c.id), w = eduWarnings(c), age = eduAge(c.birth_date); return `<tr>
+        <td><div class="text-xs text-slate-400">${esc(p.full_name)}</div><button type="button" class="text-left font-medium text-slate-700 hover:text-mint-600" data-ed-child="${c.id}">${esc(c.full_name)}</button>
+          <div class="text-[11px] text-slate-400">${age != null ? `อายุ ${age} ปี` : 'ไม่ระบุวันเกิด'}${eduOrder(c) ? ` · บุตรลำดับที่ ${eduOrder(c)}` : ''}${c.is_substitute ? ' · บุตรแทนที่' : ''}</div>
+          ${w.length ? `<span class="badge bg-blush-100 text-blush-500 mt-0.5" title="${esc(w.join('\n'))}">${ic('alert-triangle', 'w-3 h-3')} ตรวจสอบ ${w.length}</span>` : ''}</td>
+        <td>${school(c)}</td>${['1', '2', 'year'].map(s => eduCell(c, s)).join('')}
+        <td class="text-right font-semibold tabular-nums">${rentMoney(tot)}</td><td class="text-right tabular-nums text-slate-500">${cap != null ? rentMoney(cap) : '-'}</td>
+        <td class="text-right tabular-nums ${cap != null && cap - tot <= 0 ? 'text-slate-400' : 'text-mint-600'}">${cap != null ? rentMoney(Math.max(0, cap - tot)) : '-'}</td></tr>`; }).join('')}</tbody>
+      <tfoot><tr class="bg-slate-50 font-semibold"><td colspan="2">รวม ${rows.length} คน</td>${['1', '2', 'year'].map(s => `<td class="text-center tabular-nums text-xs">${rentMoney(rows.reduce((a, { c }) => a + (+(eduClaim(c.id, s)?.amount_claim || 0)), 0))}</td>`).join('')}
+        <td class="text-right tabular-nums">${rentMoney(rows.reduce((a, { c }) => a + eduTotal(c.id), 0))}</td><td colspan="2"></td></tr></tfoot></table></div>
+    <div class="md:hidden grid gap-3">${rows.map(({ c, p }) => { const tot = eduTotal(c.id), cap = eduCap(c.id); return `<div class="card p-4">
+      <button type="button" class="text-left w-full" data-ed-child="${c.id}"><div class="text-xs text-slate-400">${esc(p.full_name)}</div><div class="flex justify-between gap-2"><span class="font-medium text-slate-800">${esc(c.full_name)}</span><span class="font-semibold tabular-nums">${rentMoney(tot)}</span></div>
+        <div class="text-xs text-slate-400">${cap != null ? `เพดาน ${rentMoney(cap)} · คงเหลือ ${rentMoney(Math.max(0, cap - tot))}` : 'ยังไม่มีรายการเบิก'}</div></button>
+      <div class="grid grid-cols-3 gap-1.5 mt-3">${['1', '2', 'year'].map(s => { const x = eduClaim(c.id, s); return `<button type="button" class="rounded-xl border px-1 py-1.5 text-center ${x ? (x.status === 'paid' ? 'border-mint-200 bg-mint-50' : 'border-cream-200 bg-cream-50') : 'border-slate-200 bg-white'}" data-ed-cell="${c.id}|${s}">
+        <span class="block text-[10px] text-slate-500">${EDU_SEM[s]}</span><span class="block text-xs tabular-nums ${x ? 'text-slate-700' : 'text-slate-300'}">${x ? rentMoney(x.amount_claim) : '+'}</span></button>`; }).join('')}</div></div>`; }).join('')}</div>`}
+    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} กดช่องภาคเรียนเพื่อบันทึก/แก้ไข · เพดานคุมรวมทั้งปีการศึกษา · ใช้ "รายปี" กรณีสถานศึกษาเรียกเก็บครั้งเดียวทั้งปี</p>`;
+  body.oninput = debounce((e) => { if (e.target.matches('[data-ed-q]')) { Ed.filter = e.target.value; const pos = e.target.selectionStart; eduRenderRegister(body, el); refreshIcons(); const q2 = $('[data-ed-q]', body); q2.focus(); q2.setSelectionRange(pos, pos); } }, 250);
+  body.onclick = (ev) => {
+    const cell = ev.target.closest('[data-ed-cell]');
+    if (cell) { const [cid, sem] = cell.dataset.edCell.split('|'); eduOpenClaim(eduChild(cid), sem, el); return; }
+    const ch = ev.target.closest('[data-ed-child]'); if (ch) { eduOpenChild(eduChild(ch.dataset.edChild), null, el); return; }
+    const a = ev.target.closest('[data-ed-act]'); if (!a) return;
+    if (a.dataset.edAct === 'claim') eduPickChild(el);
+    if (a.dataset.edAct === 'print') eduPrintMenu('print');
+    if (a.dataset.edAct === 'pdf') eduPrintMenu('pdf');
+    if (a.dataset.edAct === 'excel') eduExportExcel();
+  };
+}
+function eduPickChild(el) {
+  const list = Ed.children.filter(c => c.is_active).map(c => ({ c, p: eduPerson(c.person_id) })).sort((a, b) => (a.p?.full_name || '').localeCompare(b.p?.full_name || '', 'th'));
+  const m = openModal({ title: `บันทึกการเบิก ปีการศึกษา ${Ed.ay}`, icon: 'file-plus', size: 'md',
+    body: list.length ? `<input type="search" class="input mb-3" placeholder="ค้นหาชื่อผู้มีสิทธิ์หรือบุตร..." data-pk-q><div class="grid gap-1.5 max-h-[55vh] overflow-y-auto" data-pk-list></div>`
+      : emptyState('ยังไม่มีข้อมูลบุตร · เพิ่มได้ที่แท็บ "ผู้มีสิทธิ์และบุตร"', 'graduation-cap') });
+  const draw = (q = '') => { const box = $('[data-pk-list]', m.el); if (!box) return;
+    box.innerHTML = list.filter(r => !q || (r.p?.full_name + ' ' + r.c.full_name).includes(q)).map(({ c, p }) => `<button type="button" class="text-left rounded-2xl border border-slate-100 px-3 py-2 hover:border-mint-200 hover:bg-mint-50/50" data-pk="${c.id}">
+      <div class="font-medium text-slate-700">${esc(c.full_name)}</div><div class="text-xs text-slate-400">${esc(p?.full_name || '')} · ${eduAge(c.birth_date) ?? '-'} ปี · เบิกแล้วปีนี้ ${rentMoney(eduTotal(c.id))}</div></button>`).join('') || emptyState('ไม่พบ', 'search-x'); };
+  draw();
+  m.el.addEventListener('input', (e) => { if (e.target.matches('[data-pk-q]')) draw(e.target.value.trim()); });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-pk]'); if (!b) return; m.close();
+    const c = eduChild(b.dataset.pk), sem = ['1', '2', 'year'].find(s => !eduClaim(c.id, s) && !(s === 'year' && (eduClaim(c.id, '1') || eduClaim(c.id, '2'))) && !(s !== 'year' && eduClaim(c.id, 'year')));
+    if (!sem) { showToast('บุตรคนนี้บันทึกครบทุกภาคเรียนของปีนี้แล้ว', 'info'); return; }
+    eduOpenClaim(c, sem, el); });
+}
+
+/* ---------- บันทึก/แก้ไขการเบิก ---------- */
+function eduOpenClaim(c, sem, el) {
+  if (!c) return;
+  const p = eduPerson(c.person_id) || {}, x = eduClaim(c.id, sem), prev = [...eduClaimsOf(c.id)].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0];
+  const set = eduSet(), items = set?.config.items || [], groups = [...new Set(items.map(i => i.group))];
+  const v = x || { semester: sem, school_name: prev?.school_name || '', school_district: prev?.school_district || '', school_province: prev?.school_province || '', grade: prev?.grade || '', rate_key: prev?.rate_key || '', status: 'paid' };
+  const warns = eduWarnings(c);
+  const md = openModal({ title: `${x ? 'แก้ไข' : 'บันทึก'}การเบิก · ${esc(c.full_name)}`, icon: 'graduation-cap', size: 'lg',
+    body: `<div class="rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 mb-3 text-sm">
+        <div class="text-slate-700">ผู้มีสิทธิ์: <b class="font-medium">${esc(p.full_name)}</b> · บุตร: ${esc(c.full_name)} ${eduAge(c.birth_date) != null ? `(อายุ ${eduAge(c.birth_date)} ปี)` : ''}</div>
+        ${warns.length ? `<ul class="text-xs text-blush-500 mt-1 list-disc pl-4">${warns.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '<div class="text-xs text-mint-600 mt-0.5">ไม่พบข้อควรตรวจสอบ</div>'}</div>
+      <form class="grid gap-3 sm:grid-cols-2" novalidate>
+        <div><label class="label">ปีการศึกษา</label><input class="input" value="${Ed.ay}" disabled></div>
+        <div><label class="label">ภาคเรียน</label><select class="input" name="semester">${Object.entries(EDU_SEM).map(([k, l]) => `<option value="${k}" ${k === v.semester ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="sm:col-span-2"><label class="label">สถานศึกษา *</label><input class="input" name="school_name" value="${esc(v.school_name)}"></div>
+        <div><label class="label">อำเภอ</label><input class="input" name="school_district" value="${esc(v.school_district || '')}"></div>
+        <div><label class="label">จังหวัด</label><input class="input" name="school_province" value="${esc(v.school_province || '')}"></div>
+        <div class="sm:col-span-2"><label class="label">ประเภทสถานศึกษา / ระดับ *</label><select class="input" name="rate_key"><option value="">– เลือก –</option>
+          ${groups.map(g => `<optgroup label="${esc(g)}">${items.filter(i => i.group === g).map(i => `<option value="${i.key}" ${i.key === v.rate_key ? 'selected' : ''}>${esc(i.name)} – ไม่เกิน ${rentMoney(i.cap)}${i.half ? ' (ครึ่งหนึ่ง)' : ''}</option>`).join('')}</optgroup>`).join('')}</select></div>
+        <div><label class="label">ชั้นที่ศึกษา</label><input class="input" name="grade" value="${esc(v.grade || '')}" placeholder="เช่น ป.3"></div>
+        <div><label class="label">จำนวนเงินตามใบเสร็จ *</label><input class="input" inputmode="decimal" name="amount_paid" value="${esc(v.amount_paid ?? '')}" placeholder="0.00"></div>
+        <div><label class="label">คู่สมรสได้รับจากหน่วยงานอื่นแล้ว</label><input class="input" inputmode="decimal" name="spouse_received" value="${esc(+v.spouse_received ? v.spouse_received : '')}" placeholder="0.00"></div>
+        <div><label class="label">จำนวนเงินที่เบิก *</label><input class="input text-lg" inputmode="decimal" name="amount_claim" value="${esc(v.amount_claim ?? '')}"></div>
+        <div class="sm:col-span-2 rounded-2xl bg-mint-50 border border-mint-100 px-3 py-2 text-xs text-slate-600" data-calc></div>
+        <div class="sm:col-span-2"><label class="label">สถานะ</label><div class="grid grid-cols-2 gap-2">${Object.entries(RENT_STATUS).map(([k, s]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-mint-300 has-[:checked]:bg-mint-50 has-[:checked]:text-mint-700 border-slate-200 text-slate-600">
+          <input type="radio" name="status" value="${k}" class="sr-only" ${k === (v.status || 'paid') ? 'checked' : ''}>${s.label}</label>`).join('')}</div></div>
+        <div><label class="label">เลขที่ฎีกา</label><input class="input" name="doc_no" value="${esc(v.doc_no || '')}"></div>
+        <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" name="doc_date" value="${esc(v.doc_date || '')}"></div>
+        <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(v.note || '')}"></div>
+      </form>`,
+    footer: `${x ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button>
+      <button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', md.el).elements;
+  let touched = !!x;
+  const calc = () => {
+    const it = eduItem(F.rate_key.value), paid = trvNum(F.amount_paid.value), sp = trvNum(F.spouse_received.value);
+    const used = eduClaimsOf(c.id).filter(o => o.id !== x?.id).reduce((a, o) => a + (+o.amount_claim), 0);
+    if (!it) { $('[data-calc]', md.el).textContent = 'เลือกประเภทสถานศึกษา/ระดับ เพื่อคำนวณยอดที่เบิกได้'; return null; }
+    const base = it.half ? Math.round(paid / 2 * 100) / 100 : paid, remain = Math.max(0, it.cap - used), max = Math.max(0, Math.min(base - sp, remain));
+    $('[data-calc]', md.el).innerHTML = `${it.half ? `ครึ่งหนึ่งของที่จ่ายจริง ${rentMoney(paid)} = ${rentMoney(base)}` : `ตามใบเสร็จ ${rentMoney(paid)}`}${sp ? ` − คู่สมรสได้รับแล้ว ${rentMoney(sp)}` : ''}
+      · เพดานปีการศึกษา ${rentMoney(it.cap)}${used ? ` (เบิกไปแล้ว ${rentMoney(used)} คงเหลือ ${rentMoney(remain)})` : ''} → <b class="text-slate-800">เบิกได้ไม่เกิน ${rentMoney(max)} บาท</b>`;
+    if (!touched) F.amount_claim.value = max || '';
+    return max;
+  };
+  calc();
+  md.el.addEventListener('input', (e) => { if (e.target.name === 'amount_claim') touched = true; calc(); });
+  md.el.addEventListener('change', calc);
+  $('[data-del]', md.el)?.addEventListener('click', async () => {
+    if (!(await confirmModal({ title: 'ลบรายการเบิก', message: `ลบรายการ${EDU_SEM[x.semester]} ปีการศึกษา ${Ed.ay} ของ <b>${esc(c.full_name)}</b> ใช่หรือไม่?` }))) return;
+    const r = await rpcSecure('sfh_edu_claim_delete', { p_id: x.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบรายการแล้ว' });
+    if (r.ok) { md.close(); eduRefresh(el); }
+  });
+  $('[data-save]', md.el).onclick = async () => {
+    const max = calc(), val = (k) => String(F[k].value ?? '').trim();
+    const data = { child_id: c.id, academic_year: Ed.ay, semester: val('semester'), school_name: val('school_name'), school_district: val('school_district') || null, school_province: val('school_province') || null,
+      grade: val('grade') || null, rate_key: val('rate_key'), amount_paid: trvNum(val('amount_paid')), spouse_received: trvNum(val('spouse_received')), amount_claim: trvNum(val('amount_claim')),
+      status: F.status.value, doc_no: val('doc_no') || null, doc_date: val('doc_date') || null, note: val('note') || null };
+    if (!data.school_name) { showToast('กรุณาระบุสถานศึกษา', 'warning'); F.school_name.focus(); return; }
+    if (!data.rate_key) { showToast('กรุณาเลือกประเภทสถานศึกษา/ระดับ', 'warning'); return; }
+    if (!(data.amount_paid > 0)) { showToast('กรุณาระบุจำนวนเงินตามใบเสร็จ', 'warning'); F.amount_paid.focus(); return; }
+    if (!(data.amount_claim > 0)) { showToast('กรุณาระบุจำนวนเงินที่เบิก', 'warning'); F.amount_claim.focus(); return; }
+    if (data.amount_claim > max) { showToast(`จำนวนเงินที่เบิกเกินสิทธิ (ไม่เกิน ${rentMoney(max)} บาท)`, 'warning'); return; }
+    const conflict = (data.semester === 'year' ? ['1', '2'] : ['year']).some(s => eduClaim(c.id, s) && eduClaim(c.id, s).id !== x?.id) || (eduClaim(c.id, data.semester) && eduClaim(c.id, data.semester).id !== x?.id);
+    if (conflict) { showToast('ภาคเรียนนี้ซ้ำหรือขัดกับรายการเดิม (รายปี กับ ภาค 1/2 ใช้ร่วมกันไม่ได้)', 'warning'); return; }
+    const w = [...warns];
+    if (data.doc_date && data.doc_date > calAddDays(eduSemOpen(Ed.ay, data.semester), 365)) w.push('วันที่วางฎีกาเกิน 1 ปีนับแต่วันเปิดภาคเรียน – ตรวจสอบกำหนดเวลายื่นเบิก');
+    if (w.length && !x && !(await confirmModal({ title: 'มีข้อควรตรวจสอบ', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
+      message: `<ul class="list-disc pl-5 text-sm">${w.map(s => `<li>${esc(s)}</li>`).join('')}</ul><p class="mt-2 text-sm">ต้องการบันทึกต่อหรือไม่?</p>` }))) return;
+    if (x && !(await rentConfirmEdit(`ยืนยันแก้ไขการเบิก · ${c.full_name}`, x, data, EDU_CLAIM_FIELDS))) return;
+    const r = await rpcSecure('sfh_edu_claim_save', { p_id: x?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกการเบิกแล้ว' });
+    if (r.ok) { md.close(); eduRefresh(el); }
+  };
+}
+
+/* ---------- แท็บ: ผู้มีสิทธิ์และบุตร ---------- */
+function eduRenderFamily(body, el) {
+  const pids = new Set([...Ed.children.map(c => c.person_id), ...Ed.spouses.map(s => s.person_id)]);
+  const fams = Ed.people.filter(p => pids.has(p.id));
+  body.innerHTML = `<div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
+      <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span><input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อผู้มีสิทธิ์หรือบุตร..." data-fam-q></div>
+      <div class="flex flex-wrap gap-2"><button class="btn btn-primary" data-fam-act="add-child">${ic('baby')} เพิ่มบุตร</button>
+        <button class="btn btn-soft" data-fam-act="import">${ic('download-cloud')} ดึงรายชื่อจากสลิปเงินเดือน</button>
+        <button class="btn btn-ghost" data-fam-act="add-person">${ic('user-plus')} เพิ่มบุคลากร</button></div></div>
+    <div class="grid gap-3 lg:grid-cols-2" data-fam-list></div>`;
+  const draw = (q = '') => {
+    const list = fams.filter(p => !q || (p.full_name + ' ' + Ed.children.filter(c => c.person_id === p.id).map(c => c.full_name).join(' ')).includes(q));
+    $('[data-fam-list]', body).innerHTML = list.length ? list.map(p => { const sp = eduSpouse(p.id), kids = Ed.children.filter(c => c.person_id === p.id);
+      return `<div class="card p-4"><div class="flex items-start gap-2"><div class="flex-1 min-w-0"><div class="font-semibold text-slate-800">${esc(p.full_name)}</div>
+          <div class="text-xs text-slate-400">${esc([p.employee_type, p.position_title, p.unit_name].filter(Boolean).join(' · '))}</div></div>
+          <button class="btn-icon" data-fam-person="${p.id}" title="แก้ไขข้อมูลบุคลากร">${ic('user-cog')}</button></div>
+        <div class="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-600 flex items-start gap-2"><div class="flex-1">ผู้มีสิทธิเป็น <b>${sp?.claimant_role === 'mother' ? 'มารดา' : 'บิดา'}</b> · คู่สมรส: ${sp?.spouse_name ? esc(sp.spouse_name) : '-'} (${EDU_SPOUSE[sp?.spouse_status || 'none']})
+          ${sp?.spouse_status === 'gov' ? '<div class="text-blush-500 mt-0.5">คู่สมรสเป็นข้าราชการ/ลูกจ้างประจำ – ใช้สิทธิ์ฝ่ายเดียว</div>' : ''}</div>
+          <button class="text-mint-600 hover:underline shrink-0" data-fam-spouse="${p.id}">แก้ไข</button></div>
+        <div class="mt-2 divide-y divide-slate-100">${kids.map(c => { const w = eduWarnings(c); return `<div class="flex items-center gap-2 py-2">
+          <span class="w-8 h-8 rounded-xl grid place-items-center ${c.is_active ? 'bg-mint-100 text-mint-600' : 'bg-slate-100 text-slate-400'} text-xs font-semibold">${eduOrder(c) ?? '-'}</span>
+          <div class="flex-1 min-w-0"><div class="text-sm text-slate-700">${esc(c.full_name)} ${c.is_active ? '' : '<span class="badge bg-slate-100 text-slate-500">ไม่ใช้สิทธิ์</span>'}</div>
+            <div class="text-[11px] text-slate-400">${c.birth_date ? `เกิด ${formatThaiDate(calDate(c.birth_date))} · อายุ ${eduAge(c.birth_date)} ปี (ปีการศึกษา ${Ed.ay})` : 'ไม่ระบุวันเกิด'}${c.is_substitute ? ' · บุตรแทนที่' : ''}</div>
+            ${w.length ? `<div class="text-[11px] text-blush-500">${esc(w.join(' · '))}</div>` : ''}</div>
+          <button class="btn-icon" data-fam-child="${c.id}" title="แก้ไข">${ic('pencil')}</button></div>`; }).join('') || '<div class="py-2 text-xs text-slate-400">ยังไม่มีข้อมูลบุตร</div>'}</div>
+        <button class="btn btn-soft btn-sm mt-2" data-fam-addchild="${p.id}">${ic('plus', 'w-4 h-4')} เพิ่มบุตร</button></div>`; }).join('')
+      : `<div class="card lg:col-span-2">${emptyState('ยังไม่มีข้อมูลผู้มีสิทธิ์ · กด "เพิ่มบุตร" แล้วเลือกบุคลากร', 'users-round')}</div>`;
+    refreshIcons();
+  };
+  draw();
+  body.oninput = (e) => { if (e.target.matches('[data-fam-q]')) draw(e.target.value.trim()); };
+  body.onclick = async (ev) => {
+    const t = (s) => ev.target.closest(s);
+    if (t('[data-fam-act="add-child"]')) { eduPickPerson(el); return; }
+    if (t('[data-fam-act="add-person"]')) { eduOpenPerson(null, el); return; }
+    if (t('[data-fam-act="import"]')) {
+      if (!(await confirmModal({ title: 'ดึงรายชื่อจากสลิปเงินเดือน', danger: false, icon: 'download-cloud', confirmText: 'ดึงรายชื่อ',
+        message: 'เพิ่มข้าราชการ (ส่วนท้องถิ่น/ครู) จากสลิปเงินเดือนงวดล่าสุดที่ยังไม่มีในรายชื่อบุคลากร (ใช้ร่วมกับทะเบียนค่าเช่าบ้าน)' }))) return;
+      const r = await rpcSecure('sfh_rent_import_payroll', {}, { loaderText: 'กำลังดึงรายชื่อ...', error: 'ดึงรายชื่อไม่สำเร็จ' });
+      if (r.ok) { showToast(r.data.added || r.data.updated ? `เพิ่ม ${r.data.added} คน · อัปเดต ${r.data.updated} คน` : 'ไม่มีรายชื่อใหม่', 'success', 5000); eduRefresh(el); }
+      return;
+    }
+    const a = t('[data-fam-person]'); if (a) { eduOpenPerson(eduPerson(a.dataset.famPerson), el); return; }
+    const b = t('[data-fam-spouse]'); if (b) { eduOpenSpouse(eduPerson(b.dataset.famSpouse), el); return; }
+    const c = t('[data-fam-child]'); if (c) { eduOpenChild(eduChild(c.dataset.famChild), null, el); return; }
+    const d = t('[data-fam-addchild]'); if (d) eduOpenChild(null, eduPerson(d.dataset.famAddchild), el);
+  };
+}
+function eduPickPerson(el) {
+  const list = Ed.people.filter(p => p.is_active);
+  const m = openModal({ title: 'เลือกผู้มีสิทธิ์ (บุคลากร)', icon: 'user-round', size: 'md',
+    body: list.length ? `<input type="search" class="input mb-3" placeholder="ค้นหาชื่อ..." data-pk-q><div class="grid gap-1.5 max-h-[55vh] overflow-y-auto" data-pk-list></div>
+      <p class="text-xs text-slate-400 mt-3">ไม่พบชื่อ? ใช้ปุ่ม "ดึงรายชื่อจากสลิปเงินเดือน" หรือ "เพิ่มบุคลากร"</p>` : emptyState('ยังไม่มีรายชื่อบุคลากร · ดึงรายชื่อจากสลิปเงินเดือนก่อน', 'users') });
+  const draw = (q = '') => { const box = $('[data-pk-list]', m.el); if (!box) return;
+    box.innerHTML = list.filter(p => !q || p.full_name.includes(q)).map(p => `<button type="button" class="text-left rounded-2xl border border-slate-100 px-3 py-2 hover:border-mint-200 hover:bg-mint-50/50" data-pk="${p.id}">
+      <div class="font-medium text-slate-700">${esc(p.full_name)}</div><div class="text-xs text-slate-400">${esc([p.employee_type, p.unit_name].filter(Boolean).join(' · '))} · บุตร ${Ed.children.filter(c => c.person_id === p.id).length} คน</div></button>`).join('') || emptyState('ไม่พบชื่อ', 'search-x'); };
+  draw();
+  m.el.addEventListener('input', (e) => { if (e.target.matches('[data-pk-q]')) draw(e.target.value.trim()); });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-pk]'); if (b) { m.close(); eduOpenChild(null, eduPerson(b.dataset.pk), el); } });
+}
+function eduOpenChild(child, person, el) {
+  const c = child || { is_active: true, is_substitute: false }, p = person || eduPerson(c.person_id); if (!p) return;
+  const m = openModal({ title: `${child ? 'แก้ไขข้อมูลบุตร' : 'เพิ่มบุตร'} · ${esc(p.full_name)}`, icon: 'baby', size: 'lg',
+    body: `<form class="grid gap-3 sm:grid-cols-2" novalidate>
+      <div class="sm:col-span-2"><label class="label">ชื่อ-สกุลบุตร *</label><input class="input" name="full_name" value="${esc(c.full_name || '')}"></div>
+      <div><label class="label">วันเกิด *</label><input type="date" class="input" name="birth_date" value="${esc(c.birth_date || '')}"></div><div class="text-sm text-slate-500 flex items-end pb-2.5" data-age></div>
+      <div><label class="label">เป็นบุตรลำดับที่ (ของบิดา)</label><input class="input" inputmode="numeric" name="order_father" value="${esc(c.order_father ?? '')}"></div>
+      <div><label class="label">เป็นบุตรลำดับที่ (ของมารดา)</label><input class="input" inputmode="numeric" name="order_mother" value="${esc(c.order_mother ?? '')}"></div>
+      <div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" name="is_substitute" ${c.is_substitute ? 'checked' : ''}> เป็นบุตรแทนที่บุตรซึ่งถึงแก่กรรมแล้ว</label></div>
+      <div class="sm:col-span-2 grid gap-3 sm:grid-cols-2 rounded-2xl bg-slate-50 p-3" data-sub>
+        <div><label class="label">แทนที่บุตรลำดับที่</label><input class="input" inputmode="numeric" name="sub_order" value="${esc(c.sub_order ?? '')}"></div>
+        <div><label class="label">ชื่อบุตรที่ถึงแก่กรรม</label><input class="input" name="sub_name" value="${esc(c.sub_name || '')}"></div>
+        <div><label class="label">เกิดเมื่อ</label><input type="date" class="input" name="sub_birth_date" value="${esc(c.sub_birth_date || '')}"></div>
+        <div><label class="label">ถึงแก่กรรมเมื่อ</label><input type="date" class="input" name="sub_death_date" value="${esc(c.sub_death_date || '')}"></div></div>
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(c.note || '')}"></div>
+      <div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" name="is_active" ${c.is_active !== false ? 'checked' : ''}> ยังใช้สิทธิ์เบิก</label></div>
+    </form>`,
+    footer: `${child ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  const upd = () => { $('[data-sub]', m.el).classList.toggle('hidden', !F.is_substitute.checked); const a = eduAge(F.birth_date.value);
+    $('[data-age]', m.el).innerHTML = F.birth_date.value ? `อายุ ${a} ปี ณ วันเปิดปีการศึกษา ${Ed.ay}${a < 3 || a > 25 ? ' <span class="text-blush-500">(นอกเกณฑ์ 3–25 ปี)</span>' : ''}` : ''; };
+  m.el.addEventListener('input', upd); m.el.addEventListener('change', upd); upd();
+  $('[data-del]', m.el)?.addEventListener('click', async () => {
+    const n = Ed.claims.filter(x => x.child_id === child.id).length;
+    if (!(await confirmModal({ title: 'ลบข้อมูลบุตร', message: `ลบ <b>${esc(child.full_name)}</b> ใช่หรือไม่?<br><span class="text-xs text-blush-500">รายการเบิกของบุตรคนนี้ทุกปีการศึกษาจะถูกลบด้วย${n ? ` (ปีนี้ ${n} รายการ)` : ''}</span>` }))) return;
+    const r = await rpcSecure('sfh_edu_child_delete', { p_id: child.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบข้อมูลบุตรแล้ว' });
+    if (r.ok) { m.close(); eduRefresh(el); }
+  });
+  $('[data-save]', m.el).onclick = async () => {
+    const v = (k) => String(F[k].value ?? '').trim();
+    const data = { person_id: p.id, full_name: v('full_name'), birth_date: v('birth_date') || null, order_father: v('order_father'), order_mother: v('order_mother'),
+      is_substitute: F.is_substitute.checked, sub_order: F.is_substitute.checked ? v('sub_order') : '', sub_name: F.is_substitute.checked ? v('sub_name') || null : null,
+      sub_birth_date: F.is_substitute.checked ? v('sub_birth_date') || null : null, sub_death_date: F.is_substitute.checked ? v('sub_death_date') || null : null,
+      note: v('note') || null, is_active: F.is_active.checked };
+    if (!data.full_name) { showToast('กรุณากรอกชื่อบุตร', 'warning'); F.full_name.focus(); return; }
+    if (!data.birth_date) { showToast('กรุณาระบุวันเกิด (ใช้ตรวจอายุ)', 'warning'); return; }
+    for (const k of ['order_father', 'order_mother', 'sub_order']) if (data[k] && !(Number.isInteger(+data[k]) && +data[k] > 0)) { showToast('ลำดับบุตรต้องเป็นจำนวนเต็มบวก', 'warning'); return; }
+    if (child && !(await rentConfirmEdit(`ยืนยันแก้ไขข้อมูลบุตร · ${child.full_name}`, child, data, EDU_CHILD_FIELDS))) return;
+    const r = await rpcSecure('sfh_edu_child_save', { p_id: child?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกข้อมูลบุตรแล้ว' });
+    if (r.ok) { m.close(); eduRefresh(el); }
+  };
+}
+function eduOpenSpouse(p, el) {
+  if (!p) return;
+  const s = eduSpouse(p.id) || { claimant_role: 'father', spouse_status: 'none' };
+  const m = openModal({ title: `ผู้ใช้สิทธิ์และคู่สมรส · ${esc(p.full_name)}`, icon: 'heart-handshake', size: 'md',
+    body: `<form class="grid gap-3" novalidate>
+      <div><label class="label">ผู้มีสิทธิเป็น</label><div class="grid grid-cols-2 gap-2">${[['father', 'บิดาโดยชอบด้วยกฎหมาย'], ['mother', 'มารดา']].map(([k, l]) => `<label class="flex items-center justify-center rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-mint-300 has-[:checked]:bg-mint-50 border-slate-200 text-slate-600">
+        <input type="radio" name="claimant_role" value="${k}" class="sr-only" ${k === s.claimant_role ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
+      <div><label class="label">ชื่อคู่สมรส</label><input class="input" name="spouse_name" value="${esc(s.spouse_name || '')}"></div>
+      <div><label class="label">สถานะคู่สมรส</label><select class="input" name="spouse_status">${Object.entries(EDU_SPOUSE).map(([k, l]) => `<option value="${k}" ${k === s.spouse_status ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="grid gap-3 sm:grid-cols-2"><div><label class="label">ตำแหน่ง</label><input class="input" name="spouse_position" value="${esc(s.spouse_position || '')}"></div>
+        <div><label class="label">สังกัด</label><input class="input" name="spouse_unit" value="${esc(s.spouse_unit || '')}"></div></div>
+      <div><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(s.note || '')}"></div></form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  $('[data-save]', m.el).onclick = async () => {
+    const data = { claimant_role: F.claimant_role.value, spouse_name: F.spouse_name.value.trim() || null, spouse_status: F.spouse_status.value,
+      spouse_position: F.spouse_position.value.trim() || null, spouse_unit: F.spouse_unit.value.trim() || null, note: F.note.value.trim() || null };
+    if (eduSpouse(p.id) && !(await rentConfirmEdit(`ยืนยันแก้ไขข้อมูลคู่สมรส · ${p.full_name}`, s, data, EDU_SPOUSE_FIELDS))) return;
+    const r = await rpcSecure('sfh_edu_spouse_save', { p_person_id: p.id, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกแล้ว' });
+    if (r.ok) { m.close(); eduRefresh(el); }
+  };
+}
+/** เพิ่ม/แก้ไขบุคลากร (ใช้ร่วมกับทะเบียนค่าเช่าบ้าน) – คงค่าตำแหน่ง/ระดับ/ขั้น/เงินเดือนเดิมไว้ */
+function eduOpenPerson(person, el) {
+  const p = person || { is_active: true };
+  const m = openModal({ title: person ? 'แก้ไขข้อมูลบุคลากร' : 'เพิ่มบุคลากร', icon: 'user-round', size: 'md',
+    body: `<form class="grid gap-3" novalidate>
+      <div><label class="label">ชื่อ-สกุล *</label><input class="input" name="full_name" value="${esc(p.full_name || '')}"></div>
+      <div class="grid gap-3 sm:grid-cols-2"><div><label class="label">ประเภทบุคลากร</label><input class="input" name="employee_type" value="${esc(p.employee_type || '')}" list="edEmpTypes"><datalist id="edEmpTypes"><option value="ข้าราชการส่วนท้องถิ่น"><option value="ข้าราชการครู"></datalist></div>
+        <div><label class="label">สังกัด</label><input class="input" name="unit_name" value="${esc(p.unit_name || '')}"></div></div>
+      <div><label class="label">ชื่อตำแหน่ง</label><input class="input" name="position_title" value="${esc(p.position_title || '')}"></div>
+      <label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" name="is_active" ${p.is_active !== false ? 'checked' : ''}> ยังปฏิบัติงานอยู่</label>
+      <p class="text-xs text-slate-400">รายชื่อนี้ใช้ร่วมกับทะเบียนค่าเช่าบ้าน (ข้อมูลระดับ/ขั้นเงินเดือนแก้ได้ที่ทะเบียนค่าเช่าบ้าน)</p></form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  $('[data-save]', m.el).onclick = async () => {
+    const keep = { position_type: p.position_type || null, position_level: p.position_level || null, salary_step: p.salary_step ?? '', salary: p.salary ?? '', note: p.note || null };
+    const v = { ...keep, full_name: F.full_name.value.trim(), employee_type: F.employee_type.value.trim() || null, unit_name: F.unit_name.value.trim() || null,
+      position_title: F.position_title.value.trim() || null, is_active: F.is_active.checked };
+    if (!v.full_name) { showToast('กรุณากรอกชื่อ-สกุล', 'warning'); return; }
+    if (person && !(await rentConfirmEdit(`ยืนยันแก้ไขข้อมูลบุคลากร · ${person.full_name}`, person, v, RENT_PERSON_FIELDS))) return;
+    const r = await rpcSecure('sfh_rent_person_save', { p_id: person?.id || null, p_data: v }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกบุคลากรแล้ว' });
+    if (r.ok) { m.close(); if (!person) { await eduRefresh(el); eduOpenChild(null, eduPerson(r.data.id), el); } else eduRefresh(el); }
+  };
+}
+
+/* ---------- แท็บ: บัญชีอัตรา ---------- */
+function eduRenderRates(body, el) {
+  const admin = hasPermission('register.manage_rates'), s = eduSet();
+  if (!s) { body.innerHTML = `<div class="card">${emptyState('ยังไม่มีบัญชีอัตรา', 'list-ordered')}</div>`; return; }
+  const groups = [...new Set(s.config.items.map(i => i.group))];
+  body.innerHTML = `<div class="card p-4 sm:p-5"><div class="flex flex-wrap items-start gap-2 mb-3"><div class="flex-1 min-w-0"><h4 class="font-semibold text-slate-800">${esc(s.name)}</h4>
+      ${s.reference ? `<div class="text-xs text-slate-400">อ้างอิง: ${esc(s.reference)}</div>` : ''}${s.updated_by_name ? `<div class="text-xs text-slate-400">แก้ไขล่าสุดโดย ${esc(s.updated_by_name)} ${timeAgo(s.updated_at)}</div>` : ''}</div>
+      ${admin ? `<button class="btn btn-soft btn-sm" data-edrate-edit>${ic('pencil', 'w-4 h-4')} แก้ไข</button>` : ''}</div>
+    <div class="grid gap-3 lg:grid-cols-2">${groups.map(g => `<div class="rounded-2xl border border-slate-100 overflow-hidden"><div class="bg-gradient-to-r from-mint-50 to-white px-3 py-2 text-sm font-medium text-slate-700">${esc(g)}</div>
+      <table class="w-full text-xs"><tbody class="divide-y divide-slate-100">${s.config.items.filter(i => i.group === g).map(i => `<tr><td class="px-3 py-1.5 text-slate-600">${esc(i.name)}</td>
+        <td class="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">${rentMoney(i.cap)}${i.half ? ' <span class="text-cream-600">(½)</span>' : ''}</td></tr>`).join('')}</tbody></table></div>`).join('')}</div>
+    <p class="text-xs text-slate-400 mt-3">อัตราต่อปีการศึกษา · (½) = เบิกได้ครึ่งหนึ่งของที่จ่ายจริงแต่ไม่เกินอัตรา</p></div>`;
+  body.onclick = (e) => { if (e.target.closest('[data-edrate-edit]')) eduOpenRates(s, el); };
+}
+function eduOpenRates(src, el) {
+  if (!requirePermission('register.manage_rates')) return;
+  const cfg = JSON.parse(JSON.stringify(src.config)), groups = [...new Set(cfg.items.map(i => i.group))];
+  const m = openModal({ title: 'แก้ไขบัญชีอัตราค่าเล่าเรียนบุตร', icon: 'list-ordered', size: 'xl',
+    body: `<div class="grid gap-3 sm:grid-cols-2 mb-4"><div class="sm:col-span-2"><label class="label">ชื่อชุดอัตรา</label><input class="input" data-f="name" value="${esc(src.name)}"></div>
+        <div class="sm:col-span-2"><label class="label">อ้างอิง</label><input class="input" data-f="reference" value="${esc(src.reference || '')}"></div></div>
+      <div class="grid gap-3 lg:grid-cols-2">${groups.map(g => `<div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700 mb-2 text-sm">${esc(g)}</div>
+        ${cfg.items.map((i, idx) => i.group !== g ? '' : `<div class="grid grid-cols-[1fr,7rem,auto] gap-2 items-center mb-1.5"><span class="text-xs text-slate-600">${esc(i.name)}</span>
+          <input class="input !py-1 !text-xs text-right" inputmode="decimal" data-cap="${idx}" value="${i.cap}"><label class="text-[11px] text-slate-500 inline-flex items-center gap-1"><input type="checkbox" class="rounded" data-half="${idx}" ${i.half ? 'checked' : ''}>½</label></div>`).join('')}</div>`).join('')}</div>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  $('[data-save]', m.el).onclick = async () => {
+    let bad = false;
+    cfg.items.forEach((i, idx) => { const n = Number(String($(`[data-cap="${idx}"]`, m.el).value).replace(/,/g, '')); if (!(n > 0)) bad = true; i.cap = n; i.half = $(`[data-half="${idx}"]`, m.el).checked; });
+    if (bad) { showToast('อัตราต้องเป็นตัวเลขมากกว่า 0', 'warning'); return; }
+    const changed = cfg.items.filter((i, idx) => i.cap !== src.config.items[idx].cap || i.half !== src.config.items[idx].half);
+    const name = $('[data-f="name"]', m.el).value.trim(), reference = $('[data-f="reference"]', m.el).value.trim();
+    if (!changed.length && name === src.name && reference === (src.reference || '')) { showToast('ไม่มีข้อมูลที่เปลี่ยนแปลง', 'info'); return; }
+    if (changed.length && !(await confirmModal({ title: 'ยืนยันแก้ไขอัตรา', danger: false, icon: 'alert-triangle', confirmText: 'ยืนยันแก้ไข', confirmIcon: 'check',
+      message: `<ul class="text-sm list-disc pl-5">${changed.map(i => { const o = src.config.items.find(x => x.key === i.key); return `<li>${esc(i.group)} · ${esc(i.name)}: ${rentMoney(o.cap)}${o.half ? ' (½)' : ''} → <b>${rentMoney(i.cap)}${i.half ? ' (½)' : ''}</b></li>`; }).join('')}</ul>` }))) return;
+    const r = await rpcSecure('sfh_edu_rates_save', { p_id: src.id, p_data: { name, reference: reference || null, effective_from: src.effective_from, note: src.note, config: cfg } },
+      { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกบัญชีอัตราแล้ว' });
+    if (r.ok) { m.close(); Ed.rates = []; eduRefresh(el); }
+  };
+}
+
+/* ---------- พิมพ์ / PDF / Excel ---------- */
+function eduPrintMenu(mode) {
+  const today = calToday(), fyNow = thaiFiscalYear(new Date()), ym = today.slice(0, 7);
+  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
+    body: `<div class="grid gap-2">
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-mint-200 hover:bg-mint-50/50" data-k="summary"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวม ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวนอน · บุตรทุกคน × ภาคเรียน</div></button>
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-mint-200 hover:bg-mint-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวตั้ง · ผู้มีสิทธิ์คนละ 1 หน้า</div></button>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา</div>
+        <div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month value="${ym}"><button type="button" class="btn btn-primary btn-sm" data-k="month">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-range', 'w-4 h-4 inline')} สรุปปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (1 ต.ค. – 30 ก.ย.) แยกรายเดือน</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
+  m.el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-k]'); if (!b) return;
+    const k = b.dataset.k, opts = {};
+    if (k === 'month') { const [y, mo] = $('[data-month]', m.el).value.split('-').map(Number); if (!y) { showToast('กรุณาเลือกเดือน', 'warning'); return; } Object.assign(opts, { y, m: mo }); }
+    if (k === 'fy') opts.fy = +$('[data-fy]', m.el).value;
+    m.close(); eduPrint(k, mode, opts);
+  });
+}
+function rgPrintRoot() {
+  if (!$('#rg-print-style')) { const st = document.createElement('style'); st.id = 'rg-print-style'; st.textContent = RENT_PRINT_CSS; document.head.appendChild(st); }
+  let root = $('#rgPrintRoot'); if (!root) { root = document.createElement('div'); root.id = 'rgPrintRoot'; document.body.appendChild(root); }
+  return root;
+}
+/** แสดงหน้าเอกสารที่สร้างแล้ว: พิมพ์ หรือ ดาวน์โหลด PDF */
+async function rgOutput(root, orientation, mode, filename) {
+  if (mode === 'pdf') { await sfhPagesToPdf($$('.rg-page', root), filename, orientation); root.innerHTML = ''; return; }
+  let pg = $('#rg-page-size'); if (!pg) { pg = document.createElement('style'); pg.id = 'rg-page-size'; document.head.appendChild(pg); }
+  pg.textContent = `@media print{@page{size:A4 ${orientation};margin:0}}`;
+  document.body.classList.add('rg-printing');
+  const done = () => { document.body.classList.remove('rg-printing'); root.innerHTML = ''; pg.textContent = ''; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 150);
+}
+const RG_SIGN = '<div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>';
+async function eduPrint(kind, mode, opts = {}) {
+  const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
+  const foot = (pi, n) => `<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${n}</span></div>`;
+  const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out.length ? out : [[]]; };
+  let orientation = 'portrait', count = 0, filename = '';
+  if (kind === 'summary') {
+    const rows = eduRows().filter(r => eduClaimsOf(r.c.id).length); count = rows.length; orientation = 'landscape';
+    const pages = chunk(rows, 15);
+    root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>ทะเบียนคุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ปีการศึกษา ${Ed.ay}</h1><div class="sub">${org}</div>
+      <table><thead><tr><th style="width:7mm">ที่</th><th style="width:40mm">ผู้มีสิทธิ์</th><th style="width:38mm">บุตร</th><th>สถานศึกษา / ประเภท-ระดับ</th><th style="width:18mm">ภาค 1</th><th style="width:18mm">ภาค 2</th><th style="width:18mm">รายปี</th><th style="width:18mm">รวม</th><th style="width:30mm">เลขที่ฎีกา</th></tr></thead><tbody>
+        ${pg.map(({ c, p }, i) => { const xs = eduClaimsOf(c.id), last = xs[xs.length - 1]; return `<tr><td class="n" style="text-align:center">${pi * 15 + i + 1}</td><td>${esc(p.full_name)}</td>
+          <td>${esc(c.full_name)}<div style="color:#6b7280;font-size:9.5px">${eduAge(c.birth_date) ?? '-'} ปี · ลำดับที่ ${eduOrder(c) ?? '-'}</div></td><td>${esc(last?.school_name || '')}<div style="color:#6b7280;font-size:9.5px">${esc(eduItem(last?.rate_key)?.name || '')}</div></td>
+          ${['1', '2', 'year'].map(s => `<td class="n">${eduClaim(c.id, s) ? rentMoney(eduClaim(c.id, s).amount_claim) : ''}</td>`).join('')}<td class="n" style="font-weight:600">${rentMoney(eduTotal(c.id))}</td>
+          <td style="font-size:9.5px">${esc(xs.map(x => x.doc_no).filter(Boolean).join(', '))}</td></tr>`; }).join('')}
+        ${pi === pages.length - 1 ? `<tr class="tot"><td colspan="4" style="text-align:center">รวม ${rows.length} คน</td>${['1', '2', 'year'].map(s => `<td class="n">${rentMoney(rows.reduce((a, { c }) => a + (+(eduClaim(c.id, s)?.amount_claim || 0)), 0))}</td>`).join('')}
+          <td class="n">${rentMoney(rows.reduce((a, { c }) => a + eduTotal(c.id), 0))}</td><td></td></tr>` : ''}</tbody></table>${pi === pages.length - 1 ? RG_SIGN : ''}${foot(pi, pages.length)}</div>`).join('');
+    filename = `ทะเบียนค่าเล่าเรียนบุตร_รวม_ปีการศึกษา${Ed.ay}.pdf`;
+  } else if (kind === 'person') {
+    const people = [...new Set(Ed.claims.map(x => eduChild(x.child_id)?.person_id))].map(eduPerson).filter(Boolean).sort((a, b) => a.full_name.localeCompare(b.full_name, 'th')); count = people.length;
+    root.innerHTML = people.map((p, pi) => { const sp = eduSpouse(p.id), xs = Ed.claims.filter(x => eduChild(x.child_id)?.person_id === p.id).sort((a, b) => eduChild(a.child_id).full_name.localeCompare(eduChild(b.child_id).full_name, 'th') || a.semester.localeCompare(b.semester));
+      const tot = xs.reduce((a, x) => a + (+x.amount_claim), 0);
+      return `<div class="rg-page port"><h1>ทะเบียนคุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร</h1><div class="sub">ปีการศึกษา ${Ed.ay} · ${org}</div>
+        <div class="info"><b>ผู้มีสิทธิ์</b><span>${esc(p.full_name)}</span><b>ตำแหน่ง/สังกัด</b><span>${esc([p.position_title, p.unit_name].filter(Boolean).join(' · ') || '-')}</span>
+          <b>ใช้สิทธิในฐานะ</b><span>${sp?.claimant_role === 'mother' ? 'มารดา' : 'บิดา'}</span><b>คู่สมรส</b><span>${esc(sp?.spouse_name || '-')} (${EDU_SPOUSE[sp?.spouse_status || 'none']})</span></div>
+        <table><thead><tr><th>บุตร</th><th style="width:16mm">ภาคเรียน</th><th>สถานศึกษา / ประเภท-ระดับ</th><th style="width:19mm">ตามใบเสร็จ</th><th style="width:19mm">เบิก</th><th style="width:22mm">เลขที่ฎีกา</th><th style="width:20mm">วันที่วางฎีกา</th><th style="width:14mm">สถานะ</th></tr></thead><tbody>
+          ${xs.map(x => { const c = eduChild(x.child_id); return `<tr><td>${esc(c.full_name)}<div style="color:#6b7280;font-size:9.5px">${eduAge(c.birth_date) ?? '-'} ปี · ลำดับที่ ${eduOrder(c) ?? '-'}</div></td><td>${EDU_SEM[x.semester]}</td>
+            <td>${esc(x.school_name)}<div style="color:#6b7280;font-size:9.5px">${esc(eduItem(x.rate_key)?.name || x.rate_name || '')}${x.grade ? ' · ' + esc(x.grade) : ''}</div></td><td class="n">${rentMoney(x.amount_paid)}</td>
+            <td class="n" style="font-weight:500">${rentMoney(x.amount_claim)}</td><td>${esc(x.doc_no || '')}</td><td>${x.doc_date ? formatThaiDate(calDate(x.doc_date)) : ''}</td><td style="text-align:center">${RENT_STATUS[x.status].label}</td></tr>`; }).join('')}
+          <tr class="tot"><td colspan="4" style="text-align:center">รวม</td><td class="n">${rentMoney(tot)}</td><td colspan="3">(${esc(bahtText(tot))})</td></tr></tbody></table>
+        ${RG_SIGN}<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>${esc(p.full_name)}</span></div></div>`; }).join('');
+    filename = `ทะเบียนค่าเล่าเรียนบุตร_รายบุคคล_ปีการศึกษา${Ed.ay}.pdf`;
+  } else {
+    const from = kind === 'month' ? rentMonthFirst(opts.y, opts.m) : rentMonthFirst(opts.fy - 544, 10), to = kind === 'month' ? rentMonthLast(opts.y, opts.m) : rentMonthLast(opts.fy - 543, 9);
+    const r = await rpcSecure('sfh_edu_report', { p_from: from, p_to: to }, { loaderText: 'กำลังโหลดรายงาน...', error: 'โหลดรายงานไม่สำเร็จ' });
+    if (!r.ok) return;
+    const rows = r.data || []; count = rows.length;
+    const title = kind === 'month' ? `รายงานการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ประจำเดือน${TH_MONTHS[opts.m - 1]} ${opts.y + 543}` : `สรุปการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ปีงบประมาณ ${opts.fy}`;
+    const items = [];
+    if (kind === 'fy') { let curM = ''; rows.forEach(x => { const mk = x.doc_date.slice(0, 7); if (mk !== curM) { if (curM) items.push({ sub: curM }); curM = mk; } items.push(x); }); if (curM) items.push({ sub: curM }); }
+    else items.push(...rows);
+    const subTot = (mk) => rows.filter(x => x.doc_date.slice(0, 7) === mk).reduce((a, x) => a + (+x.amount_claim), 0);
+    const total = rows.reduce((a, x) => a + (+x.amount_claim), 0);
+    const pages = chunk(items, 22); let n = 0;
+    root.innerHTML = pages.map((pg, pi) => `<div class="rg-page port"><h1>${title}</h1><div class="sub">${org}</div>
+      <table><thead><tr><th style="width:8mm">ที่</th><th>ผู้มีสิทธิ์ / บุตร</th><th style="width:22mm">ปีการศึกษา/ภาค</th><th>สถานศึกษา</th><th style="width:19mm">จำนวนเงิน</th><th style="width:22mm">เลขที่ฎีกา</th><th style="width:20mm">วันที่วางฎีกา</th><th style="width:13mm">สถานะ</th></tr></thead><tbody>
+        ${pg.map(x => x.sub ? `<tr class="tot"><td colspan="4" style="text-align:right">รวมเดือน${TH_MONTHS[+x.sub.slice(5, 7) - 1]} ${+x.sub.slice(0, 4) + 543}</td><td class="n">${rentMoney(subTot(x.sub))}</td><td colspan="3"></td></tr>`
+          : `<tr><td class="n" style="text-align:center">${++n}</td><td>${esc(x.person_name)}<div style="color:#6b7280;font-size:9.5px">บุตร: ${esc(x.child_name)}</div></td><td>${x.academic_year} · ${EDU_SEM[x.semester]}</td>
+            <td>${esc(x.school_name)}</td><td class="n" style="font-weight:500">${rentMoney(x.amount_claim)}</td><td>${esc(x.doc_no || '')}</td><td>${formatThaiDate(calDate(x.doc_date))}</td><td style="text-align:center">${RENT_STATUS[x.status].label}</td></tr>`).join('')}
+        ${!rows.length ? '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:4mm">ไม่มีรายการ</td></tr>' : ''}
+        ${pi === pages.length - 1 && rows.length ? `<tr class="tot"><td colspan="4" style="text-align:center">รวมทั้งสิ้น ${rows.length} รายการ</td><td class="n">${rentMoney(total)}</td><td colspan="3">(${esc(bahtText(total))})</td></tr>` : ''}
+      </tbody></table>${pi === pages.length - 1 ? RG_SIGN : ''}${foot(pi, pages.length)}</div>`).join('');
+    filename = kind === 'month' ? `ทะเบียนค่าเล่าเรียนบุตร_ประจำเดือน${TH_MONTHS[opts.m - 1]}${opts.y + 543}.pdf` : `ทะเบียนค่าเล่าเรียนบุตร_สรุปปีงบประมาณ${opts.fy}.pdf`;
+  }
+  if (!count) { root.innerHTML = ''; showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
+  rpcSecure('sfh_edu_log', { p_kind: `${mode}_${kind}`, p_details: { academic_year: Ed.ay, count, ...opts } }, { loader: false });
+  await rgOutput(root, orientation, mode, filename);
+}
+async function eduExportExcel() {
+  let XLSX; try { XLSX = await loadSheetJS(); } catch (e) { showToast(e.message, 'error'); return; }
+  const xs = [...Ed.claims].sort((a, b) => { const ca = eduChild(a.child_id), cb = eduChild(b.child_id); return (eduPerson(ca?.person_id)?.full_name || '').localeCompare(eduPerson(cb?.person_id)?.full_name || '', 'th') || ca.full_name.localeCompare(cb.full_name, 'th') || a.semester.localeCompare(b.semester); });
+  const head = ['ที่', 'ผู้มีสิทธิ์', 'บุตร', 'วันเกิด', 'อายุ (ปี)', 'ลำดับบุตร', 'ภาคเรียน', 'สถานศึกษา', 'อำเภอ', 'จังหวัด', 'ประเภท/ระดับ', 'ชั้น', 'ตามใบเสร็จ', 'คู่สมรสได้รับแล้ว', 'เบิก', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะ'];
+  const data = xs.map((x, i) => { const c = eduChild(x.child_id), p = eduPerson(c?.person_id);
+    return [i + 1, p?.full_name || '', c?.full_name || '', c?.birth_date ? formatThaiDate(calDate(c.birth_date)) : '', eduAge(c?.birth_date), eduOrder(c), EDU_SEM[x.semester], x.school_name, x.school_district || '', x.school_province || '',
+      x.rate_name || '', x.grade || '', +x.amount_paid, +x.spouse_received || null, +x.amount_claim, x.doc_no || '', x.doc_date ? formatThaiDate(calDate(x.doc_date)) : '', RENT_STATUS[x.status].label]; });
+  const ws = XLSX.utils.aoa_to_sheet([[`ทะเบียนคุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ปีการศึกษา ${Ed.ay}`], [State.settings.org_name || ''], [], head, ...data,
+    ['', `รวม ${data.length} รายการ`, '', '', '', '', '', '', '', '', '', '', data.reduce((a, r) => a + r[12], 0), '', data.reduce((a, r) => a + r[14], 0)]]);
+  ws['!cols'] = [5, 26, 26, 13, 8, 8, 12, 28, 14, 14, 40, 8, 12, 12, 12, 16, 13, 10].map(w => ({ wch: w }));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, `ปีการศึกษา ${Ed.ay}`);
+  XLSX.writeFile(wb, `ทะเบียนค่าเล่าเรียนบุตร_ปีการศึกษา${Ed.ay}.xlsx`);
+  rpcSecure('sfh_edu_log', { p_kind: 'excel', p_details: { academic_year: Ed.ay, count: data.length } }, { loader: false });
   showToast('ส่งออก Excel แล้ว', 'success');
 }
 /* ===== END MODULE: register ===== */
