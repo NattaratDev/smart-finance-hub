@@ -5103,6 +5103,15 @@ const REGISTERS = [
 ];
 const RENT_HOUSING = { rent: 'เช่าบ้าน', hire_purchase: 'เช่าซื้อ', loan: 'ผ่อนชำระเงินกู้' };
 const RENT_STATUS = { paid: { label: 'เบิกแล้ว', cls: 'bg-mint-100 text-mint-600' }, pending: { label: 'รอเบิก', cls: 'bg-cream-100 text-cream-600' } };
+/* ฟิลด์ที่ตรวจการเปลี่ยนแปลงก่อนยืนยันแก้ไข: [key, ชื่อที่แสดง, ชนิด] */
+const RENT_ENT_FIELDS = [['housing_type', 'ประเภท', 'housing'], ['start_date', 'มีสิทธิ์ตั้งแต่วันที่', 'date'], ['end_date', 'สิ้นสุดสิทธิ์', 'date'],
+  ['monthly_rent', 'ค่าเช่า/ค่าผ่อนจริงต่อเดือน', 'money'], ['rate_cap', 'สิทธิ์เบิก เดือนละไม่เกิน', 'money'], ['contract_start', 'สัญญาเริ่ม', 'date'],
+  ['contract_end', 'สัญญาสิ้นสุด', 'date'], ['address', 'ที่อยู่บ้านเช่า', 'text'], ['order_no', 'คำสั่ง/หนังสืออนุมัติ', 'text'], ['note', 'หมายเหตุ', 'text']];
+const RENT_CLAIM_FIELDS = [['amount', 'จำนวนเงิน', 'money'], ['status', 'สถานะ', 'status'], ['doc_no', 'เลขที่ฎีกา/ใบสำคัญ', 'text'],
+  ['paid_date', 'วันที่วางฎีกา', 'date'], ['note', 'หมายเหตุ', 'text']];
+const RENT_PERSON_FIELDS = [['full_name', 'ชื่อ-สกุล', 'text'], ['employee_type', 'ประเภทบุคลากร', 'text'], ['unit_name', 'สังกัด', 'text'],
+  ['position_title', 'ชื่อตำแหน่ง', 'text'], ['position_type', 'ประเภทตำแหน่ง', 'ptype'], ['position_level', 'ระดับ', 'plevel'],
+  ['salary_step', 'ขั้นเงินเดือน', 'num'], ['salary', 'เงินเดือน', 'money'], ['note', 'หมายเหตุ', 'text'], ['is_active', 'ยังปฏิบัติงานอยู่', 'bool']];
 const Rg = { view: 'hub', tab: 'register', fy: null, people: [], ents: [], claims: [], years: [], rates: [], filter: '' };
 
 /* ---------- ปีงบประมาณ / เดือน ---------- */
@@ -5208,7 +5217,7 @@ async function rentOpen(el, mod) {
     + pageHeader({ title: 'ทะเบียนคุมเบิกค่าเช่าบ้าน', icon: 'home', tone: 'brand', subtitle: 'ตามระเบียบกระทรวงมหาดไทยว่าด้วยค่าเช่าบ้านของข้าราชการส่วนท้องถิ่น · ข้อมูลส่วนบุคคล (PDPA)',
       actions: `<label class="flex items-center gap-2 text-sm text-slate-600">ปีงบประมาณ <select class="input !w-auto !py-2" data-rg-fy></select></label>` })
     + `<div class="flex gap-1 mb-4 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
-        ${[['register', 'table', 'ทะเบียนคุม'], ['people', 'users', 'บุคลากร'], ['rates', 'list-ordered', 'บัญชีอัตรา']].map(([k, i, l]) =>
+        ${[['register', 'table', 'ทะเบียนคุม'], ['eligible', 'badge-check', 'ผู้มีสิทธิ์'], ['people', 'users', 'บุคลากร'], ['rates', 'list-ordered', 'บัญชีอัตรา']].map(([k, i, l]) =>
           `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-rg-tab="${k}" role="tab">${ic(i, 'w-4 h-4')} ${l}</button>`).join('')}
       </div><div id="rgBody">${skeletonCards(1, 'h-96')}</div>`;
   refreshIcons();
@@ -5233,6 +5242,7 @@ function rentRender(el) {
   const body = $('#rgBody', el);
   body.onclick = body.oninput = null;
   if (Rg.tab === 'register') rentRenderRegister(body, el);
+  else if (Rg.tab === 'eligible') rentRenderEligible(body, el);
   else if (Rg.tab === 'people') rentRenderPeople(body, el);
   else rentRenderRates(body, el);
   refreshIcons();
@@ -5312,6 +5322,76 @@ function rentRenderRegister(body, el) {
   };
 }
 
+/* ---------- ยืนยันก่อนบันทึกการแก้ไข (แสดงเฉพาะช่องที่เปลี่ยน: ค่าเดิม → ค่าใหม่) ---------- */
+function rentFieldNorm(kind, v) {
+  if (kind === 'money' || kind === 'num') { const n = Number(String(v ?? '').replace(/,/g, '')); return String(v ?? '').trim() === '' || !isFinite(n) || n === 0 ? null : n; }   // ว่าง = 0
+  if (kind === 'bool') return v !== false;
+  if (kind === 'date') return v ? String(v).slice(0, 10) : null;
+  return String(v ?? '').trim() || null;
+}
+function rentFieldText(kind, v, rec) {
+  if (v == null || v === '') return '<span class="text-slate-400">(ว่าง)</span>';
+  if (kind === 'money') return `${rentMoney(v)} บาท`;
+  if (kind === 'date') return formatThaiDate(calDate(v));
+  if (kind === 'housing') return RENT_HOUSING[v] || esc(v);
+  if (kind === 'status') return RENT_STATUS[v]?.label || esc(v);
+  if (kind === 'bool') return v ? 'ใช่' : 'ไม่ใช่';
+  const types = rentSetFor()?.config.types || [];
+  if (kind === 'ptype') return esc(types.find(t => t.key === v)?.name || v);
+  if (kind === 'plevel') return esc(types.find(t => t.key === rec?.position_type)?.levels.find(l => l.key === v)?.name || v);
+  return esc(v);
+}
+async function rentConfirmEdit(title, oldRec, newData, fields) {
+  const diff = fields.filter(([k, , kind]) => k in newData).map(([k, label, kind]) => ({ label, kind, a: rentFieldNorm(kind, oldRec[k]), b: rentFieldNorm(kind, newData[k]) }))
+    .filter(d => d.a !== d.b);
+  if (!diff.length) { showToast('ไม่มีข้อมูลที่เปลี่ยนแปลง', 'info'); return false; }
+  return confirmModal({ title: esc(title), danger: false, icon: 'alert-triangle', confirmText: 'ยืนยันแก้ไข', confirmIcon: 'check',
+    message: `<p class="mb-2">กรุณาตรวจสอบข้อมูลที่จะแก้ไข (${diff.length} รายการ)</p>
+      <div class="rounded-2xl border border-slate-100 overflow-hidden"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500"><tr><th class="text-left px-3 py-1.5">ข้อมูล</th><th class="text-left px-3 py-1.5">เดิม</th><th class="text-left px-3 py-1.5">ใหม่</th></tr></thead>
+      <tbody class="divide-y divide-slate-100">${diff.map(d => `<tr><td class="px-3 py-1.5 text-slate-600">${esc(d.label)}</td><td class="px-3 py-1.5 text-slate-400 line-through decoration-blush-300">${rentFieldText(d.kind, d.a, oldRec)}</td>
+        <td class="px-3 py-1.5 font-medium text-slate-800">${rentFieldText(d.kind, d.b, newData.position_type ? newData : oldRec)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="text-xs text-slate-400 mt-2">การแก้ไขจะถูกบันทึกใน Audit Log</p>` });
+}
+
+/* ---------- แท็บ: ผู้มีสิทธิ์ (รายชื่อผู้มีสิทธิ์ทั้งหมดของปีงบ + แก้ไข) ---------- */
+function rentRenderEligible(body, el) {
+  const today = calToday(), soon = calAddDays(today, 60), months = rentMonths(Rg.fy);
+  const paidOf = (e) => months.reduce((a, mo) => a + (+(rentClaim(e.id, mo.y, mo.m)?.amount || 0)), 0);
+  const rows = rentRows().map(r => ({ ...r, id: r.e.id, full_name: r.p.full_name, position_title: r.p.position_title, unit_name: r.p.unit_name, order_no: r.e.order_no, address: r.e.address, _paid: paidOf(r.e) }));
+  body.innerHTML = `<div class="flex flex-wrap items-center gap-2 mb-3"><p class="text-sm text-slate-500 flex-1">ผู้มีสิทธิ์เบิกค่าเช่าบ้าน ปีงบประมาณ ${Rg.fy} ทั้งหมด ${rows.length} คน · กดแก้ไขเพื่อปรับสิทธิ์หรือข้อมูลบุคลากร (ระบบจะให้ยืนยันก่อนบันทึก)</p>
+      <button class="btn btn-primary" data-rg-act="add-ent">${ic('user-plus')} เพิ่มผู้มีสิทธิ์</button></div><div id="rgEligible"></div>`;
+  const actions = (r) => `<button class="btn-icon" data-el-ent="${r.e.id}" title="แก้ไขสิทธิ์">${ic('pencil')}</button>
+    <button class="btn-icon" data-el-person="${r.p.id}" title="แก้ไขข้อมูลบุคลากร">${ic('user-cog')}</button>
+    <button class="btn-icon" data-el-print="${r.e.id}" title="พิมพ์ทะเบียนรายบุคคล">${ic('printer')}</button>`;
+  const contract = (e) => !e.contract_end ? '<span class="text-slate-400">-</span>'
+    : `${formatThaiDate(calDate(e.contract_end))}${e.contract_end < today ? ` <span class="badge bg-blush-100 text-blush-500">หมดแล้ว</span>` : e.contract_end <= soon ? ` <span class="badge bg-cream-100 text-cream-600">ใกล้หมด</span>` : ''}`;
+  const period = (e) => `${formatThaiDate(calDate(e.start_date))}${e.end_date ? ` – ${formatThaiDate(calDate(e.end_date))}` : ''}${e.end_date && e.end_date < today ? ' <span class="badge bg-slate-100 text-slate-500">สิ้นสุดแล้ว</span>' : ''}`;
+  const table = createDataTable($('#rgEligible', body), {
+    pageSize: 15, searchKeys: ['full_name', 'position_title', 'unit_name', 'order_no', 'address'], searchPlaceholder: 'ค้นหาชื่อ ตำแหน่ง สังกัด คำสั่ง ที่อยู่...',
+    filters: [
+      { key: 'housing', label: 'ทุกประเภท', options: Object.entries(RENT_HOUSING).map(([k, l]) => ({ value: k, label: l })), match: (r, v) => r.e.housing_type === v },
+      { key: 'state', label: 'ทุกสถานะ', options: [{ value: 'active', label: 'ยังมีสิทธิ์อยู่' }, { value: 'ended', label: 'สิ้นสุดสิทธิ์แล้ว' }, { value: 'contract', label: 'สัญญาหมด/ใกล้หมด (60 วัน)' }],
+        match: (r, v) => v === 'active' ? !(r.e.end_date && r.e.end_date < today) : v === 'ended' ? !!(r.e.end_date && r.e.end_date < today) : !!(r.e.contract_end && r.e.contract_end <= soon) },
+    ],
+    columns: [
+      { key: 'full_name', label: 'ชื่อ-สกุล', render: r => `<div class="font-medium text-slate-700">${esc(r.p.full_name)}</div><div class="text-xs text-slate-400 max-w-[15rem]">${esc(rentPositionText(r.p) || r.p.unit_name || '')}</div>` },
+      { key: 'start', label: 'ช่วงที่มีสิทธิ์', class: 'whitespace-nowrap', render: r => `<div class="text-sm text-slate-600">${period(r.e)}</div><div class="text-xs text-slate-400">${RENT_HOUSING[r.e.housing_type]}</div>` },
+      { key: 'limit', label: 'สิทธิ์/เดือน', class: 'whitespace-nowrap', render: r => `<div class="tabular-nums font-medium text-slate-700">${rentMoney(rentLimit(r.e))}</div><div class="text-xs text-slate-400">อัตรา ${rentMoney(r.e.rate_cap)}${+r.e.monthly_rent ? ` · ค่าเช่า ${rentMoney(r.e.monthly_rent)}` : ''}</div>` },
+      { key: 'contract', label: 'สัญญาสิ้นสุด', class: 'whitespace-nowrap', render: r => `<div class="text-sm">${contract(r.e)}</div>` },
+      { key: 'order_no', label: 'คำสั่ง', render: r => `<div class="text-xs text-slate-600 max-w-[10rem]">${esc(r.e.order_no || '-')}</div>` },
+      { key: '_paid', label: 'เบิกแล้วปีนี้', class: 'whitespace-nowrap', render: r => `<span class="tabular-nums">${rentMoney(r._paid)}</span>` },
+    ],
+    actions, emptyText: `ยังไม่มีผู้มีสิทธิ์ในปีงบประมาณ ${Rg.fy}`,
+  });
+  table.setRows(rows);
+  body.onclick = (ev) => {
+    if (ev.target.closest('[data-rg-act="add-ent"]')) { rentPickPerson(el); return; }
+    const a = ev.target.closest('[data-el-ent]'); if (a) { rentOpenEnt(Rg.ents.find(x => x.id === a.dataset.elEnt), null, el); return; }
+    const b = ev.target.closest('[data-el-person]'); if (b) { rentOpenPerson(rentPerson(b.dataset.elPerson), el); return; }
+    const c = ev.target.closest('[data-el-print]'); if (c) rentPrint('person', [c.dataset.elPrint], 'print');
+  };
+}
+
 /* ---------- เลือกบุคลากรเพื่อเพิ่มสิทธิ์ ---------- */
 function rentPickPerson(el) {
   const has = new Set(Rg.ents.map(e => e.person_id));
@@ -5382,6 +5462,7 @@ function rentOpenEnt(ent, person, el) {
     if (!(trvNum(data.rate_cap) > 0)) { showToast('กรุณาระบุสิทธิ์เบิก (เดือนละไม่เกิน)', 'warning'); F.rate_cap.focus(); return; }
     if (rate.ok && trvNum(data.rate_cap) > rate.rate && !(await confirmModal({ title: 'อัตราสูงกว่าบัญชี', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
       message: `อัตราที่กรอก (${rentMoney(data.rate_cap)}) สูงกว่าบัญชีอัตรา (${rentMoney(rate.rate)}) ต้องการบันทึกต่อหรือไม่?` }))) return;
+    if (ent && !(await rentConfirmEdit(`ยืนยันแก้ไขสิทธิ์ค่าเช่าบ้าน · ${p.full_name}`, ent, data, RENT_ENT_FIELDS))) return;
     const r = await rpcSecure('sfh_rent_ent_save', { p_id: ent?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกสิทธิ์แล้ว' });
     if (r.ok) { m.close(); rentRefresh(el); }
   };
@@ -5403,7 +5484,7 @@ function rentOpenClaim(e, y, m, el) {
         <div class="sm:col-span-2"><label class="label">สถานะ</label><div class="grid grid-cols-2 gap-2">${Object.entries(RENT_STATUS).map(([k, s]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-brand-50 has-[:checked]:text-brand-700 border-slate-200 text-slate-600">
           <input type="radio" name="status" value="${k}" class="sr-only" ${k === (c?.status || 'paid') ? 'checked' : ''}>${s.label}</label>`).join('')}</div></div>
         <div><label class="label">เลขที่ฎีกา/ใบสำคัญ</label><input class="input" name="doc_no" value="${esc(c?.doc_no || '')}"></div>
-        <div><label class="label">วันที่จ่าย</label><input type="date" class="input" name="paid_date" value="${esc(c?.paid_date || '')}"></div>
+        <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" name="paid_date" value="${esc(c?.paid_date || '')}"></div>
         <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(c?.note || '')}"></div>
       </form>${c?.updated_by_name ? `<p class="text-xs text-slate-400 mt-2">บันทึกล่าสุดโดย ${esc(c.updated_by_name)} · ${timeAgo(c.updated_at)}</p>` : ''}`,
     footer: `${c ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button>
@@ -5420,6 +5501,7 @@ function rentOpenClaim(e, y, m, el) {
     if (!(amount > 0)) { showToast('กรุณาระบุจำนวนเงิน', 'warning'); F.amount.focus(); return; }
     if (amount > sg.limit) { showToast(`จำนวนเงินเกินสิทธิ์ (เดือนละไม่เกิน ${rentMoney(sg.limit)} บาท)`, 'warning'); return; }
     const data = { amount, status: F.status.value, doc_no: F.doc_no.value.trim() || null, paid_date: F.paid_date.value || null, note: F.note.value.trim() || null };
+    if (c && !(await rentConfirmEdit(`ยืนยันแก้ไขการเบิก${label} · ${p.full_name}`, c, data, RENT_CLAIM_FIELDS))) return;
     const r = await rpcSecure('sfh_rent_claim_save', { p_ent_id: e.id, p_year: y, p_month: m, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกการเบิกแล้ว' });
     if (r.ok) { md.close(); rentRefresh(el); }
   });
@@ -5436,7 +5518,7 @@ function rentOpenBatch(el) {
         <div><label class="label">เดือน</label><select class="input" data-b-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select></div>
         <div><label class="label">สถานะ</label><select class="input" data-b-status>${Object.entries(RENT_STATUS).map(([k, s]) => `<option value="${k}">${s.label}</option>`).join('')}</select></div>
         <div><label class="label">เลขที่ฎีกา (ทุกคน)</label><input class="input" data-b-doc></div>
-        <div><label class="label">วันที่จ่าย</label><input type="date" class="input" data-b-date></div>
+        <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" data-b-date></div>
       </div><div data-b-list></div>`,
     footer: `<span class="mr-auto text-sm text-slate-600" data-b-sum></span><button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>`,
   });
@@ -5554,6 +5636,7 @@ function rentOpenPerson(person, el) {
     if (!v.full_name) { showToast('กรุณากรอกชื่อ-สกุล', 'warning'); F.full_name.focus(); return; }
     if (v.salary_step && !(+v.salary_step > 0)) { showToast('ขั้นเงินเดือนไม่ถูกต้อง', 'warning'); return; }
     if (v.salary && !(+v.salary > 0)) { showToast('เงินเดือนไม่ถูกต้อง', 'warning'); return; }
+    if (person && !(await rentConfirmEdit(`ยืนยันแก้ไขข้อมูลบุคลากร · ${person.full_name}`, person, v, RENT_PERSON_FIELDS))) return;
     const r = await rpcSecure('sfh_rent_person_save', { p_id: person?.id || null, p_data: v }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกบุคลากรแล้ว' });
     if (r.ok) { m.close(); rentRefresh(el); }
   };
@@ -5663,7 +5746,7 @@ function rentBuildPages(kind, entIds, opts = {}) {
     for (let i = 0; i < list.length; i += per) pages.push(list.slice(i, i + per));
     if (!pages.length) pages.push([]);
     root.innerHTML = pages.map((chunk, pi) => `<div class="rg-page port"><h1>รายงานการเบิกจ่ายค่าเช่าบ้าน ประจำเดือน${monthText}</h1><div class="sub">ปีงบประมาณ ${Rg.fy} · ${org}</div>
-      <table><thead><tr><th style="width:8mm">ที่</th><th>ชื่อ-สกุล / ตำแหน่ง</th><th style="width:18mm">สิทธิ์/เดือน</th><th style="width:20mm">จำนวนเงิน</th><th style="width:26mm">เลขที่ฎีกา/ใบสำคัญ</th><th style="width:20mm">วันที่จ่าย</th><th style="width:20mm">สถานะ</th><th style="width:18mm">หมายเหตุ</th></tr></thead><tbody>
+      <table><thead><tr><th style="width:8mm">ที่</th><th>ชื่อ-สกุล / ตำแหน่ง</th><th style="width:18mm">สิทธิ์/เดือน</th><th style="width:20mm">จำนวนเงิน</th><th style="width:26mm">เลขที่ฎีกา/ใบสำคัญ</th><th style="width:22mm">วันที่วางฎีกา</th><th style="width:20mm">สถานะ</th><th style="width:18mm">หมายเหตุ</th></tr></thead><tbody>
         ${chunk.map((r, i) => `<tr><td class="n" style="text-align:center">${pi * per + i + 1}</td><td>${esc(r.p.full_name)}<div style="color:#6b7280;font-size:9.5px">${esc(rentPositionText(r.p) || r.p.unit_name || '')}</div></td>
           <td class="n">${rentMoney(rentLimit(r.e))}</td><td class="n" style="font-weight:500">${r.c ? rentMoney(r.c.amount) : ''}</td><td>${esc(r.c?.doc_no || '')}</td>
           <td>${r.c?.paid_date ? formatThaiDate(calDate(r.c.paid_date)) : ''}</td><td style="text-align:center">${r.c ? RENT_STATUS[r.c.status].label : 'ยังไม่บันทึก'}</td><td>${esc(r.c?.note || '')}</td></tr>`).join('')}
@@ -5694,7 +5777,7 @@ function rentBuildPages(kind, entIds, opts = {}) {
       <b>มีสิทธิ์ตั้งแต่</b><span>${formatThaiDate(calDate(e.start_date))}${e.end_date ? ` ถึง ${formatThaiDate(calDate(e.end_date))}` : ''}</span><b>คำสั่ง</b><span>${esc(e.order_no || '-')}</span>
       <b>ค่าเช่าจริง/เดือน</b><span>${+e.monthly_rent ? rentMoney(e.monthly_rent) + ' บาท' : '-'}</span><b>สิทธิ์เบิก/เดือน</b><span>${rentMoney(rentLimit(e))} บาท</span>
       <b>สัญญาเช่า</b><span>${e.contract_start ? formatThaiDate(calDate(e.contract_start)) : '-'} – ${e.contract_end ? formatThaiDate(calDate(e.contract_end)) : '-'}</span><b>ที่อยู่</b><span>${esc(e.address || '-')}</span></div>
-    <table><thead><tr><th style="width:24mm">เดือน</th><th style="width:24mm">จำนวนเงิน</th><th style="width:26mm">ยอดสะสม</th><th>เลขที่ฎีกา/ใบสำคัญ</th><th style="width:24mm">วันที่จ่าย</th><th style="width:16mm">สถานะ</th><th>หมายเหตุ</th></tr></thead><tbody>
+    <table><thead><tr><th style="width:24mm">เดือน</th><th style="width:24mm">จำนวนเงิน</th><th style="width:26mm">ยอดสะสม</th><th>เลขที่ฎีกา/ใบสำคัญ</th><th style="width:24mm">วันที่วางฎีกา</th><th style="width:16mm">สถานะ</th><th>หมายเหตุ</th></tr></thead><tbody>
       ${months.map(mo => { const c = rentClaim(e.id, mo.y, mo.m), cov = rentCovered(e, mo.y, mo.m); if (c) cum += +c.amount;
         return `<tr><td>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</td><td class="n">${c ? rentMoney(c.amount) : cov ? '' : '–'}</td><td class="n">${c ? rentMoney(cum) : ''}</td><td>${esc(c?.doc_no || '')}</td>
           <td>${c?.paid_date ? formatThaiDate(calDate(c.paid_date)) : ''}</td><td style="text-align:center">${c ? RENT_STATUS[c.status].label : ''}</td><td>${esc(c?.note || '')}</td></tr>`; }).join('')}
