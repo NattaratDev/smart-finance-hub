@@ -1273,6 +1273,15 @@ function defaultPage() {
   if (!isLoggedIn()) return 'home';
   return State.menus.some(m => m.menu_key === 'dashboard') ? 'dashboard' : 'home';
 }
+/** สถานะย่อยของหน้า (ทะเบียน/แท็บ/ปี) เก็บใน query ของ hash เช่น #/register?v=tuition&tab=family
+ *  → รีเฟรชแล้วกลับมาที่เดิม · ใช้ replaceState จึงไม่เกิด hashchange (ไม่โหลดหน้าใหม่) */
+function pageState(key) { const q = location.hash.split('?')[1]; return q ? new URLSearchParams(q).get(key) : null; }
+function setPageState(values) {
+  const [base, q] = location.hash.split('?'), p = new URLSearchParams(q || '');
+  Object.entries(values).forEach(([k, v]) => (v == null || v === '' ? p.delete(k) : p.set(k, String(v))));
+  const next = base + (p.toString() ? '?' + p.toString() : '');
+  if (next !== location.hash) history.replaceState(null, '', next);
+}
 function navigate(key, replace = false) {
   const h = '#/' + key;
   if (location.hash === h) { route(); return; }
@@ -3769,6 +3778,9 @@ function calItemCard(it) {
 async function renderCalendar(el, mod) {
   const now = new Date();
   Object.assign(Cal, { month: new Date(now.getFullYear(), now.getMonth(), 1), sel: calToday(), types: new Set(Object.keys(CAL_TYPES)), person: '', mine: false, users: null, docs: null });
+  if (['calendar', 'task', 'acting', 'absence', 'activity'].includes(pageState('tab'))) Cal.tab = pageState('tab');
+  if (['month', 'list'].includes(pageState('view'))) Cal.view = pageState('view');
+  if (/^\d{4}-\d{2}$/.test(pageState('m') || '')) { const [yy, mm] = pageState('m').split('-').map(Number); Cal.month = new Date(yy, mm - 1, 1); if (calKey(Cal.month).slice(0, 7) !== Cal.sel.slice(0, 7)) Cal.sel = calKey(Cal.month); }
   el.innerHTML = pageHeader({
     title: mod?.name || 'ปฏิทินกองคลัง', icon: 'calendar-days', tone: 'lilac',
     subtitle: 'กิจกรรม งานที่ผู้บริหารมอบหมาย การรักษาราชการแทน และผู้ไม่อยู่ปฏิบัติงาน – ทุกคนติดตามความเคลื่อนไหวได้',
@@ -3826,6 +3838,7 @@ async function renderCalendar(el, mod) {
   };
 }
 function calRender(el) {
+  setPageState({ tab: Cal.tab, view: Cal.tab === 'calendar' ? Cal.view : null, m: Cal.tab === 'calendar' ? calKey(Cal.month).slice(0, 7) : null });
   $$('[data-cal-tab]', el).forEach(b => {
     const on = b.dataset.calTab === Cal.tab;
     b.setAttribute('aria-selected', on);
@@ -4591,10 +4604,12 @@ async function renderTravel(el, mod) {
   if (!(await trvLoadSets())) { $('#trvBody', el).innerHTML = errorState('โหลดอัตราไม่สำเร็จ', 'กรุณารันไฟล์ module_travel.sql'); return; }
   if (!Trv.sets.length) { $('#trvBody', el).innerHTML = errorState('ยังไม่มีชุดอัตรา', 'กรุณารันไฟล์ module_travel.sql หรือให้ผู้ดูแลเพิ่มชุดอัตรา'); return; }
   if (!Trv.trip) Trv.trip = trvNewTrip();
+  if (['calc', 'quick', 'rates'].includes(pageState('tab'))) Trv.tab = pageState('tab');
   el.onclick = (e) => { const t = e.target.closest('[data-trv-tab]'); if (t) { Trv.tab = t.dataset.trvTab; trvRenderTab(el); } };
   trvRenderTab(el);
 }
 function trvRenderTab(el) {
+  setPageState({ tab: Trv.tab });
   $$('[data-trv-tab]', el).forEach(b => {
     const on = b.dataset.trvTab === Trv.tab;
     b.setAttribute('aria-selected', on);
@@ -5189,7 +5204,11 @@ function rentStats(rows) {
 }
 
 /* ---------- หน้ารวมทะเบียน ---------- */
-async function renderRegister(el, mod) {
+async function renderRegister(el, mod, menu) {
+  // เปิดจาก router (รีเฟรช/ลิงก์) → กลับไปทะเบียนเดิม · กดปุ่ม "ทะเบียนทั้งหมด" → หน้ารวม
+  if (menu && pageState('v') === 'rent' && hasPermission('register.manage_rent')) return rentOpen(el, mod);
+  if (menu && pageState('v') === 'tuition' && hasPermission('register.manage_tuition')) return eduOpen(el, mod);
+  setPageState({ v: null, tab: null, fy: null, ay: null });
   Rg.view = 'hub';
   el.onclick = (e) => {
     const c = e.target.closest('[data-rg-open]');
@@ -5212,7 +5231,10 @@ async function renderRegister(el, mod) {
 /* ---------- ทะเบียนคุมเบิกค่าเช่าบ้าน ---------- */
 async function rentOpen(el, mod) {
   if (!requirePermission('register.manage_rent')) return;
-  Rg.view = 'rent'; Rg.fy = Rg.fy || thaiFiscalYear(new Date()); Rg.tab = Rg.tab || 'register';
+  Rg.view = 'rent';
+  if (+pageState('fy') > 2500) Rg.fy = +pageState('fy');
+  if (['register', 'eligible', 'people', 'rates'].includes(pageState('tab'))) Rg.tab = pageState('tab');
+  Rg.fy = Rg.fy || thaiFiscalYear(new Date()); Rg.tab = Rg.tab || 'register';
   el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-rg-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
     + pageHeader({ title: 'ทะเบียนคุมเบิกค่าเช่าบ้าน', icon: 'home', tone: 'brand', subtitle: 'ตามระเบียบกระทรวงมหาดไทยว่าด้วยค่าเช่าบ้านของข้าราชการส่วนท้องถิ่น · ข้อมูลส่วนบุคคล (PDPA)',
       actions: `<label class="flex items-center gap-2 text-sm text-slate-600">ปีงบประมาณ <select class="input !w-auto !py-2" data-rg-fy></select></label>` })
@@ -5230,6 +5252,7 @@ async function rentOpen(el, mod) {
   rentRender(el);
 }
 function rentRender(el) {
+  setPageState({ v: 'rent', tab: Rg.tab, fy: Rg.fy, ay: null });
   const cur = thaiFiscalYear(new Date());
   const years = [...new Set([...Rg.years, cur - 1, cur, cur + 1, Rg.fy])].sort((a, b) => b - a);
   $('[data-rg-fy]', el).innerHTML = years.map(y => `<option value="${y}" ${y === Rg.fy ? 'selected' : ''}>${y}</option>`).join('');
@@ -5921,6 +5944,8 @@ const eduRefresh = async (el) => { if (await eduLoad({ loader: false })) eduRend
 /* ---------- หน้าหลัก ---------- */
 async function eduOpen(el, mod) {
   if (!requirePermission('register.manage_tuition')) return;
+  if (+pageState('ay') > 2500) Ed.ay = +pageState('ay');
+  if (['register', 'family', 'rates'].includes(pageState('tab'))) Ed.tab = pageState('tab');
   Ed.ay = Ed.ay || eduCurrentAY(); Ed.tab = Ed.tab || 'register';
   el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-ed-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
     + pageHeader({ title: 'ทะเบียนคุมเบิกค่าเล่าเรียนบุตร', icon: 'graduation-cap', tone: 'mint', subtitle: 'เงินสวัสดิการเกี่ยวกับการศึกษาบุตร ตามระเบียบ มท. พ.ศ. 2563 · ข้อมูลส่วนบุคคล (PDPA)',
@@ -5939,6 +5964,7 @@ async function eduOpen(el, mod) {
   eduRender(el);
 }
 function eduRender(el) {
+  setPageState({ v: 'tuition', tab: Ed.tab, ay: Ed.ay, fy: null });
   const cur = eduCurrentAY(), years = [...new Set([...Ed.years, cur - 1, cur, cur + 1, Ed.ay])].sort((a, b) => b - a);
   $('[data-ed-ay]', el).innerHTML = years.map(y => `<option value="${y}" ${y === Ed.ay ? 'selected' : ''}>${y}</option>`).join('');
   $$('[data-ed-tab]', el).forEach(b => {
@@ -6913,11 +6939,13 @@ async function renderPayroll(el, mod) {
     if (s) { s.checked ? PM.selected.add(s.dataset.pmSel) : PM.selected.delete(s.dataset.pmSel); pmUpdateSel(el); return; }
     payrollOnChange(el, e);
   };
+  if (['periods', 'manual'].includes(pageState('tab'))) Payroll.tab = pageState('tab');
   await payrollSwitchTab(el, Payroll.tab || 'periods');
 }
 /** สลับแท็บ: งวดเงินเดือน (นำเข้า Excel) / สลิปแบบ Manual */
 async function payrollSwitchTab(el, tab) {
   Payroll.tab = tab;
+  setPageState({ tab });
   $$('[data-pr-tab]', el).forEach(b => {
     const on = b.dataset.prTab === tab;
     b.setAttribute('aria-selected', on);
