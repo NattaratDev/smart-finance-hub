@@ -295,3 +295,97 @@ grant execute on function public.sfh_ins_policy_delete(text, uuid)      to anon,
 grant execute on function public.sfh_ins_claim_save(text, uuid, jsonb)  to anon, authenticated;
 grant execute on function public.sfh_ins_claim_delete(text, uuid)       to anon, authenticated;
 grant execute on function public.sfh_ins_log(text, text, jsonb)         to anon, authenticated;
+
+
+-- =====================================================================
+-- 5) ภาษีรถประจำปี (ติดตามการต่ออายุภาษีรถ) – เพิ่มเติม
+--    1 แถว = การต่อภาษี 1 ครั้ง · due_date = วันสิ้นอายุภาษี (ตามป้ายวงกลม/ใบเสร็จ)
+-- =====================================================================
+create table if not exists public.ins_vehicle_taxes (
+  id               uuid primary key default gen_random_uuid(),
+  asset_id         uuid not null references public.ins_assets(id) on delete cascade,
+  org_id           uuid,
+  due_date         date not null,        -- ภาษีมีผลถึงวันที่ (วันสิ้นอายุภาษี)
+  paid_date        date,                 -- วันที่ชำระภาษี
+  amount           numeric(12,2) not null default 0 check (amount >= 0),   -- ค่าภาษี (+ ค่าธรรมเนียม)
+  receipt_no       text,                 -- เลขที่ใบเสร็จ (สำนักงานขนส่ง)
+  inspection_date  date,                 -- วันที่ตรวจสภาพรถ (ตรอ.) ถ้ามี
+  pay_status       text not null default 'pending' check (pay_status in ('pending','paid')),
+  doc_no           text,                 -- เลขที่ฎีกา
+  doc_date         date,                 -- วันที่วางฎีกา
+  note             text,
+  created_by       uuid,
+  updated_by_name  text,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists idx_ins_vehicle_taxes_asset on public.ins_vehicle_taxes(asset_id, due_date);
+drop trigger if exists trg_ins_vehicle_taxes_updated_at on public.ins_vehicle_taxes;
+create trigger trg_ins_vehicle_taxes_updated_at before update on public.ins_vehicle_taxes
+  for each row execute function public.sfh_touch_updated_at();
+
+-- รายการทั้งหมด (เพิ่ม taxes)
+create or replace function public.sfh_ins_list(p_token text)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_super boolean;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  v_super := public.sfh_is_super(v_user);
+  return jsonb_build_object(
+    'assets',   coalesce((select jsonb_agg(to_jsonb(a) order by a.asset_type, a.name) from public.ins_assets a where v_super or a.org_id = v_user.org_id), '[]'::jsonb),
+    'policies', coalesce((select jsonb_agg(to_jsonb(p) order by p.end_date desc) from public.ins_policies p where v_super or p.org_id = v_user.org_id), '[]'::jsonb),
+    'claims',   coalesce((select jsonb_agg(to_jsonb(c) order by c.incident_date desc) from public.ins_claims c where v_super or c.org_id = v_user.org_id), '[]'::jsonb),
+    'taxes',    coalesce((select jsonb_agg(to_jsonb(t) order by t.due_date desc) from public.ins_vehicle_taxes t where v_super or t.org_id = v_user.org_id), '[]'::jsonb));
+end $$;
+
+drop function if exists public.sfh_ins_tax_save(text, uuid, jsonb);
+drop function if exists public.sfh_ins_tax_delete(text, uuid);
+
+create function public.sfh_ins_tax_save(p_token text, p_id uuid, p_data jsonb)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_asset public.ins_assets%rowtype; v_row public.ins_vehicle_taxes%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  select * into v_asset from public.ins_assets where id = (p_data->>'asset_id')::uuid;
+  if not found then raise exception 'ไม่พบรถ'; end if;
+  if v_asset.org_id is distinct from v_user.org_id and not public.sfh_is_super(v_user) then raise exception 'FORBIDDEN: org'; end if;
+  if v_asset.asset_type <> 'vehicle' then raise exception 'บันทึกภาษีได้เฉพาะรถยนต์/ยานพาหนะ'; end if;
+  if nullif(p_data->>'due_date', '') is null then raise exception 'กรุณาระบุวันสิ้นอายุภาษี'; end if;
+  if exists (select 1 from public.ins_vehicle_taxes where asset_id = v_asset.id and due_date = (p_data->>'due_date')::date and id is distinct from p_id) then
+    raise exception 'มีรายการภาษีที่สิ้นอายุวันที่นี้แล้ว';
+  end if;
+  if p_id is null then
+    insert into public.ins_vehicle_taxes (asset_id, org_id, due_date, paid_date, amount, receipt_no, inspection_date, pay_status, doc_no, doc_date, note, created_by, updated_by_name)
+    values (v_asset.id, v_asset.org_id, (p_data->>'due_date')::date, nullif(p_data->>'paid_date', '')::date, coalesce(nullif(p_data->>'amount', '')::numeric, 0),
+            p_data->>'receipt_no', nullif(p_data->>'inspection_date', '')::date, coalesce(p_data->>'pay_status', 'pending'),
+            p_data->>'doc_no', nullif(p_data->>'doc_date', '')::date, p_data->>'note', v_user.id, v_user.full_name)
+    returning * into v_row;
+  else
+    update public.ins_vehicle_taxes set due_date = (p_data->>'due_date')::date, paid_date = nullif(p_data->>'paid_date', '')::date,
+           amount = coalesce(nullif(p_data->>'amount', '')::numeric, 0), receipt_no = p_data->>'receipt_no', inspection_date = nullif(p_data->>'inspection_date', '')::date,
+           pay_status = coalesce(p_data->>'pay_status', 'pending'), doc_no = p_data->>'doc_no', doc_date = nullif(p_data->>'doc_date', '')::date,
+           note = p_data->>'note', updated_by_name = v_user.full_name
+     where id = p_id and asset_id = v_asset.id returning * into v_row;
+    if not found then raise exception 'ไม่พบรายการภาษี'; end if;
+  end if;
+  perform public.sfh_rent_audit(v_user, case when p_id is null then 'create' else 'update' end, 'ins_vehicle_taxes', v_row.id::text,
+                                jsonb_build_object('asset', v_asset.name, 'plate_no', v_asset.plate_no, 'due_date', v_row.due_date, 'amount', v_row.amount));
+  return to_jsonb(v_row);
+end $$;
+
+create function public.sfh_ins_tax_delete(p_token text, p_id uuid)
+returns void language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_row public.ins_vehicle_taxes%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  select * into v_row from public.ins_vehicle_taxes where id = p_id;
+  if not found then return; end if;
+  if v_row.org_id is distinct from v_user.org_id and not public.sfh_is_super(v_user) then raise exception 'FORBIDDEN: org'; end if;
+  delete from public.ins_vehicle_taxes where id = p_id;
+  perform public.sfh_rent_audit(v_user, 'delete', 'ins_vehicle_taxes', p_id::text, jsonb_build_object('due_date', v_row.due_date));
+end $$;
+
+alter table public.ins_vehicle_taxes enable row level security;
+revoke all on public.ins_vehicle_taxes from anon, authenticated;
+grant execute on function public.sfh_ins_tax_save(text, uuid, jsonb) to anon, authenticated;
+grant execute on function public.sfh_ins_tax_delete(text, uuid)      to anon, authenticated;
