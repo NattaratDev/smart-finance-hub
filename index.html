@@ -5758,9 +5758,16 @@ const RENT_PRINT_CSS = `#rgPrintRoot{position:fixed;left:-10000px;top:0}
   .rg-page th{background:#eef2f7;font-weight:600;text-align:center}.rg-page td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
   .rg-page .tot td{font-weight:600;background:#f8fafc}.rg-page .info{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:.8mm 4mm;margin-bottom:3mm}
   .rg-page .info b{font-weight:500;color:#374151}.rg-page .foot{position:absolute;left:10mm;right:10mm;bottom:5mm;font-size:9.5px;color:#6b7280;display:flex;justify-content:space-between}
-  .rg-page.port .foot{left:14mm;right:14mm}.rg-sign{display:flex;justify-content:flex-end;margin-top:6mm}.rg-sign div{text-align:center;min-width:60mm}
+  .rg-page.port .foot{left:14mm;right:14mm}.rg-sign{display:flex;justify-content:flex-end;margin-top:7mm}.rg-page .rg-sign table{width:auto;border-collapse:collapse}.rg-page .rg-sign td{border:0;padding:1.2mm 0;vertical-align:bottom;font-size:11.5px}.rg-sign .k{text-align:right;padding-right:2mm;white-space:nowrap}.rg-page .rg-sign td.v{width:55mm;border-bottom:1px dotted #374151}.rg-sign .s{padding-left:2mm;white-space:nowrap}
   @media print{body.rg-printing{background:#fff!important;padding:0!important}body.rg-printing>*:not(#rgPrintRoot){display:none!important}
     body.rg-printing #rgPrintRoot{position:static;left:auto}.rg-page{page-break-after:always;break-after:page}.rg-page:last-child{page-break-after:auto;break-after:auto}}`;
+/** ช่องลงนามผู้ควบคุมทะเบียน – เส้นประ 3 บรรทัดยาวเท่ากันและตรงกัน */
+function rgSign(title = 'ผู้ควบคุมทะเบียน') {
+  return `<div class="rg-sign"><table><tbody>
+    <tr><td class="k">ลงชื่อ</td><td class="v"></td><td class="s">${title}</td></tr>
+    <tr><td class="k">(</td><td class="v"></td><td class="s">)</td></tr>
+    <tr><td class="k">ตำแหน่ง</td><td class="v"></td><td class="s"></td></tr></tbody></table></div>`;
+}
 /** สร้างหน้าเอกสาร → คืน { root, orientation } */
 function rentBuildPages(kind, entIds, opts = {}) {
   if (!$('#rg-print-style')) { const st = document.createElement('style'); st.id = 'rg-print-style'; st.textContent = RENT_PRINT_CSS; document.head.appendChild(st); }
@@ -5769,7 +5776,7 @@ function rentBuildPages(kind, entIds, opts = {}) {
   const rows = rentRows().filter(r => !entIds || entIds.includes(r.e.id));
   const title = `ทะเบียนคุมการเบิกจ่ายค่าเช่าบ้าน ปีงบประมาณ ${Rg.fy}`, org = esc(s.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย');
   const sumP = (e) => months.reduce((a, mo) => a + (+(rentClaim(e.id, mo.y, mo.m)?.amount || 0)), 0);
-  const sign = `<div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>`;
+  const sign = `${rgSign()}`;
   if (kind === 'month') {   // รายงานประจำเดือน
     const { y, m } = opts, monthText = `${TH_MONTHS[m - 1]} ${y + 543}`;
     const list = rows.map(r => ({ ...r, c: rentClaim(r.e.id, y, m) })).filter(r => r.c || (opts.unrecorded && rentCovered(r.e, y, m)));
@@ -5799,7 +5806,7 @@ function rentBuildPages(kind, entIds, opts = {}) {
           <td class="n" style="font-weight:600">${rentMoney(sumP(e))}</td></tr>`).join('')}
         ${pi === pages.length - 1 ? `<tr class="tot"><td colspan="3" style="text-align:center">รวม ${rows.length} คน</td>${months.map(mo => `<td class="n">${rentMoney(rows.reduce((a, { e }) => a + (+(rentClaim(e.id, mo.y, mo.m)?.amount || 0)), 0))}</td>`).join('')}<td class="n">${rentMoney(rows.reduce((a, { e }) => a + sumP(e), 0))}</td></tr>` : ''}
       </tbody></table>
-      ${pi === pages.length - 1 ? `<div style="margin-top:2mm;font-size:10px;color:#4b5563">ตัวเลขสีน้ำตาล = รอเบิก · "–" = ไม่อยู่ในช่วงที่มีสิทธิ์</div><div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>` : ''}
+      ${pi === pages.length - 1 ? `<div style="margin-top:2mm;font-size:10px;color:#4b5563">ตัวเลขสีน้ำตาล = รอเบิก · "–" = ไม่อยู่ในช่วงที่มีสิทธิ์</div>${rgSign()}` : ''}
       <div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
     return { root, orientation: 'landscape', count: rows.length };
   }
@@ -5815,7 +5822,7 @@ function rentBuildPages(kind, entIds, opts = {}) {
           <td>${c?.paid_date ? formatThaiDate(calDate(c.paid_date)) : ''}</td><td style="text-align:center">${c ? RENT_STATUS[c.status].label : ''}</td><td>${esc(c?.note || '')}</td></tr>`; }).join('')}
       <tr class="tot"><td>รวม</td><td class="n">${rentMoney(sumP(e))}</td><td colspan="5">(${esc(bahtText(sumP(e)))})</td></tr></tbody></table>
     ${e.note ? `<div style="margin-top:2mm">หมายเหตุ: ${esc(e.note)}</div>` : ''}
-    <div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>
+    ${rgSign()}
     <div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>${esc(p.full_name)}</span></div></div>`; }).join('');
   return { root, orientation: 'portrait', count: rows.length };
 }
@@ -6410,7 +6417,7 @@ async function rgOutput(root, orientation, mode, filename) {
   window.addEventListener('afterprint', done);
   setTimeout(() => window.print(), 150);
 }
-const RG_SIGN = '<div class="rg-sign"><div>ลงชื่อ ........................................... ผู้ควบคุมทะเบียน<br>(...........................................)<br>ตำแหน่ง ...........................................</div></div>';
+const RG_SIGN = rgSign();
 async function eduPrint(kind, mode, opts = {}) {
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
   const foot = (pi, n) => `<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${n}</span></div>`;
