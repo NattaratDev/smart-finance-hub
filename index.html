@@ -5115,6 +5115,7 @@ Object.assign(TABLE_LABELS, { rent_people: 'บุคลากร (ค่าเ�
 const REGISTERS = [
   { key: 'rent', name: 'ทะเบียนคุมเบิกค่าเช่าบ้าน', icon: 'home', color: '#3B8FD4', perm: 'register.manage_rent', desc: 'คุมการเบิกค่าเช่าบ้านรายเดือนตามปีงบประมาณ พร้อมเพดานตามบัญชีอัตรา' },
   { key: 'tuition', name: 'ทะเบียนคุมเบิกค่าเล่าเรียนบุตร', icon: 'graduation-cap', color: '#5CC49A', perm: 'register.manage_tuition', desc: 'คุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตรรายภาคเรียนตามปีการศึกษา พร้อมเพดานตามอัตรา' },
+  { key: 'insurance', name: 'ทะเบียนคุมประกันภัย', icon: 'shield-check', color: '#F0A04B', perm: 'register.manage_insurance', desc: 'กรมธรรม์ประกันภัยรถยนต์ อาคารและทรัพย์สิน แจ้งเตือนต่ออายุ คุมเบี้ยประกันและการเคลม' },
 ];
 const RENT_HOUSING = { rent: 'เช่าบ้าน', hire_purchase: 'เช่าซื้อ', loan: 'ผ่อนชำระเงินกู้' };
 const RENT_STATUS = { paid: { label: 'เบิกแล้ว', cls: 'bg-mint-100 text-mint-600' }, pending: { label: 'รอเบิก', cls: 'bg-cream-100 text-cream-600' } };
@@ -5208,11 +5209,12 @@ async function renderRegister(el, mod, menu) {
   // เปิดจาก router (รีเฟรช/ลิงก์) → กลับไปทะเบียนเดิม · กดปุ่ม "ทะเบียนทั้งหมด" → หน้ารวม
   if (menu && pageState('v') === 'rent' && hasPermission('register.manage_rent')) return rentOpen(el, mod);
   if (menu && pageState('v') === 'tuition' && hasPermission('register.manage_tuition')) return eduOpen(el, mod);
+  if (menu && pageState('v') === 'insurance' && hasPermission('register.manage_insurance')) return insOpen(el, mod);
   setPageState({ v: null, tab: null, fy: null, ay: null });
   Rg.view = 'hub';
   el.onclick = (e) => {
     const c = e.target.closest('[data-rg-open]');
-    if (c) { if (c.dataset.rgOpen === 'rent') rentOpen(el, mod); else if (c.dataset.rgOpen === 'tuition') eduOpen(el, mod); return; }
+    if (c) { if (c.dataset.rgOpen === 'rent') rentOpen(el, mod); else if (c.dataset.rgOpen === 'tuition') eduOpen(el, mod); else if (c.dataset.rgOpen === 'insurance') insOpen(el, mod); return; }
   };
   el.innerHTML = pageHeader({ title: mod?.name || 'ทะเบียนคุมต่าง ๆ', icon: 'book-marked', tone: 'cream',
     subtitle: 'ทะเบียนคุมการเบิกจ่ายของบุคลากร · ข้อมูลส่วนบุคคล เข้าถึงได้เฉพาะเจ้าหน้าที่ที่ได้รับสิทธิ์' })
@@ -5363,6 +5365,9 @@ function rentFieldText(kind, v, rec) {
   if (kind === 'ratekey') return esc(eduItem(v)?.name || v);
   if (kind === 'role') return v === 'mother' ? 'มารดา' : 'บิดา';
   if (kind === 'spstatus') return EDU_SPOUSE[v] || esc(v);
+  if (kind === 'instype') return INS_TYPE[v]?.label || esc(v);
+  if (kind === 'poltype') return INS_POLICY[v] || esc(v);
+  if (kind === 'claimst') return INS_CLAIM[v]?.label || esc(v);
   const types = rentSetFor()?.config.types || [];
   if (kind === 'ptype') return esc(types.find(t => t.key === v)?.name || v);
   if (kind === 'plevel') return esc(types.find(t => t.key === rec?.position_type)?.levels.find(l => l.key === v)?.name || v);
@@ -6476,6 +6481,445 @@ async function eduExportExcel() {
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, `ปีการศึกษา ${Ed.ay}`);
   XLSX.writeFile(wb, `ทะเบียนค่าเล่าเรียนบุตร_ปีการศึกษา${Ed.ay}.xlsx`);
   rpcSecure('sfh_edu_log', { p_kind: 'excel', p_details: { academic_year: Ed.ay, count: data.length } }, { loader: false });
+  showToast('ส่งออก Excel แล้ว', 'success');
+}
+/* ---------- ทะเบียนคุมประกันภัย (รถยนต์/ยานพาหนะ อาคารและทรัพย์สิน) ---------- */
+// ตาราง ins_assets / ins_policies / ins_claims ผ่าน RPC sfh_ins_* (ตรวจ token + register.manage_insurance)
+Object.assign(TABLE_LABELS, { ins_assets: 'ทรัพย์สินที่เอาประกัน', ins_policies: 'กรมธรรม์ประกันภัย', ins_claims: 'การเคลมประกันภัย' });
+const INS_TYPE = { vehicle: { label: 'รถยนต์/ยานพาหนะ', icon: 'car' }, building: { label: 'อาคาร', icon: 'building-2' }, other: { label: 'ทรัพย์สินอื่น', icon: 'package' } };
+const INS_POLICY = { compulsory: 'พ.ร.บ. (ภาคบังคับ)', voluntary: 'ภาคสมัครใจ', property: 'อัคคีภัย/ทรัพย์สิน', other: 'อื่น ๆ' };
+const INS_POLICY_SHORT = { compulsory: 'พ.ร.บ.', voluntary: 'สมัครใจ', property: 'ทรัพย์สิน', other: 'อื่น ๆ' };
+const INS_CLAIM = { open: { label: 'กำลังดำเนินการ', cls: 'bg-cream-100 text-cream-600' }, closed: { label: 'ปิดเคลมแล้ว', cls: 'bg-mint-100 text-mint-600' }, rejected: { label: 'ไม่อนุมัติ', cls: 'bg-slate-100 text-slate-500' } };
+const INS_VEHICLE_KINDS = ['รถยนต์นั่ง', 'รถกระบะ', 'รถตู้', 'รถบรรทุก', 'รถบรรทุกขยะ', 'รถบรรทุกน้ำ', 'รถดับเพลิง', 'รถพยาบาล', 'รถจักรยานยนต์', 'รถกระเช้า', 'รถแทรกเตอร์'];
+const INS_ASSET_FIELDS = [['asset_type', 'ประเภท', 'instype'], ['name', 'ชื่อทรัพย์สิน', 'text'], ['vehicle_kind', 'ประเภทรถ', 'text'], ['plate_no', 'เลขทะเบียน', 'text'], ['plate_province', 'จังหวัด', 'text'],
+  ['brand_model', 'ยี่ห้อ/รุ่น', 'text'], ['chassis_no', 'เลขตัวถัง', 'text'], ['engine_no', 'เลขเครื่องยนต์', 'text'], ['asset_code', 'เลขรหัสครุภัณฑ์', 'text'], ['location', 'ที่ตั้ง', 'text'],
+  ['unit_name', 'หน่วยงานรับผิดชอบ', 'text'], ['is_active', 'ยังใช้งาน', 'bool'], ['note', 'หมายเหตุ', 'text']];
+const INS_POLICY_FIELDS = [['policy_type', 'ประเภทกรมธรรม์', 'poltype'], ['coverage_class', 'ชั้นประกัน', 'text'], ['insurer', 'บริษัทผู้รับประกัน', 'text'], ['policy_no', 'เลขที่กรมธรรม์', 'text'],
+  ['start_date', 'เริ่มคุ้มครอง', 'date'], ['end_date', 'สิ้นสุดคุ้มครอง', 'date'], ['sum_insured', 'ทุนประกัน', 'money'], ['premium', 'เบี้ยประกัน', 'money'], ['pay_status', 'สถานะเบิกจ่าย', 'status'],
+  ['doc_no', 'เลขที่ฎีกา', 'text'], ['doc_date', 'วันที่วางฎีกา', 'date'], ['note', 'หมายเหตุ', 'text']];
+const INS_CLAIM_FIELDS = [['policy_id', 'กรมธรรม์', 'text'], ['incident_date', 'วันที่เกิดเหตุ', 'date'], ['description', 'เหตุ/ความเสียหาย', 'text'], ['claim_no', 'เลขที่เคลม', 'text'],
+  ['claim_amount', 'ค่าเสียหายที่เรียกร้อง', 'money'], ['paid_amount', 'บริษัทจ่ายแล้ว', 'money'], ['status', 'สถานะ', 'claimst'], ['note', 'หมายเหตุ', 'text']];
+const Is = { tab: 'policies', assets: [], policies: [], claims: [], filter: '', type: '', state: '', open: new Set() };
+const INS_SOON_DAYS = 60;
+
+const insAsset = (id) => Is.assets.find(a => a.id === id);
+const insPolicy = (id) => Is.policies.find(p => p.id === id);
+const insAssetLabel = (a) => a ? [a.name, a.plate_no ? `${a.plate_no}${a.plate_province ? ' ' + a.plate_province : ''}` : ''].filter(Boolean).join(' · ') : '-';
+/** สถานะกรมธรรม์: active / soon (หมดภายใน 60 วัน) / expired / upcoming */
+function insState(p, today = calToday()) {
+  if (p.end_date < today) return 'expired';
+  if (p.start_date > today) return 'upcoming';
+  return p.end_date <= calAddDays(today, INS_SOON_DAYS) ? 'soon' : 'active';
+}
+const INS_STATE = { active: { label: 'คุ้มครองอยู่', cls: 'bg-mint-100 text-mint-600', icon: 'shield-check' }, soon: { label: 'ใกล้หมดอายุ', cls: 'bg-cream-100 text-cream-600', icon: 'alarm-clock' },
+  expired: { label: 'หมดอายุแล้ว', cls: 'bg-blush-100 text-blush-500', icon: 'shield-off' }, upcoming: { label: 'ยังไม่เริ่ม', cls: 'bg-brand-100 text-brand-600', icon: 'clock' }, none: { label: 'ยังไม่มีกรมธรรม์', cls: 'bg-slate-100 text-slate-500', icon: 'shield-question' } };
+const insStateBadge = (s, extra = '') => { const m = INS_STATE[s]; return `<span class="badge ${m.cls}">${ic(m.icon, 'w-3 h-3')} ${m.label}${extra}</span>`; };
+/** ความคุ้มครองแยกตามประเภทกรมธรรม์: ฉบับที่คุ้มครองวันนี้ (หรือฉบับถัดไป/ฉบับล่าสุดที่หมดแล้ว)
+ *  s: active / soon (ใกล้หมดและยังไม่ต่ออายุ) / upcoming (ยังไม่มีฉบับที่คุ้มครองวันนี้ แต่มีฉบับถัดไป) / expired · renewed = ต่ออายุไว้แล้ว */
+function insCover(assetId, today = calToday()) {
+  const out = {}, pols = Is.policies.filter(p => p.asset_id === assetId);
+  [...new Set(pols.map(p => p.policy_type))].forEach(t => {
+    const list = pols.filter(p => p.policy_type === t);
+    const cur = list.filter(p => p.start_date <= today && today <= p.end_date).sort((a, b) => b.end_date.localeCompare(a.end_date))[0];
+    const next = list.filter(p => p.start_date > today).sort((a, b) => a.start_date.localeCompare(b.start_date))[0];
+    const last = [...list].sort((a, b) => b.end_date.localeCompare(a.end_date))[0];
+    const s = cur ? (insState(cur, today) === 'soon' && !next ? 'soon' : 'active') : next ? 'upcoming' : 'expired';
+    out[t] = { p: cur || next || last, s, renewed: !!(cur && next), next };
+  });
+  return out;
+}
+/** กรมธรรม์ที่ใช้แสดงต่อประเภท (ฉบับที่คุ้มครองวันนี้ หรือฉบับถัดไป/ล่าสุด) */
+function insLatest(assetId) { return Object.fromEntries(Object.entries(insCover(assetId)).map(([k, v]) => [k, v.p])); }
+/** สถานะรวมของทรัพย์สิน: แย่ที่สุดของแต่ละประเภทกรมธรรม์ */
+function insAssetState(a) {
+  const cov = Object.values(insCover(a.id)); if (!cov.length) return 'none';
+  const rank = { expired: 3, soon: 2, upcoming: 1, active: 0 };
+  return cov.map(c => c.s).sort((x, y) => rank[y] - rank[x])[0];
+}
+const insDaysLeft = (p) => calDaysBetween(calToday(), p.end_date);
+
+async function insLoad({ loader = true } = {}) {
+  const r = await rpcSecure('sfh_ins_list', {}, { loader, loaderText: 'กำลังโหลดทะเบียน...', error: 'โหลดทะเบียนไม่สำเร็จ' });
+  if (!r.ok) return false;
+  Object.assign(Is, { assets: r.data.assets || [], policies: r.data.policies || [], claims: r.data.claims || [] });
+  return true;
+}
+const insRefresh = async (el) => { if (await insLoad({ loader: false })) insRender(el); };
+
+async function insOpen(el, mod) {
+  if (!requirePermission('register.manage_insurance')) return;
+  if (['policies', 'alerts', 'assets', 'claims'].includes(pageState('tab'))) Is.tab = pageState('tab');
+  el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-is-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
+    + pageHeader({ title: 'ทะเบียนคุมประกันภัย', icon: 'shield-check', tone: 'cream', subtitle: 'กรมธรรม์ประกันภัยรถยนต์/ยานพาหนะ อาคารและทรัพย์สิน · เบี้ยประกัน การต่ออายุ และการเคลม' })
+    + `<div class="flex gap-1 mb-4 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
+        ${[['policies', 'shield-check', 'ทะเบียนกรมธรรม์'], ['alerts', 'alarm-clock', 'ใกล้หมดอายุ'], ['assets', 'car', 'ทรัพย์สิน'], ['claims', 'file-warning', 'การเคลม']].map(([k, i, l]) =>
+          `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-is-tab="${k}" role="tab">${ic(i, 'w-4 h-4')} ${l}<span data-is-count="${k}"></span></button>`).join('')}
+      </div><div id="isBody">${skeletonCards(1, 'h-96')}</div>`;
+  refreshIcons();
+  el.onclick = (e) => {
+    if (e.target.closest('[data-is-back]')) { renderRegister(el, mod); return; }
+    const t = e.target.closest('[data-is-tab]'); if (t) { Is.tab = t.dataset.isTab; insRender(el); }
+  };
+  el.onchange = null;
+  if (!(await insLoad())) { $('#isBody', el).innerHTML = errorState('โหลดทะเบียนไม่สำเร็จ', 'ตรวจสอบสิทธิ์ register.manage_insurance หรือรันไฟล์ module_register_insurance.sql'); return; }
+  insRender(el);
+}
+function insRender(el) {
+  setPageState({ v: 'insurance', tab: Is.tab, fy: null, ay: null });
+  const alertN = insAlertRows().length;
+  $$('[data-is-tab]', el).forEach(b => {
+    const on = b.dataset.isTab === Is.tab;
+    b.setAttribute('aria-selected', on);
+    b.classList.toggle('bg-gradient-to-r', on); b.classList.toggle('from-cream-400', on); b.classList.toggle('to-blush-300', on);
+    b.classList.toggle('text-white', on); b.classList.toggle('shadow-sm', on); b.classList.toggle('text-slate-600', !on); b.classList.toggle('hover:bg-slate-50', !on);
+    const c = $('[data-is-count]', b); if (c) c.innerHTML = b.dataset.isTab === 'alerts' && alertN ? `<span class="rounded-full px-1.5 text-xs ${on ? 'bg-white/25' : 'bg-blush-100 text-blush-500'}">${alertN}</span>` : '';
+  });
+  const body = $('#isBody', el);
+  body.onclick = body.oninput = body.onchange = null;
+  if (Is.tab === 'policies') insRenderPolicies(body, el);
+  else if (Is.tab === 'alerts') insRenderAlerts(body, el);
+  else if (Is.tab === 'assets') insRenderAssets(body, el);
+  else insRenderClaims(body, el);
+  refreshIcons();
+}
+
+/* ---------- แท็บ: ทะเบียนกรมธรรม์ ---------- */
+function insPolicyRow(p) {
+  const st = insState(p), d = insDaysLeft(p);
+  return `<tr class="bg-white"><td class="!pl-10"><div class="text-sm text-slate-700">${INS_POLICY[p.policy_type]}${p.coverage_class ? ` · ${esc(p.coverage_class)}` : ''}</div><div class="text-[11px] text-slate-400">${esc(p.insurer)}${p.policy_no ? ` · เลขที่ ${esc(p.policy_no)}` : ''}</div></td>
+    <td class="whitespace-nowrap text-sm">${formatThaiDate(calDate(p.start_date))} – ${formatThaiDate(calDate(p.end_date))}<div class="mt-0.5">${insStateBadge(st, st === 'soon' ? ` (${d} วัน)` : '')}</div></td>
+    <td class="text-right tabular-nums">${+p.sum_insured ? rentMoney(p.sum_insured) : '-'}</td><td class="text-right tabular-nums font-medium">${rentMoney(p.premium)}</td>
+    <td class="text-sm">${esc(p.doc_no || '-')}${p.doc_date ? `<div class="text-[11px] text-slate-400">${formatThaiDate(calDate(p.doc_date))}</div>` : ''}<div><span class="badge ${RENT_STATUS[p.pay_status].cls}">${RENT_STATUS[p.pay_status].label}</span></div></td>
+    <td class="text-right whitespace-nowrap"><button class="btn-icon" data-is-renew="${p.id}" title="ต่ออายุ">${ic('refresh-cw')}</button><button class="btn-icon" data-is-pol="${p.id}" title="แก้ไข">${ic('pencil')}</button></td></tr>`;
+}
+function insRenderPolicies(body, el) {
+  const today = calToday(), fy = thaiFiscalYear(new Date()), fyFrom = rentMonthFirst(fy - 544, 10), fyTo = rentMonthLast(fy - 543, 9);
+  const q = Is.filter.trim();
+  let assets = Is.assets.filter(a => (!Is.type || a.asset_type === Is.type) && (!Is.state || insAssetState(a) === Is.state || (Is.state === 'alert' && ['expired', 'soon', 'none'].includes(insAssetState(a)))));
+  if (q) assets = assets.filter(a => (insAssetLabel(a) + ' ' + (a.brand_model || '') + ' ' + (a.asset_code || '') + ' ' + Is.policies.filter(p => p.asset_id === a.id).map(p => p.insurer + ' ' + (p.policy_no || '')).join(' ')).includes(q));
+  const active = Is.assets.filter(a => a.is_active), states = active.map(insAssetState);
+  const premiumFY = Is.policies.filter(p => { const d = p.doc_date || p.start_date; return d >= fyFrom && d <= fyTo; }).reduce((s, p) => s + (+p.premium), 0);
+  const isOpen = (id) => !!q || Is.open.has(id);
+  const assetRow = (a) => { const cov = insCover(a.id), st = insAssetState(a), pols = Is.policies.filter(p => p.asset_id === a.id).sort((x, y) => y.end_date.localeCompare(x.end_date)), open = isOpen(a.id);
+    return `<tr class="bg-slate-50/80 hover:bg-cream-50/60 cursor-pointer" data-is-toggle="${a.id}">
+      <td colspan="2"><div class="flex items-center gap-2"><span class="text-slate-400 transition ${open ? 'rotate-90' : ''}">${ic('chevron-right', 'w-4 h-4')}</span>
+        <span class="w-8 h-8 rounded-xl grid place-items-center bg-cream-100 text-cream-600 shrink-0">${ic(INS_TYPE[a.asset_type].icon, 'w-4 h-4')}</span>
+        <div class="min-w-0"><div class="font-semibold text-slate-800">${esc(insAssetLabel(a))} ${a.is_active ? '' : '<span class="badge bg-slate-100 text-slate-500">เลิกใช้</span>'}</div>
+          <div class="text-[11px] text-slate-500">${esc([a.vehicle_kind || INS_TYPE[a.asset_type].label, a.brand_model, a.unit_name].filter(Boolean).join(' · '))}</div></div></div></td>
+      <td colspan="2"><div class="flex flex-wrap gap-1">${Object.keys(INS_POLICY).filter(k => cov[k]).map(k => { const { p, s, renewed, next } = cov[k];
+        return `<span class="badge ${INS_STATE[s].cls}" title="${esc(INS_POLICY[k])} ${s === 'upcoming' ? 'เริ่ม ' + formatThaiDate(calDate(p.start_date)) : 'ถึง ' + formatThaiDate(calDate(p.end_date))}">${INS_POLICY_SHORT[k]} ${s === 'upcoming' ? 'เริ่ม ' + formatThaiDate(calDate(p.start_date)) : 'ถึง ' + formatThaiDate(calDate(p.end_date))}${renewed ? ` · ต่ออายุแล้วถึง ${formatThaiDate(calDate(next.end_date))}` : ''}</span>`; }).join('') || insStateBadge('none')}</div></td>
+      <td>${insStateBadge(st)}</td><td class="text-right text-xs text-slate-400">${pols.length} ฉบับ</td></tr>
+      ${open ? (pols.map(insPolicyRow).join('') || '') + `<tr class="bg-white"><td colspan="6" class="!pl-10"><div class="flex flex-wrap gap-2"><button class="btn btn-soft btn-sm" data-is-addpol="${a.id}">${ic('plus', 'w-4 h-4')} เพิ่มกรมธรรม์</button>
+        <button class="btn btn-ghost btn-sm" data-is-asset="${a.id}">${ic('pencil', 'w-4 h-4')} แก้ไขข้อมูลทรัพย์สิน</button>${pols.length ? `<button class="btn btn-ghost btn-sm" data-is-addclaim="${a.id}">${ic('file-warning', 'w-4 h-4')} บันทึกการเคลม</button>` : ''}</div></td></tr>` : ''}`; };
+  body.innerHTML = `
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      ${statCard({ label: 'ทรัพย์สินที่ใช้งาน', value: formatNumber(active.length), icon: 'boxes', tone: 'brand', hint: `รถ ${active.filter(a => a.asset_type === 'vehicle').length} · อาคาร/อื่น ${active.filter(a => a.asset_type !== 'vehicle').length}` })}
+      ${statCard({ label: `ใกล้หมดอายุ (${INS_SOON_DAYS} วัน)`, value: formatNumber(states.filter(s => s === 'soon').length), icon: 'alarm-clock', tone: 'cream' })}
+      ${statCard({ label: 'หมดอายุ/ยังไม่มีกรมธรรม์', value: formatNumber(states.filter(s => s === 'expired' || s === 'none').length), icon: 'shield-off', tone: 'blush' })}
+      ${statCard({ label: `เบี้ยประกัน ปีงบ ${fy}`, value: rentMoney(premiumFY), icon: 'banknote', tone: 'mint', hint: 'บาท (ตามวันที่วางฎีกา)' })}
+    </div>
+    <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
+      <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
+        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อ ทะเบียนรถ บริษัทประกัน เลขที่กรมธรรม์..." value="${esc(Is.filter)}" data-is-q></div>
+      <select class="input !w-auto" data-is-type><option value="">ทุกประเภท</option>${Object.entries(INS_TYPE).map(([k, t]) => `<option value="${k}" ${Is.type === k ? 'selected' : ''}>${t.label}</option>`).join('')}</select>
+      <select class="input !w-auto" data-is-state><option value="">ทุกสถานะ</option>${[['alert', 'ต้องดำเนินการ (ใกล้หมด/หมด/ไม่มี)'], ['active', 'คุ้มครองอยู่'], ['soon', 'ใกล้หมดอายุ'], ['expired', 'หมดอายุแล้ว'], ['none', 'ยังไม่มีกรมธรรม์']].map(([k, l]) => `<option value="${k}" ${Is.state === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    </div>
+    <div class="flex flex-wrap gap-2 mb-3">
+      <button class="btn btn-primary" data-is-act="add-asset">${ic('plus')} เพิ่มทรัพย์สิน</button>
+      <button class="btn btn-soft" data-is-act="add-policy" ${Is.assets.length ? '' : 'disabled'}>${ic('shield-plus')} เพิ่มกรมธรรม์</button>
+      <button class="btn btn-ghost" data-is-act="print">${ic('printer')} พิมพ์</button><button class="btn btn-ghost" data-is-act="pdf">${ic('file-down')} PDF</button>
+      <button class="btn btn-ghost" data-is-act="excel" ${Is.policies.length ? '' : 'disabled'}>${ic('file-spreadsheet')} Excel</button>
+      <div class="ml-auto flex gap-1">${eduExpandBtns('is')}</div>
+    </div>
+    ${!Is.assets.length ? `<div class="card">${emptyState('ยังไม่มีทรัพย์สิน · กด "เพิ่มทรัพย์สิน" เพื่อเพิ่มรถยนต์ อาคาร หรือทรัพย์สินที่เอาประกัน', 'shield-check')}</div>` : `
+    <div class="card !p-0 overflow-x-auto"><table class="sfh-table w-full text-sm min-w-[900px]">
+      <thead class="bg-gradient-to-r from-cream-50 via-white to-blush-50 text-slate-500"><tr><th>ทรัพย์สิน / กรมธรรม์</th><th>ระยะเวลาคุ้มครอง</th><th class="text-right">ทุนประกัน</th><th class="text-right">เบี้ยประกัน</th><th>ฎีกา</th><th class="text-right"></th></tr></thead>
+      <tbody class="divide-y divide-slate-100">${assets.map(assetRow).join('') || `<tr><td colspan="6">${emptyState('ไม่พบตามเงื่อนไข', 'search-x')}</td></tr>`}</tbody></table></div>`}
+    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} กดแถวทรัพย์สินเพื่อดูกรมธรรม์ทุกฉบับ · ปุ่ม ${ic('refresh-cw', 'w-3 h-3 inline')} ต่ออายุ = สร้างกรมธรรม์ปีถัดไปจากฉบับเดิม</p>`;
+  body.oninput = debounce((e) => { if (e.target.matches('[data-is-q]')) { Is.filter = e.target.value; const pos = e.target.selectionStart; insRenderPolicies(body, el); refreshIcons(); const q2 = $('[data-is-q]', body); q2.focus(); q2.setSelectionRange(pos, pos); } }, 250);
+  body.onchange = (e) => {
+    if (e.target.matches('[data-is-type]')) { Is.type = e.target.value; insRenderPolicies(body, el); refreshIcons(); }
+    if (e.target.matches('[data-is-state]')) { Is.state = e.target.value; insRenderPolicies(body, el); refreshIcons(); }
+  };
+  body.onclick = (ev) => {
+    const t = (s) => ev.target.closest(s);
+    const rn = t('[data-is-renew]'); if (rn) { insOpenPolicy(null, insPolicy(rn.dataset.isRenew), null, el); return; }
+    const pl = t('[data-is-pol]'); if (pl) { insOpenPolicy(insPolicy(pl.dataset.isPol), null, null, el); return; }
+    const ap = t('[data-is-addpol]'); if (ap) { insOpenPolicy(null, null, ap.dataset.isAddpol, el); return; }
+    const as = t('[data-is-asset]'); if (as) { insOpenAsset(insAsset(as.dataset.isAsset), el); return; }
+    const ac = t('[data-is-addclaim]'); if (ac) { insOpenClaim(null, ac.dataset.isAddclaim, el); return; }
+    const ex = t('[data-is-expand]'); if (ex) { Is.open = new Set(ex.dataset.isExpand === 'all' ? assets.map(a => a.id) : []); insRenderPolicies(body, el); refreshIcons(); return; }
+    const tg = t('[data-is-toggle]'); if (tg) { const id = tg.dataset.isToggle; Is.open.has(id) ? Is.open.delete(id) : Is.open.add(id); insRenderPolicies(body, el); refreshIcons(); return; }
+    const a = t('[data-is-act]'); if (!a) return;
+    if (a.dataset.isAct === 'add-asset') insOpenAsset(null, el);
+    if (a.dataset.isAct === 'add-policy') insOpenPolicy(null, null, null, el);
+    if (a.dataset.isAct === 'print') insPrintMenu('print');
+    if (a.dataset.isAct === 'pdf') insPrintMenu('pdf');
+    if (a.dataset.isAct === 'excel') insExportExcel();
+  };
+}
+
+/* ---------- แท็บ: ใกล้หมดอายุ ---------- */
+/** กรมธรรม์ล่าสุดของแต่ละทรัพย์สิน/ประเภท ที่หมดอายุแล้วหรือจะหมดใน 60 วัน (เฉพาะทรัพย์สินที่ใช้งาน) */
+function insAlertRows() {
+  const rows = [];
+  Is.assets.filter(a => a.is_active).forEach(a => {
+    const cov = insCover(a.id);
+    Object.values(cov).forEach(({ p, s }) => { if (s === 'expired' || s === 'soon' || s === 'upcoming') rows.push({ a, p, s }); });
+    if (!Object.keys(cov).length) rows.push({ a, p: null, s: 'none' });
+  });
+  return rows.sort((x, y) => (x.p?.end_date || '0').localeCompare(y.p?.end_date || '0'));
+}
+function insRenderAlerts(body, el) {
+  const rows = insAlertRows();
+  body.innerHTML = `<p class="text-sm text-slate-500 mb-3">กรมธรรม์ที่จะหมดภายใน ${INS_SOON_DAYS} วันและยังไม่ได้ต่ออายุ, ที่หมดอายุแล้ว, ช่วงที่ไม่มีความคุ้มครอง และทรัพย์สินที่ยังไม่มีกรมธรรม์ (เฉพาะทรัพย์สินที่ใช้งานอยู่)</p>
+    ${rows.length ? `<div class="grid gap-2">${rows.map(({ a, p, s }) => `<div class="card p-3 flex flex-col sm:flex-row sm:items-center gap-2">
+      <div class="flex items-center gap-3 flex-1 min-w-0"><span class="w-10 h-10 rounded-xl grid place-items-center ${INS_STATE[s].cls} shrink-0">${ic(INS_TYPE[a.asset_type].icon, 'w-5 h-5')}</span>
+        <div class="min-w-0"><div class="font-medium text-slate-800 truncate">${esc(insAssetLabel(a))}</div>
+          <div class="text-xs text-slate-500">${p ? `${INS_POLICY[p.policy_type]} · ${esc(p.insurer)} · สิ้นสุด ${formatThaiDate(calDate(p.end_date))}` : 'ยังไม่มีกรมธรรม์ในระบบ'}</div></div></div>
+      <div class="flex items-center gap-2">${insStateBadge(s, p ? (s === 'soon' ? ` (อีก ${insDaysLeft(p)} วัน)` : s === 'expired' ? ` (${-insDaysLeft(p)} วันแล้ว)` : ` – ไม่มีความคุ้มครองถึง ${formatThaiDate(calDate(p.start_date))}`) : '')}
+        ${p && s !== 'upcoming' ? `<button class="btn btn-primary btn-sm" data-is-renew="${p.id}">${ic('refresh-cw', 'w-4 h-4')} ต่ออายุ</button>` : p ? `<button class="btn btn-soft btn-sm" data-is-pol="${p.id}">${ic('pencil', 'w-4 h-4')} ตรวจสอบ</button>` : `<button class="btn btn-primary btn-sm" data-is-addpol="${a.id}">${ic('plus', 'w-4 h-4')} เพิ่มกรมธรรม์</button>`}</div></div>`).join('')}</div>`
+      : `<div class="card">${emptyState('ไม่มีกรมธรรม์ที่ต้องดำเนินการ', 'shield-check')}</div>`}`;
+  body.onclick = (ev) => {
+    const rn = ev.target.closest('[data-is-renew]'); if (rn) { insOpenPolicy(null, insPolicy(rn.dataset.isRenew), null, el); return; }
+    const ap = ev.target.closest('[data-is-addpol]'); if (ap) { insOpenPolicy(null, null, ap.dataset.isAddpol, el); return; }
+    const pl = ev.target.closest('[data-is-pol]'); if (pl) insOpenPolicy(insPolicy(pl.dataset.isPol), null, null, el);
+  };
+}
+
+/* ---------- แท็บ: ทรัพย์สิน ---------- */
+function insRenderAssets(body, el) {
+  body.innerHTML = `<div class="flex justify-end mb-3"><button class="btn btn-primary" data-is-act="add-asset">${ic('plus')} เพิ่มทรัพย์สิน</button></div><div id="isAssets"></div>`;
+  const table = createDataTable($('#isAssets', body), {
+    pageSize: 15, searchKeys: ['name', 'plate_no', 'brand_model', 'asset_code', 'chassis_no', 'location', 'unit_name'], searchPlaceholder: 'ค้นหาชื่อ ทะเบียน ยี่ห้อ เลขครุภัณฑ์ เลขตัวถัง...',
+    filters: [{ key: 'asset_type', label: 'ทุกประเภท', options: Object.entries(INS_TYPE).map(([k, t]) => ({ value: k, label: t.label })) },
+      { key: 'active', label: 'ทุกสถานะ', options: [{ value: '1', label: 'ใช้งานอยู่' }, { value: '0', label: 'เลิกใช้' }], match: (a, v) => String(+!!a.is_active) === v }],
+    columns: [
+      { key: 'name', label: 'ทรัพย์สิน', render: a => `<div class="flex items-center gap-2"><span class="text-cream-600">${ic(INS_TYPE[a.asset_type].icon, 'w-4 h-4')}</span><div><div class="font-medium text-slate-700">${esc(a.name)}</div><div class="text-xs text-slate-400">${esc(a.vehicle_kind || INS_TYPE[a.asset_type].label)}</div></div></div>` },
+      { key: 'plate_no', label: 'ทะเบียน/ที่ตั้ง', render: a => esc(a.asset_type === 'vehicle' ? [a.plate_no, a.plate_province].filter(Boolean).join(' ') || '-' : a.location || '-') },
+      { key: 'brand_model', label: 'ยี่ห้อ/รุ่น · ครุภัณฑ์', render: a => `<div class="text-sm">${esc(a.brand_model || '-')}</div><div class="text-xs text-slate-400">${esc(a.asset_code || '')}</div>` },
+      { key: 'unit_name', label: 'หน่วยงาน', render: a => esc(a.unit_name || '-') },
+      { key: '_st', label: 'ประกัน', render: a => insStateBadge(insAssetState(a)) + (a.is_active ? '' : ' <span class="badge bg-slate-100 text-slate-500">เลิกใช้</span>') },
+    ],
+    actions: (a) => `<button class="btn-icon" data-is-asset="${a.id}" title="แก้ไข">${ic('pencil')}</button><button class="btn-icon" data-is-addpol="${a.id}" title="เพิ่มกรมธรรม์">${ic('shield-plus')}</button>
+      <button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-is-delasset="${a.id}" title="ลบ">${ic('trash-2')}</button>`,
+    emptyText: 'ยังไม่มีทรัพย์สิน',
+  });
+  table.setRows(Is.assets);
+  body.onclick = async (ev) => {
+    if (ev.target.closest('[data-is-act="add-asset"]')) { insOpenAsset(null, el); return; }
+    const as = ev.target.closest('[data-is-asset]'); if (as) { insOpenAsset(insAsset(as.dataset.isAsset), el); return; }
+    const ap = ev.target.closest('[data-is-addpol]'); if (ap) { insOpenPolicy(null, null, ap.dataset.isAddpol, el); return; }
+    const d = ev.target.closest('[data-is-delasset]');
+    if (d) { const a = insAsset(d.dataset.isDelasset), n = Is.policies.filter(p => p.asset_id === a.id).length;
+      if (!(await confirmModal({ title: 'ลบทรัพย์สิน', message: `ลบ <b>${esc(insAssetLabel(a))}</b> ใช่หรือไม่?${n ? `<br><span class="text-xs text-blush-500">กรมธรรม์ ${n} ฉบับ และการเคลมที่เกี่ยวข้องจะถูกลบด้วย · ถ้าเลิกใช้งานแนะนำให้แก้ไขเป็น "เลิกใช้" แทน</span>` : ''}` }))) return;
+      const r = await rpcSecure('sfh_ins_asset_delete', { p_id: a.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบทรัพย์สินแล้ว' });
+      if (r.ok) insRefresh(el); }
+  };
+}
+function insOpenAsset(asset, el) {
+  const a = asset || { asset_type: 'vehicle', is_active: true };
+  const m = openModal({ title: asset ? 'แก้ไขทรัพย์สิน' : 'เพิ่มทรัพย์สิน', icon: 'boxes', size: 'lg',
+    body: `<form class="grid gap-3 sm:grid-cols-2" novalidate>
+      <div class="sm:col-span-2"><label class="label">ประเภท *</label><div class="grid grid-cols-3 gap-2">${Object.entries(INS_TYPE).map(([k, t]) => `<label class="flex items-center justify-center gap-1.5 rounded-2xl border px-2 py-2 text-sm cursor-pointer has-[:checked]:border-cream-300 has-[:checked]:bg-cream-50 has-[:checked]:text-cream-700 border-slate-200 text-slate-600">
+        <input type="radio" name="asset_type" value="${k}" class="sr-only" ${k === a.asset_type ? 'checked' : ''}>${ic(t.icon, 'w-4 h-4')} ${t.label}</label>`).join('')}</div></div>
+      <div class="sm:col-span-2"><label class="label">ชื่อทรัพย์สิน *</label><input class="input" name="name" value="${esc(a.name || '')}" placeholder="เช่น รถยนต์ส่วนกลาง, อาคารสำนักงานเทศบาล"></div>
+      <div data-veh><label class="label">ประเภทรถ</label><input class="input" name="vehicle_kind" value="${esc(a.vehicle_kind || '')}" list="isKinds"><datalist id="isKinds">${INS_VEHICLE_KINDS.map(k => `<option value="${k}">`).join('')}</datalist></div>
+      <div data-veh><label class="label">ยี่ห้อ/รุ่น</label><input class="input" name="brand_model" value="${esc(a.brand_model || '')}"></div>
+      <div data-veh><label class="label">เลขทะเบียน</label><input class="input" name="plate_no" value="${esc(a.plate_no || '')}" placeholder="เช่น กข 1234"></div>
+      <div data-veh><label class="label">จังหวัด</label><input class="input" name="plate_province" value="${esc(a.plate_province || '')}" placeholder="เช่น สุโขทัย"></div>
+      <div data-veh><label class="label">เลขตัวถัง</label><input class="input" name="chassis_no" value="${esc(a.chassis_no || '')}"></div>
+      <div data-veh><label class="label">เลขเครื่องยนต์</label><input class="input" name="engine_no" value="${esc(a.engine_no || '')}"></div>
+      <div class="sm:col-span-2" data-bld><label class="label">ที่ตั้ง</label><input class="input" name="location" value="${esc(a.location || '')}"></div>
+      <div><label class="label">เลขรหัสครุภัณฑ์</label><input class="input" name="asset_code" value="${esc(a.asset_code || '')}"></div>
+      <div><label class="label">หน่วยงานที่รับผิดชอบ</label><input class="input" name="unit_name" value="${esc(a.unit_name || '')}" placeholder="เช่น สำนักปลัด, กองช่าง"></div>
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(a.note || '')}"></div>
+      <div class="sm:col-span-2"><label class="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" class="rounded" name="is_active" ${a.is_active !== false ? 'checked' : ''}> ยังใช้งานอยู่ (เลิกใช้ = ไม่แจ้งเตือนต่ออายุ)</label></div></form>`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  const sync = () => { const v = F.asset_type.value === 'vehicle'; $$('[data-veh]', m.el).forEach(x => x.classList.toggle('hidden', !v)); $$('[data-bld]', m.el).forEach(x => x.classList.toggle('hidden', v)); };
+  m.el.addEventListener('change', sync); sync();
+  $('[data-save]', m.el).onclick = async () => {
+    const v = (k) => String(F[k].value ?? '').trim() || null, veh = F.asset_type.value === 'vehicle';
+    const data = { asset_type: F.asset_type.value, name: v('name'), vehicle_kind: veh ? v('vehicle_kind') : null, plate_no: veh ? v('plate_no') : null, plate_province: veh ? v('plate_province') : null,
+      brand_model: veh ? v('brand_model') : null, chassis_no: veh ? v('chassis_no') : null, engine_no: veh ? v('engine_no') : null, location: veh ? null : v('location'),
+      asset_code: v('asset_code'), unit_name: v('unit_name'), note: v('note'), is_active: F.is_active.checked };
+    if (!data.name) { showToast('กรุณาระบุชื่อทรัพย์สิน', 'warning'); F.name.focus(); return; }
+    if (asset && !(await rentConfirmEdit(`ยืนยันแก้ไขทรัพย์สิน · ${asset.name}`, asset, data, INS_ASSET_FIELDS))) return;
+    const r = await rpcSecure('sfh_ins_asset_save', { p_id: asset?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกทรัพย์สินแล้ว' });
+    if (r.ok) { m.close(); Is.open.add(r.data.id); await insRefresh(el); if (!asset && !(await confirmModal({ title: 'เพิ่มกรมธรรม์', danger: false, icon: 'shield-plus', confirmText: 'เพิ่มกรมธรรม์', cancelText: 'ภายหลัง',
+      message: `ต้องการเพิ่มกรมธรรม์ของ <b>${esc(data.name)}</b> เลยหรือไม่?` }))) return; if (!asset) insOpenPolicy(null, null, r.data.id, el); }
+  };
+}
+
+/* ---------- กรมธรรม์ (เพิ่ม / แก้ไข / ต่ออายุ) ---------- */
+function insOpenPolicy(policy, renewFrom, assetId, el) {
+  const src = policy || renewFrom;
+  const plusYear = (d) => { const x = calDate(d); x.setFullYear(x.getFullYear() + 1); return calKey(x); };
+  const p = policy ? { ...policy } : renewFrom ? { asset_id: renewFrom.asset_id, policy_type: renewFrom.policy_type, coverage_class: renewFrom.coverage_class, insurer: renewFrom.insurer,
+    start_date: renewFrom.end_date, end_date: plusYear(renewFrom.end_date), sum_insured: renewFrom.sum_insured, premium: renewFrom.premium, pay_status: 'pending' }
+    : { asset_id: assetId || '', policy_type: insAsset(assetId)?.asset_type === 'vehicle' || !assetId ? 'compulsory' : 'property', start_date: calToday(), end_date: plusYear(calToday()), pay_status: 'pending' };
+  const assets = [...Is.assets].sort((a, b) => insAssetLabel(a).localeCompare(insAssetLabel(b), 'th'));
+  const claims = policy ? Is.claims.filter(c => c.policy_id === policy.id) : [];
+  const m = openModal({ title: policy ? 'แก้ไขกรมธรรม์' : renewFrom ? 'ต่ออายุกรมธรรม์' : 'เพิ่มกรมธรรม์', icon: renewFrom ? 'refresh-cw' : 'shield-check', size: 'lg',
+    body: `${renewFrom ? `<div class="rounded-2xl bg-cream-50 border border-cream-200 px-3 py-2 mb-3 text-xs text-cream-700">ต่ออายุจากฉบับเดิม ${esc(renewFrom.policy_no || '')} (สิ้นสุด ${formatThaiDate(calDate(renewFrom.end_date))}) · ตรวจสอบเบี้ยประกันและเลขที่กรมธรรม์ใหม่ก่อนบันทึก</div>` : ''}
+      <form class="grid gap-3 sm:grid-cols-2" novalidate>
+      <div class="sm:col-span-2"><label class="label">ทรัพย์สิน *</label><select class="input" name="asset_id" ${src ? 'disabled' : ''}><option value="">– เลือก –</option>${assets.map(a => `<option value="${a.id}" ${a.id === p.asset_id ? 'selected' : ''}>${esc(insAssetLabel(a))}</option>`).join('')}</select></div>
+      <div><label class="label">ประเภทกรมธรรม์ *</label><select class="input" name="policy_type">${Object.entries(INS_POLICY).map(([k, l]) => `<option value="${k}" ${k === p.policy_type ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div data-class><label class="label">ชั้นประกัน</label><input class="input" name="coverage_class" value="${esc(p.coverage_class || '')}" list="isClass" placeholder="เช่น ชั้น 1"><datalist id="isClass"><option value="ชั้น 1"><option value="ชั้น 2+"><option value="ชั้น 2"><option value="ชั้น 3+"><option value="ชั้น 3"></datalist></div>
+      <div class="sm:col-span-2"><label class="label">บริษัทผู้รับประกัน *</label><input class="input" name="insurer" value="${esc(p.insurer || '')}" list="isInsurers"><datalist id="isInsurers">${[...new Set(Is.policies.map(x => x.insurer))].map(x => `<option value="${esc(x)}">`).join('')}</datalist></div>
+      <div class="sm:col-span-2"><label class="label">เลขที่กรมธรรม์</label><input class="input" name="policy_no" value="${esc(p.policy_no || '')}"></div>
+      <div><label class="label">เริ่มคุ้มครอง *</label><input type="date" class="input" name="start_date" value="${esc(p.start_date || '')}"></div>
+      <div><label class="label">สิ้นสุดคุ้มครอง *</label><input type="date" class="input" name="end_date" value="${esc(p.end_date || '')}"></div>
+      <div><label class="label">ทุนประกัน</label><input class="input" inputmode="decimal" name="sum_insured" value="${esc(+p.sum_insured ? p.sum_insured : '')}" placeholder="0.00"></div>
+      <div><label class="label">เบี้ยประกัน (รวมภาษีอากร) *</label><input class="input" inputmode="decimal" name="premium" value="${esc(p.premium ?? '')}" placeholder="0.00"></div>
+      <div class="sm:col-span-2"><label class="label">สถานะเบิกจ่ายเบี้ยประกัน</label><div class="grid grid-cols-2 gap-2">${Object.entries(RENT_STATUS).map(([k, s]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-cream-300 has-[:checked]:bg-cream-50 has-[:checked]:text-cream-700 border-slate-200 text-slate-600">
+        <input type="radio" name="pay_status" value="${k}" class="sr-only" ${k === (p.pay_status || 'pending') ? 'checked' : ''}>${s.label}</label>`).join('')}</div></div>
+      <div><label class="label">เลขที่ฎีกา</label><input class="input" name="doc_no" value="${esc(p.doc_no || '')}"></div>
+      <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" name="doc_date" value="${esc(p.doc_date || '')}"></div>
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(p.note || '')}"></div></form>
+      ${claims.length ? `<div class="mt-4"><div class="text-sm font-medium text-slate-700 mb-1">การเคลมของกรมธรรม์นี้</div>${claims.map(c => `<div class="text-xs text-slate-600 py-1 border-b border-slate-100">${formatThaiDate(calDate(c.incident_date))} · ${esc(c.description)} · <span class="badge ${INS_CLAIM[c.status].cls}">${INS_CLAIM[c.status].label}</span></div>`).join('')}</div>` : ''}`,
+    footer: `${policy ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  const sync = () => $('[data-class]', m.el).classList.toggle('hidden', F.policy_type.value !== 'voluntary');
+  F.policy_type.addEventListener('change', sync); sync();
+  F.start_date.addEventListener('change', () => { if (F.start_date.value && (!F.end_date.value || F.end_date.value <= F.start_date.value)) F.end_date.value = plusYear(F.start_date.value); });
+  $('[data-del]', m.el)?.addEventListener('click', async () => {
+    if (!(await confirmModal({ title: 'ลบกรมธรรม์', message: `ลบกรมธรรม์ ${INS_POLICY[policy.policy_type]} ${esc(policy.policy_no || '')} ของ <b>${esc(insAssetLabel(insAsset(policy.asset_id)))}</b> ใช่หรือไม่?${claims.length ? `<br><span class="text-xs text-blush-500">การเคลม ${claims.length} รายการจะถูกลบด้วย</span>` : ''}` }))) return;
+    const r = await rpcSecure('sfh_ins_policy_delete', { p_id: policy.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบกรมธรรม์แล้ว' });
+    if (r.ok) { m.close(); insRefresh(el); }
+  });
+  $('[data-save]', m.el).onclick = async () => {
+    const v = (k) => String(F[k].value ?? '').trim();
+    const data = { asset_id: src ? p.asset_id : v('asset_id'), policy_type: v('policy_type'), coverage_class: v('policy_type') === 'voluntary' ? v('coverage_class') || null : null, insurer: v('insurer'),
+      policy_no: v('policy_no') || null, start_date: v('start_date'), end_date: v('end_date'), sum_insured: trvNum(v('sum_insured')), premium: trvNum(v('premium')),
+      pay_status: F.pay_status.value, doc_no: v('doc_no') || null, doc_date: v('doc_date') || null, note: v('note') || null };
+    if (!data.asset_id) { showToast('กรุณาเลือกทรัพย์สิน', 'warning'); return; }
+    if (!data.insurer) { showToast('กรุณาระบุบริษัทผู้รับประกัน', 'warning'); F.insurer.focus(); return; }
+    if (!data.start_date || !data.end_date) { showToast('กรุณาระบุวันเริ่มและวันสิ้นสุดคุ้มครอง', 'warning'); return; }
+    if (data.end_date < data.start_date) { showToast('วันสิ้นสุดต้องไม่ก่อนวันเริ่มคุ้มครอง', 'warning'); return; }
+    const overlap = Is.policies.find(x => x.id !== policy?.id && x.asset_id === data.asset_id && x.policy_type === data.policy_type && x.start_date < data.end_date && data.start_date < x.end_date);
+    if (overlap && !(await confirmModal({ title: 'ช่วงคุ้มครองซ้อนกัน', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
+      message: `มีกรมธรรม์${INS_POLICY[data.policy_type]}ของทรัพย์สินนี้ที่คุ้มครองช่วงเดียวกันอยู่แล้ว (${formatThaiDate(calDate(overlap.start_date))} – ${formatThaiDate(calDate(overlap.end_date))}) ต้องการบันทึกต่อหรือไม่?` }))) return;
+    if (policy && !(await rentConfirmEdit(`ยืนยันแก้ไขกรมธรรม์ · ${insAssetLabel(insAsset(policy.asset_id))}`, policy, data, INS_POLICY_FIELDS))) return;
+    const r = await rpcSecure('sfh_ins_policy_save', { p_id: policy?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: renewFrom ? 'ต่ออายุกรมธรรม์แล้ว' : 'บันทึกกรมธรรม์แล้ว' });
+    if (r.ok) { Is.open.add(data.asset_id); m.close(); insRefresh(el); }
+  };
+}
+
+/* ---------- แท็บ: การเคลม ---------- */
+function insRenderClaims(body, el) {
+  body.innerHTML = `<div class="flex justify-end mb-3"><button class="btn btn-primary" data-is-act="add-claim" ${Is.policies.length ? '' : 'disabled'}>${ic('plus')} บันทึกการเคลม</button></div><div id="isClaims"></div>`;
+  const table = createDataTable($('#isClaims', body), {
+    pageSize: 15, searchKeys: ['description', 'claim_no', '_asset', '_insurer'], searchPlaceholder: 'ค้นหาเหตุ เลขที่เคลม ทรัพย์สิน บริษัท...',
+    filters: [{ key: 'status', label: 'ทุกสถานะ', options: Object.entries(INS_CLAIM).map(([k, s]) => ({ value: k, label: s.label })) }],
+    columns: [
+      { key: 'incident_date', label: 'วันที่เกิดเหตุ', class: 'whitespace-nowrap', render: c => formatThaiDate(calDate(c.incident_date)) },
+      { key: '_asset', label: 'ทรัพย์สิน / กรมธรรม์', render: c => `<div class="font-medium text-slate-700">${esc(c._asset)}</div><div class="text-xs text-slate-400">${esc(c._insurer)}</div>` },
+      { key: 'description', label: 'เหตุ/ความเสียหาย', render: c => `<div class="text-sm max-w-xs">${esc(c.description)}</div>${c.claim_no ? `<div class="text-xs text-slate-400">เลขที่เคลม ${esc(c.claim_no)}</div>` : ''}` },
+      { key: 'claim_amount', label: 'เรียกร้อง/จ่ายแล้ว', class: 'whitespace-nowrap text-right', render: c => `<div class="tabular-nums">${rentMoney(c.claim_amount)}</div><div class="text-xs text-mint-600 tabular-nums">${rentMoney(c.paid_amount)}</div>` },
+      { key: 'status', label: 'สถานะ', render: c => `<span class="badge ${INS_CLAIM[c.status].cls}">${INS_CLAIM[c.status].label}</span>` },
+    ],
+    actions: (c) => `<button class="btn-icon" data-is-claim="${c.id}" title="แก้ไข">${ic('pencil')}</button>`, emptyText: 'ยังไม่มีการเคลม',
+  });
+  table.setRows(Is.claims.map(c => { const p = insPolicy(c.policy_id); return { ...c, _asset: insAssetLabel(insAsset(p?.asset_id)), _insurer: p ? `${INS_POLICY[p.policy_type]} · ${p.insurer}${p.policy_no ? ' · ' + p.policy_no : ''}` : '' }; }));
+  body.onclick = (ev) => {
+    if (ev.target.closest('[data-is-act="add-claim"]')) { insOpenClaim(null, null, el); return; }
+    const c = ev.target.closest('[data-is-claim]'); if (c) insOpenClaim(Is.claims.find(x => x.id === c.dataset.isClaim), null, el);
+  };
+}
+function insOpenClaim(claim, assetId, el) {
+  const c = claim || { status: 'open', incident_date: calToday() };
+  const pols = Is.policies.filter(p => !assetId || p.asset_id === assetId).sort((a, b) => b.end_date.localeCompare(a.end_date));
+  const defPol = c.policy_id || pols.find(p => insState(p) !== 'upcoming' && p.start_date <= c.incident_date && c.incident_date <= p.end_date)?.id || pols[0]?.id;
+  const m = openModal({ title: claim ? 'แก้ไขการเคลม' : 'บันทึกการเคลม', icon: 'file-warning', size: 'lg',
+    body: `<form class="grid gap-3 sm:grid-cols-2" novalidate>
+      <div class="sm:col-span-2"><label class="label">กรมธรรม์ *</label><select class="input" name="policy_id">${pols.map(p => `<option value="${p.id}" ${p.id === defPol ? 'selected' : ''}>${esc(insAssetLabel(insAsset(p.asset_id)))} · ${INS_POLICY_SHORT[p.policy_type]} · ${esc(p.insurer)} (${formatThaiDate(calDate(p.start_date))} – ${formatThaiDate(calDate(p.end_date))})</option>`).join('')}</select></div>
+      <div><label class="label">วันที่เกิดเหตุ *</label><input type="date" class="input" name="incident_date" value="${esc(c.incident_date || '')}"></div>
+      <div><label class="label">เลขที่เคลม</label><input class="input" name="claim_no" value="${esc(c.claim_no || '')}"></div>
+      <div class="sm:col-span-2"><label class="label">เหตุ/ความเสียหาย *</label><textarea class="input" rows="2" name="description">${esc(c.description || '')}</textarea></div>
+      <div><label class="label">ค่าเสียหายที่เรียกร้อง</label><input class="input" inputmode="decimal" name="claim_amount" value="${esc(+c.claim_amount ? c.claim_amount : '')}" placeholder="0.00"></div>
+      <div><label class="label">บริษัทจ่ายแล้ว</label><input class="input" inputmode="decimal" name="paid_amount" value="${esc(+c.paid_amount ? c.paid_amount : '')}" placeholder="0.00"></div>
+      <div class="sm:col-span-2"><label class="label">สถานะ</label><select class="input" name="status">${Object.entries(INS_CLAIM).map(([k, s]) => `<option value="${k}" ${k === c.status ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(c.note || '')}"></div></form>`,
+    footer: `${claim ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
+  const F = $('form', m.el).elements;
+  $('[data-del]', m.el)?.addEventListener('click', async () => {
+    if (!(await confirmModal({ title: 'ลบการเคลม', message: `ลบรายการเคลมวันที่ ${formatThaiDate(calDate(claim.incident_date))} ใช่หรือไม่?` }))) return;
+    const r = await rpcSecure('sfh_ins_claim_delete', { p_id: claim.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบรายการแล้ว' });
+    if (r.ok) { m.close(); insRefresh(el); }
+  });
+  $('[data-save]', m.el).onclick = async () => {
+    const v = (k) => String(F[k].value ?? '').trim();
+    const data = { policy_id: v('policy_id'), incident_date: v('incident_date'), description: v('description'), claim_no: v('claim_no') || null,
+      claim_amount: trvNum(v('claim_amount')), paid_amount: trvNum(v('paid_amount')), status: v('status'), note: v('note') || null };
+    if (!data.policy_id) { showToast('กรุณาเลือกกรมธรรม์', 'warning'); return; }
+    if (!data.incident_date) { showToast('กรุณาระบุวันที่เกิดเหตุ', 'warning'); return; }
+    if (!data.description) { showToast('กรุณาระบุเหตุ/ความเสียหาย', 'warning'); F.description.focus(); return; }
+    const pol = insPolicy(data.policy_id);
+    if (pol && (data.incident_date < pol.start_date || data.incident_date > pol.end_date) && !(await confirmModal({ title: 'วันที่เกิดเหตุอยู่นอกช่วงคุ้มครอง', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
+      message: `กรมธรรม์ที่เลือกคุ้มครอง ${formatThaiDate(calDate(pol.start_date))} – ${formatThaiDate(calDate(pol.end_date))} ต้องการบันทึกต่อหรือไม่?` }))) return;
+    if (claim && !(await rentConfirmEdit('ยืนยันแก้ไขการเคลม', claim, data, INS_CLAIM_FIELDS))) return;
+    const r = await rpcSecure('sfh_ins_claim_save', { p_id: claim?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกการเคลมแล้ว' });
+    if (r.ok) { m.close(); insRefresh(el); }
+  };
+}
+
+/* ---------- พิมพ์ / PDF / Excel ---------- */
+function insPrintMenu(mode) {
+  const fyNow = thaiFiscalYear(new Date());
+  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
+    body: `<div class="grid gap-2">
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="current"><div class="font-medium text-slate-700">${ic('shield-check', 'w-4 h-4 inline')} ทะเบียนกรมธรรม์ปัจจุบัน</div><div class="text-xs text-slate-400">A4 แนวนอน · ฉบับล่าสุดของทุกทรัพย์สินแยกตามประเภท</div></button>
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="alerts"><div class="font-medium text-slate-700">${ic('alarm-clock', 'w-4 h-4 inline')} รายการที่ต้องต่ออายุ</div><div class="text-xs text-slate-400">หมดอายุแล้ว / หมดภายใน ${INS_SOON_DAYS} วัน / ยังไม่มีกรมธรรม์</div></button>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('banknote', 'w-4 h-4 inline')} สรุปเบี้ยประกันปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (ถ้าไม่มี ใช้วันเริ่มคุ้มครอง)</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const opts = b.dataset.k === 'fy' ? { fy: +$('[data-fy]', m.el).value } : {}; m.close(); insPrint(b.dataset.k, mode, opts); });
+}
+async function insPrint(kind, mode, opts = {}) {
+  const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
+  const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out.length ? out : [[]]; };
+  let rows, title, filename;
+  if (kind === 'current') {
+    rows = [];
+    [...Is.assets].filter(a => a.is_active).sort((a, b) => a.asset_type.localeCompare(b.asset_type) || insAssetLabel(a).localeCompare(insAssetLabel(b), 'th'))
+      .forEach(a => { const cov = insCover(a.id), keys = Object.keys(INS_POLICY).filter(k => cov[k]); if (!keys.length) rows.push({ a, p: null }); keys.forEach(k => rows.push({ a, p: cov[k].p, s: cov[k].s, renewed: cov[k].renewed })); });
+    title = 'ทะเบียนคุมกรมธรรม์ประกันภัย (ฉบับปัจจุบัน)'; filename = 'ทะเบียนประกันภัย_ปัจจุบัน.pdf';
+  } else if (kind === 'alerts') {
+    rows = insAlertRows().map(({ a, p, s }) => ({ a, p, s }));
+    title = `รายการกรมธรรม์ที่ต้องต่ออายุ (หมดอายุแล้ว/หมดภายใน ${INS_SOON_DAYS} วัน)`; filename = 'ทะเบียนประกันภัย_ต้องต่ออายุ.pdf';
+  } else {
+    const from = rentMonthFirst(opts.fy - 544, 10), to = rentMonthLast(opts.fy - 543, 9);
+    rows = Is.policies.filter(p => { const d = p.doc_date || p.start_date; return d >= from && d <= to; }).sort((x, y) => (x.doc_date || x.start_date).localeCompare(y.doc_date || y.start_date)).map(p => ({ a: insAsset(p.asset_id), p }));
+    title = `สรุปการเบิกจ่ายเบี้ยประกันภัย ปีงบประมาณ ${opts.fy}`; filename = `ทะเบียนประกันภัย_เบี้ยประกันปีงบ${opts.fy}.pdf`;
+  }
+  if (!rows.length) { showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
+  const total = rows.reduce((s, r) => s + (+(r.p?.premium || 0)), 0), per = 16, pages = chunk(rows, per);
+  root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>${title}</h1><div class="sub">${org} · ข้อมูล ณ ${formatThaiDate(new Date(), { long: true })}</div>
+    <table><thead><tr><th style="width:7mm">ที่</th><th>ทรัพย์สิน</th><th style="width:30mm">ประเภทกรมธรรม์</th><th style="width:38mm">บริษัท / เลขที่กรมธรรม์</th><th style="width:40mm">ระยะเวลาคุ้มครอง</th><th style="width:22mm">ทุนประกัน</th><th style="width:20mm">เบี้ยประกัน</th><th style="width:28mm">ฎีกา</th><th style="width:20mm">สถานะ</th></tr></thead><tbody>
+      ${pg.map(({ a, p, s, renewed }, i) => `<tr><td class="n" style="text-align:center">${pi * per + i + 1}</td><td>${esc(insAssetLabel(a))}<div style="color:#6b7280;font-size:9.5px">${esc([a?.vehicle_kind || INS_TYPE[a?.asset_type]?.label, a?.brand_model, a?.asset_code].filter(Boolean).join(' · '))}</div></td>
+        ${p ? `<td>${INS_POLICY[p.policy_type]}${p.coverage_class ? `<div style="font-size:9.5px">${esc(p.coverage_class)}</div>` : ''}</td><td>${esc(p.insurer)}<div style="color:#6b7280;font-size:9.5px">${esc(p.policy_no || '')}</div></td>
+          <td>${formatThaiDate(calDate(p.start_date))} – ${formatThaiDate(calDate(p.end_date))}</td><td class="n">${+p.sum_insured ? rentMoney(p.sum_insured) : '-'}</td><td class="n" style="font-weight:500">${rentMoney(p.premium)}</td>
+          <td style="font-size:10px">${esc(p.doc_no || '')}${p.doc_date ? `<div>${formatThaiDate(calDate(p.doc_date))}</div>` : ''}</td><td style="font-size:10px">${renewed ? 'ต่ออายุแล้ว' : INS_STATE[s || insState(p)].label}</td>`
+          : `<td colspan="7" style="text-align:center;color:#b8456f">ยังไม่มีกรมธรรม์</td>`}</tr>`).join('')}
+      ${pi === pages.length - 1 ? `<tr class="tot"><td colspan="6" style="text-align:center">รวม ${rows.filter(r => r.p).length} ฉบับ</td><td class="n">${rentMoney(total)}</td><td colspan="2">${kind === 'fy' ? `(${esc(bahtText(total))})` : ''}</td></tr>` : ''}
+    </tbody></table>${pi === pages.length - 1 ? RG_SIGN : ''}<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
+  rpcSecure('sfh_ins_log', { p_kind: `${mode}_${kind}`, p_details: { count: rows.length, ...opts } }, { loader: false });
+  await rgOutput(root, 'landscape', mode, filename);
+}
+async function insExportExcel() {
+  let XLSX; try { XLSX = await loadSheetJS(); } catch (e) { showToast(e.message, 'error'); return; }
+  const rows = [...Is.policies].sort((x, y) => insAssetLabel(insAsset(x.asset_id)).localeCompare(insAssetLabel(insAsset(y.asset_id)), 'th') || y.end_date.localeCompare(x.end_date));
+  const head = ['ที่', 'ประเภททรัพย์สิน', 'ทรัพย์สิน', 'ทะเบียน', 'ยี่ห้อ/รุ่น', 'เลขครุภัณฑ์', 'หน่วยงาน', 'ประเภทกรมธรรม์', 'ชั้น', 'บริษัท', 'เลขที่กรมธรรม์', 'เริ่มคุ้มครอง', 'สิ้นสุด', 'ทุนประกัน', 'เบี้ยประกัน', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะเบิกจ่าย', 'สถานะกรมธรรม์'];
+  const data = rows.map((p, i) => { const a = insAsset(p.asset_id) || {};
+    return [i + 1, INS_TYPE[a.asset_type]?.label || '', a.name || '', [a.plate_no, a.plate_province].filter(Boolean).join(' '), a.brand_model || '', a.asset_code || '', a.unit_name || '', INS_POLICY[p.policy_type], p.coverage_class || '',
+      p.insurer, p.policy_no || '', formatThaiDate(calDate(p.start_date)), formatThaiDate(calDate(p.end_date)), +p.sum_insured || null, +p.premium, p.doc_no || '', p.doc_date ? formatThaiDate(calDate(p.doc_date)) : '', RENT_STATUS[p.pay_status].label, INS_STATE[insState(p)].label]; });
+  const ws = XLSX.utils.aoa_to_sheet([['ทะเบียนคุมกรมธรรม์ประกันภัย'], [State.settings.org_name || ''], [], head, ...data]);
+  ws['!cols'] = [5, 14, 26, 14, 18, 16, 16, 18, 8, 24, 18, 13, 13, 12, 12, 16, 13, 12, 14].map(w => ({ wch: w }));
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'กรมธรรม์');
+  XLSX.writeFile(wb, 'ทะเบียนประกันภัย.xlsx');
+  rpcSecure('sfh_ins_log', { p_kind: 'excel', p_details: { count: data.length } }, { loader: false });
   showToast('ส่งออก Excel แล้ว', 'success');
 }
 /* ===== END MODULE: register ===== */
