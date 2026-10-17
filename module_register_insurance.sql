@@ -34,6 +34,7 @@ create table if not exists public.ins_assets (
   asset_code       text,                 -- เลขรหัสครุภัณฑ์
   location         text,                 -- ที่ตั้ง (อาคาร/ทรัพย์สิน)
   unit_name        text,                 -- หน่วยงานที่รับผิดชอบ
+  custodian_name   text,                 -- ชื่อ-สกุล ผู้รับผิดชอบ
   is_active        boolean not null default true,
   note             text,
   created_by       uuid,
@@ -42,6 +43,7 @@ create table if not exists public.ins_assets (
   updated_at       timestamptz not null default now()
 );
 create index if not exists idx_ins_assets_org on public.ins_assets(org_id);
+alter table public.ins_assets add column if not exists custodian_name text;   -- ติดตั้งเพิ่มภายหลัง (รันซ้ำได้)
 
 create table if not exists public.ins_policies (
   id               uuid primary key default gen_random_uuid(),
@@ -132,9 +134,9 @@ begin
   if coalesce(p_data->>'asset_type', '') not in ('vehicle','building','other') then raise exception 'ประเภททรัพย์สินไม่ถูกต้อง'; end if;
   if p_id is null then
     insert into public.ins_assets (org_id, asset_type, name, vehicle_kind, plate_no, plate_province, brand_model, chassis_no, engine_no,
-                                   asset_code, location, unit_name, is_active, note, created_by, updated_by_name)
+                                   asset_code, location, unit_name, custodian_name, is_active, note, created_by, updated_by_name)
     values (v_user.org_id, p_data->>'asset_type', btrim(p_data->>'name'), p_data->>'vehicle_kind', p_data->>'plate_no', p_data->>'plate_province',
-            p_data->>'brand_model', p_data->>'chassis_no', p_data->>'engine_no', p_data->>'asset_code', p_data->>'location', p_data->>'unit_name',
+            p_data->>'brand_model', p_data->>'chassis_no', p_data->>'engine_no', p_data->>'asset_code', p_data->>'location', p_data->>'unit_name', nullif(btrim(p_data->>'custodian_name'), ''),
             coalesce((p_data->>'is_active')::boolean, true), p_data->>'note', v_user.id, v_user.full_name)
     returning * into v_row;
   else
@@ -144,7 +146,7 @@ begin
     update public.ins_assets set asset_type = p_data->>'asset_type', name = btrim(p_data->>'name'), vehicle_kind = p_data->>'vehicle_kind',
            plate_no = p_data->>'plate_no', plate_province = p_data->>'plate_province', brand_model = p_data->>'brand_model',
            chassis_no = p_data->>'chassis_no', engine_no = p_data->>'engine_no', asset_code = p_data->>'asset_code', location = p_data->>'location',
-           unit_name = p_data->>'unit_name', is_active = coalesce((p_data->>'is_active')::boolean, true), note = p_data->>'note', updated_by_name = v_user.full_name
+           unit_name = p_data->>'unit_name', custodian_name = nullif(btrim(p_data->>'custodian_name'), ''), is_active = coalesce((p_data->>'is_active')::boolean, true), note = p_data->>'note', updated_by_name = v_user.full_name
      where id = p_id returning * into v_row;
   end if;
   perform public.sfh_rent_audit(v_user, case when p_id is null then 'create' else 'update' end, 'ins_assets', v_row.id::text, jsonb_build_object('name', v_row.name, 'plate_no', v_row.plate_no));
