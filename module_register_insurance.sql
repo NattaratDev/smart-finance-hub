@@ -1,6 +1,6 @@
 -- =====================================================================
 --  Smart Finance Hub (SFH) – โมดูล: ทะเบียนคุมต่าง ๆ
---  ส่วนที่ 3 : ทะเบียนคุมประกันภัย (รถยนต์/ยานพาหนะ และอาคาร/ทรัพย์สิน)
+--  ส่วนที่ 3 : ทะเบียนคุมครุภัณฑ์ (เดิม: ทะเบียนคุมประกันภัย) – ประกันภัย ภาษีรถ การเบิกน้ำมันเชื้อเพลิง
 --  ไฟล์ : module_register_insurance.sql   (รันต่อจาก module_register_tuition.sql)
 --
 --  สารบัญ
@@ -391,3 +391,118 @@ alter table public.ins_vehicle_taxes enable row level security;
 revoke all on public.ins_vehicle_taxes from anon, authenticated;
 grant execute on function public.sfh_ins_tax_save(text, uuid, jsonb) to anon, authenticated;
 grant execute on function public.sfh_ins_tax_delete(text, uuid)      to anon, authenticated;
+
+
+-- =====================================================================
+-- 6) การเบิกน้ำมันเชื้อเพลิง (ทะเบียนคุมครุภัณฑ์) – เพิ่มเติม
+--    1 แถว = การเบิก/เติมน้ำมัน 1 ครั้ง ของรถหรือครุภัณฑ์ (ไม่ใช่อาคาร)
+--    ระยะทาง/อัตราสิ้นเปลือง (กม./ลิตร) คำนวณที่หน้าจอจากเลขไมล์ครั้งก่อน
+-- =====================================================================
+create table if not exists public.ins_fuel_logs (
+  id               uuid primary key default gen_random_uuid(),
+  asset_id         uuid not null references public.ins_assets(id) on delete cascade,
+  org_id           uuid,
+  fuel_date        date not null,        -- วันที่เบิก/เติม
+  fuel_type        text not null default 'diesel',   -- diesel, gasohol91, gasohol95, e20, e85, benzine, lpg, ngv, other
+  liters           numeric(10,2) not null check (liters > 0),                  -- จำนวน (ลิตร)
+  unit_price       numeric(8,2)  not null default 0 check (unit_price >= 0),   -- ราคาต่อลิตร
+  amount           numeric(12,2) not null default 0 check (amount >= 0),       -- จำนวนเงิน
+  odometer         numeric(12,1) check (odometer >= 0),                        -- เลขไมล์ (กม.) / ชั่วโมงเครื่อง
+  requester_name   text,                 -- ผู้เบิก / พนักงานขับรถ
+  purpose          text,                 -- ใช้ในราชการ / เส้นทาง
+  slip_no          text,                 -- เลขที่ใบเบิกน้ำมัน
+  station          text,                 -- สถานีบริการ
+  receipt_no       text,                 -- เลขที่ใบเสร็จ/ใบกำกับ
+  pay_status       text not null default 'pending' check (pay_status in ('pending','paid')),
+  doc_no           text,                 -- เลขที่ฎีกา
+  doc_date         date,                 -- วันที่วางฎีกา
+  note             text,
+  created_by       uuid,
+  updated_by_name  text,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists idx_ins_fuel_logs_asset on public.ins_fuel_logs(asset_id, fuel_date);
+create index if not exists idx_ins_fuel_logs_org on public.ins_fuel_logs(org_id, fuel_date);
+drop trigger if exists trg_ins_fuel_logs_updated_at on public.ins_fuel_logs;
+create trigger trg_ins_fuel_logs_updated_at before update on public.ins_fuel_logs
+  for each row execute function public.sfh_touch_updated_at();
+
+-- รายการทั้งหมด (เพิ่ม fuel)
+create or replace function public.sfh_ins_list(p_token text)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_super boolean;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  v_super := public.sfh_is_super(v_user);
+  return jsonb_build_object(
+    'assets',   coalesce((select jsonb_agg(to_jsonb(a) order by a.asset_type, a.name) from public.ins_assets a where v_super or a.org_id = v_user.org_id), '[]'::jsonb),
+    'policies', coalesce((select jsonb_agg(to_jsonb(p) order by p.end_date desc) from public.ins_policies p where v_super or p.org_id = v_user.org_id), '[]'::jsonb),
+    'claims',   coalesce((select jsonb_agg(to_jsonb(c) order by c.incident_date desc) from public.ins_claims c where v_super or c.org_id = v_user.org_id), '[]'::jsonb),
+    'taxes',    coalesce((select jsonb_agg(to_jsonb(t) order by t.due_date desc) from public.ins_vehicle_taxes t where v_super or t.org_id = v_user.org_id), '[]'::jsonb),
+    'fuel',     coalesce((select jsonb_agg(to_jsonb(f) order by f.fuel_date desc, f.created_at desc) from public.ins_fuel_logs f where v_super or f.org_id = v_user.org_id), '[]'::jsonb));
+end $$;
+
+drop function if exists public.sfh_ins_fuel_save(text, uuid, jsonb);
+drop function if exists public.sfh_ins_fuel_delete(text, uuid);
+
+create function public.sfh_ins_fuel_save(p_token text, p_id uuid, p_data jsonb)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_asset public.ins_assets%rowtype; v_row public.ins_fuel_logs%rowtype;
+        v_liters numeric; v_price numeric; v_amount numeric;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  select * into v_asset from public.ins_assets where id = (p_data->>'asset_id')::uuid;
+  if not found then raise exception 'ไม่พบรถ/ครุภัณฑ์'; end if;
+  if v_asset.org_id is distinct from v_user.org_id and not public.sfh_is_super(v_user) then raise exception 'FORBIDDEN: org'; end if;
+  if v_asset.asset_type = 'building' then raise exception 'บันทึกการเบิกน้ำมันได้เฉพาะรถยนต์/ยานพาหนะและครุภัณฑ์อื่น'; end if;
+  if nullif(p_data->>'fuel_date', '') is null then raise exception 'กรุณาระบุวันที่เบิกน้ำมัน'; end if;
+  if coalesce(p_data->>'fuel_type', '') not in ('diesel','gasohol91','gasohol95','e20','e85','benzine','lpg','ngv','other') then raise exception 'ชนิดน้ำมันไม่ถูกต้อง'; end if;
+  v_liters := nullif(p_data->>'liters', '')::numeric;
+  if v_liters is null or v_liters <= 0 then raise exception 'กรุณาระบุจำนวนลิตร'; end if;
+  v_price  := coalesce(nullif(p_data->>'unit_price', '')::numeric, 0);
+  v_amount := coalesce(nullif(p_data->>'amount', '')::numeric, round(v_liters * v_price, 2));
+  if p_id is null then
+    insert into public.ins_fuel_logs (asset_id, org_id, fuel_date, fuel_type, liters, unit_price, amount, odometer, requester_name, purpose, slip_no, station, receipt_no,
+                                      pay_status, doc_no, doc_date, note, created_by, updated_by_name)
+    values (v_asset.id, v_asset.org_id, (p_data->>'fuel_date')::date, p_data->>'fuel_type', v_liters, v_price, v_amount, nullif(p_data->>'odometer', '')::numeric,
+            nullif(btrim(p_data->>'requester_name'), ''), p_data->>'purpose', p_data->>'slip_no', p_data->>'station', p_data->>'receipt_no',
+            coalesce(p_data->>'pay_status', 'pending'), p_data->>'doc_no', nullif(p_data->>'doc_date', '')::date, p_data->>'note', v_user.id, v_user.full_name)
+    returning * into v_row;
+  else
+    update public.ins_fuel_logs set fuel_date = (p_data->>'fuel_date')::date, fuel_type = p_data->>'fuel_type', liters = v_liters, unit_price = v_price, amount = v_amount,
+           odometer = nullif(p_data->>'odometer', '')::numeric, requester_name = nullif(btrim(p_data->>'requester_name'), ''), purpose = p_data->>'purpose',
+           slip_no = p_data->>'slip_no', station = p_data->>'station', receipt_no = p_data->>'receipt_no', pay_status = coalesce(p_data->>'pay_status', 'pending'),
+           doc_no = p_data->>'doc_no', doc_date = nullif(p_data->>'doc_date', '')::date, note = p_data->>'note', updated_by_name = v_user.full_name
+     where id = p_id and asset_id = v_asset.id returning * into v_row;
+    if not found then raise exception 'ไม่พบรายการเบิกน้ำมัน'; end if;
+  end if;
+  perform public.sfh_rent_audit(v_user, case when p_id is null then 'create' else 'update' end, 'ins_fuel_logs', v_row.id::text,
+                                jsonb_build_object('asset', v_asset.name, 'plate_no', v_asset.plate_no, 'fuel_date', v_row.fuel_date, 'liters', v_row.liters, 'amount', v_row.amount));
+  return to_jsonb(v_row);
+end $$;
+
+create function public.sfh_ins_fuel_delete(p_token text, p_id uuid)
+returns void language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_row public.ins_fuel_logs%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'register.manage_insurance');
+  select * into v_row from public.ins_fuel_logs where id = p_id;
+  if not found then return; end if;
+  if v_row.org_id is distinct from v_user.org_id and not public.sfh_is_super(v_user) then raise exception 'FORBIDDEN: org'; end if;
+  delete from public.ins_fuel_logs where id = p_id;
+  perform public.sfh_rent_audit(v_user, 'delete', 'ins_fuel_logs', p_id::text, jsonb_build_object('fuel_date', v_row.fuel_date, 'liters', v_row.liters, 'amount', v_row.amount));
+end $$;
+
+alter table public.ins_fuel_logs enable row level security;
+revoke all on public.ins_fuel_logs from anon, authenticated;
+grant execute on function public.sfh_ins_fuel_save(text, uuid, jsonb) to anon, authenticated;
+grant execute on function public.sfh_ins_fuel_delete(text, uuid)      to anon, authenticated;
+
+-- เปลี่ยนชื่อที่แสดง: ทะเบียนคุมประกันภัย → ทะเบียนคุมครุภัณฑ์ (perm_key เดิม)
+update public.permissions
+   set name = 'ทะเบียนคุมครุภัณฑ์ (ดู/บันทึก/แก้ไข/ลบ)', description = 'ครุภัณฑ์ รถยนต์ อาคาร · ประกันภัย ภาษีรถ และการเบิกน้ำมันเชื้อเพลิง'
+ where perm_key = 'register.manage_insurance';
+update public.modules
+   set planned_features = '["ทะเบียนคุมเบิกค่าเช่าบ้าน รายเดือนตามปีงบประมาณ","ทะเบียนคุมเบิกค่าเล่าเรียนบุตร รายภาคเรียนตามปีการศึกษา","ทะเบียนคุมครุภัณฑ์ ประกันภัย ภาษีรถ และการเบิกน้ำมันเชื้อเพลิง","ดึงรายชื่อข้าราชการจากสลิปเงินเดือน","พิมพ์ทะเบียน / PDF / Excel"]'::jsonb
+ where module_key = 'register';
