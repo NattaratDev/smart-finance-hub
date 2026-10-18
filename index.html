@@ -6901,7 +6901,7 @@ function insOpenClaim(claim, assetId, el) {
 /* ---------- พิมพ์ / PDF / Excel ---------- */
 /* ---------- ภาษีรถประจำปี (ติดตามการต่ออายุภาษีรถ) ---------- */
 const INS_TAX_SOON_DAYS = 90;   // ชำระภาษีล่วงหน้าได้ไม่เกิน 90 วันก่อนวันสิ้นอายุ
-const INS_TAX_FIELDS = [['due_date', 'วันสิ้นอายุภาษี', 'date'], ['paid_date', 'วันที่ชำระ', 'date'], ['amount', 'ค่าภาษี', 'money'], ['receipt_no', 'เลขที่ใบเสร็จ', 'text'],
+const INS_TAX_FIELDS = [['paid_date', 'วันที่ชำระ', 'date'], ['due_date', 'วันสิ้นอายุภาษี', 'date'], ['amount', 'ค่าภาษี', 'money'], ['receipt_no', 'เลขที่ใบเสร็จ', 'text'],
   ['inspection_date', 'วันที่ตรวจสภาพ (ตรอ.)', 'date'], ['pay_status', 'สถานะเบิกจ่าย', 'status'], ['doc_no', 'เลขที่ฎีกา', 'text'], ['doc_date', 'วันที่วางฎีกา', 'date'], ['note', 'หมายเหตุ', 'text']];
 const insTaxesOf = (assetId) => Is.taxes.filter(t => t.asset_id === assetId).sort((a, b) => b.due_date.localeCompare(a.due_date));
 /** สถานะภาษีของรถ: active / soon (สิ้นอายุภายใน 90 วัน) / expired / none */
@@ -6935,8 +6935,8 @@ function insOpenTax(tax, assetId, el) {
     body: `<div class="rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 mb-3 text-sm"><div class="font-medium text-slate-700">${esc(insAssetLabel(a))}</div>
         <div class="text-xs text-slate-500">${esc([a.vehicle_kind, a.brand_model, a.chassis_no ? 'ตัวถัง ' + a.chassis_no : ''].filter(Boolean).join(' · '))}${last ? ` · ภาษีเดิมถึง ${formatThaiDate(calDate(last.due_date))}` : ''}</div></div>
       <form class="grid gap-3 sm:grid-cols-2" novalidate>
+        <div><label class="label">วันที่ชำระภาษี *</label><input type="date" class="input" name="paid_date" value="${esc(v.paid_date || '')}"></div>
         <div><label class="label">ภาษีมีผลถึงวันที่ (วันสิ้นอายุ) *</label><input type="date" class="input" name="due_date" value="${esc(v.due_date || '')}"></div>
-        <div><label class="label">วันที่ชำระภาษี</label><input type="date" class="input" name="paid_date" value="${esc(v.paid_date || '')}"></div>
         <div><label class="label">ค่าภาษี (รวมค่าธรรมเนียม)</label><input class="input" inputmode="decimal" name="amount" value="${esc(v.amount ?? '')}" placeholder="0.00"></div>
         <div><label class="label">เลขที่ใบเสร็จ</label><input class="input" name="receipt_no" value="${esc(v.receipt_no || '')}"></div>
         <div><label class="label">วันที่ตรวจสภาพรถ (ตรอ.)</label><input type="date" class="input" name="inspection_date" value="${esc(v.inspection_date || '')}"></div>
@@ -6955,6 +6955,7 @@ function insOpenTax(tax, assetId, el) {
     const g = (k) => String(F[k].value ?? '').trim();
     const data = { asset_id: a.id, due_date: g('due_date'), paid_date: g('paid_date') || null, amount: trvNum(g('amount')), receipt_no: g('receipt_no') || null,
       inspection_date: g('inspection_date') || null, pay_status: g('pay_status'), doc_no: g('doc_no') || null, doc_date: g('doc_date') || null, note: g('note') || null };
+    if (!data.paid_date) { showToast('กรุณาระบุวันที่ชำระภาษี', 'warning'); F.paid_date.focus(); return; }
     if (!data.due_date) { showToast('กรุณาระบุวันสิ้นอายุภาษี', 'warning'); F.due_date.focus(); return; }
     if (insTaxesOf(a.id).some(x => x.id !== tax?.id && x.due_date === data.due_date)) { showToast('มีรายการภาษีที่สิ้นอายุวันที่นี้แล้ว', 'warning'); return; }
     if (tax && !(await rentConfirmEdit(`ยืนยันแก้ไขภาษีรถ · ${insAssetLabel(a)}`, tax, data, INS_TAX_FIELDS))) return;

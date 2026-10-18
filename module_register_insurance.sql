@@ -352,6 +352,7 @@ begin
   if not found then raise exception 'ไม่พบรถ'; end if;
   if v_asset.org_id is distinct from v_user.org_id and not public.sfh_is_super(v_user) then raise exception 'FORBIDDEN: org'; end if;
   if v_asset.asset_type <> 'vehicle' then raise exception 'บันทึกภาษีได้เฉพาะรถยนต์/ยานพาหนะ'; end if;
+  if nullif(p_data->>'paid_date', '') is null then raise exception 'กรุณาระบุวันที่ชำระภาษี'; end if;
   if nullif(p_data->>'due_date', '') is null then raise exception 'กรุณาระบุวันสิ้นอายุภาษี'; end if;
   if exists (select 1 from public.ins_vehicle_taxes where asset_id = v_asset.id and due_date = (p_data->>'due_date')::date and id is distinct from p_id) then
     raise exception 'มีรายการภาษีที่สิ้นอายุวันที่นี้แล้ว';
