@@ -7186,8 +7186,8 @@ async function insPrintFuelByUnit(mode, opts = {}) {
   const period = opts.fy ? `ปีงบประมาณ ${opts.fy}` : `ประจำเดือน${insYmText(opts.ym)}`, noUnit = 'ไม่ระบุกอง';
   const units = new Map();
   insFuelAssets().forEach(a => { const logs = insFuelOf(a.id).filter(f => f.fuel_date >= from && f.fuel_date <= to); if (!logs.length) return;
-    const u = (a.unit_name || '').trim() || noUnit; if (!units.has(u)) units.set(u, []); units.get(u).push({ a, logs }); });
-  if (!units.size) { showToast(`ไม่มีการเบิกน้ำมัน${period}`, 'warning'); return; }
+    const u = (a.unit_name || '').trim() || noUnit; if (opts.unit && u !== opts.unit) return; if (!units.has(u)) units.set(u, []); units.get(u).push({ a, logs }); });
+  if (!units.size) { showToast(`ไม่มีการเบิกน้ำมัน${opts.unit ? 'ของ' + opts.unit : ''}${period}`, 'warning'); return; }
   const n2 = (x) => insFuelNum(x), d = (k) => formatThaiDate(calDate(k)), sum = (logs) => logs.reduce((s, f) => ({ n: s.n + 1, liters: s.liters + (+f.liters), amount: s.amount + (+f.amount) }), { n: 0, liters: 0, amount: 0 });
   const plate = (a) => a.plate_no ? `${a.plate_no}${a.plate_province ? ' ' + a.plate_province : ''}` : a.name;
   const lines = [], grand = [];
@@ -7201,15 +7201,15 @@ async function insPrintFuelByUnit(mode, opts = {}) {
     lines.push(`<tr class="tot"><td colspan="3" style="text-align:right">รวม${esc(u)}</td><td class="n">${n2(us.liters)}</td><td class="n">${rentMoney(us.amount)}</td></tr>`);
   });
   const gs = sum(grand);
-  lines.push(`<tr class="tot"><td colspan="3" style="text-align:right">รวมทั้งสิ้น ${units.size} กอง · ${gs.n} ครั้ง</td><td class="n">${n2(gs.liters)}</td><td class="n">${rentMoney(gs.amount)}</td></tr>`,
-    `<tr><td colspan="5" style="text-align:right">(${esc(bahtText(Math.round(gs.amount * 100) / 100))})</td></tr>`);
+  if (!opts.unit) lines.push(`<tr class="tot"><td colspan="3" style="text-align:right">รวมทั้งสิ้น ${units.size} กอง · ${gs.n} ครั้ง</td><td class="n">${n2(gs.liters)}</td><td class="n">${rentMoney(gs.amount)}</td></tr>`);
+  lines.push(`<tr><td colspan="5" style="text-align:right">(${esc(bahtText(Math.round(gs.amount * 100) / 100))})</td></tr>`);
   const per = 34, pages = []; for (let i = 0; i < lines.length; i += per) pages.push(lines.slice(i, i + per));
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
-  root.innerHTML = pages.map((pg, pi) => `<div class="rg-page port"><h1>สรุปการใช้น้ำมันเชื้อเพลิงแยกตามกอง ${period}</h1><div class="sub">${org} · ${d(from)} – ${d(to)}</div>
+  root.innerHTML = pages.map((pg, pi) => `<div class="rg-page port"><h1>สรุปการใช้น้ำมันเชื้อเพลิง${opts.unit ? ' ' + esc(opts.unit) : 'แยกตามกอง'} ${period}</h1><div class="sub">${org} · ${d(from)} – ${d(to)}</div>
     <table><thead><tr><th style="width:9mm">ที่</th><th>วันที่เบิก</th><th style="width:40mm">ประเภทน้ำมัน</th><th style="width:28mm">จำนวนลิตร</th><th style="width:32mm">จำนวนบาท</th></tr></thead><tbody>${pg.join('')}</tbody></table>
     ${pi === pages.length - 1 ? RG_SIGN : ''}<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
   rpcSecure('sfh_ins_log', { p_kind: `${mode}_fuel_unit`, p_details: { count: gs.n, ...opts } }, { loader: false });
-  await rgOutput(root, 'portrait', mode, `สรุปน้ำมันแยกกอง_${opts.fy ? 'ปีงบ' + opts.fy : opts.ym}.pdf`);
+  await rgOutput(root, 'portrait', mode, `สรุปน้ำมัน_${opts.unit || 'แยกกอง'}_${opts.fy ? 'ปีงบ' + opts.fy : opts.ym}.pdf`);
 }
 function insFuelPrintMenu(mode) {
   const fyNow = thaiFiscalYear(new Date()), ym = Is.fuelMonth || calToday().slice(0, 7), btn = (k) => `<button type="button" class="btn btn-primary btn-sm" data-k="${k}">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button>`;
@@ -7220,12 +7220,14 @@ function insFuelPrintMenu(mode) {
       ${box('list', 'ทะเบียนคุมการเบิกน้ำมัน (รายการ)', 'ทุกรายการในเดือน · เลือกรถคันเดียวได้', `<div class="grid gap-2"><select class="input !py-1.5" data-asset><option value="">รถ/ครุภัณฑ์ทั้งหมด</option>${insFuelAssets().map(a => `<option value="${a.id}" ${Is.fuelAsset === a.id ? 'selected' : ''}>${esc(insAssetLabel(a))}</option>`).join('')}</select>
         <div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month="log" value="${ym}">${btn('log')}</div></div>`)}
       ${box('calendar-range', 'สรุปปีงบประมาณ (รายเดือน)', 'ต.ค. – ก.ย. ตามวันที่เบิก', `<div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>${btn('fy')}</div>`)}
-      ${box('building-2', 'สรุปการใช้น้ำมันแยกตามกอง', 'แต่ละกอง → ทะเบียนรถ - ผู้รับผิดชอบ → วันที่เบิก ชนิดน้ำมัน ลิตร บาท', `<div class="grid gap-2"><div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month="unit" value="${ym}">${btn('unit')}</div>
+      ${box('building-2', 'สรุปการใช้น้ำมันแยกตามกอง', 'แต่ละกอง → ทะเบียนรถ - ผู้รับผิดชอบ → วันที่เบิก ชนิดน้ำมัน ลิตร บาท', `<div class="grid gap-2"><select class="input !py-1.5" data-unit-name><option value="">ทุกกอง</option>${[...new Set(insFuelAssets().map(a => (a.unit_name || '').trim() || 'ไม่ระบุกอง'))].sort((x, y) => (x === 'ไม่ระบุกอง') - (y === 'ไม่ระบุกอง') || x.localeCompare(y, 'th')).map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('')}</select>
+        <div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month="unit" value="${ym}">${btn('unit')}</div>
         <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-unit-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ทั้งปีงบประมาณ ${y}</option>`).join('')}</select>${btn('unit-fy')}</div></div>`)}</div>` });
   m.el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-k]'); if (!b) return; const k = b.dataset.k, opts = {};
-    if (k === 'unit-fy') { const fy = +$('[data-unit-fy]', m.el).value; m.close(); insPrintFuelByUnit(mode, { fy }); return; }
-    if (k === 'unit') { const ym = $('[data-month="unit"]', m.el).value; if (!ym) { showToast('กรุณาเลือกเดือน', 'warning'); return; } m.close(); insPrintFuelByUnit(mode, { ym }); return; }
+    const unit = $('[data-unit-name]', m.el).value || undefined;
+    if (k === 'unit-fy') { const fy = +$('[data-unit-fy]', m.el).value; m.close(); insPrintFuelByUnit(mode, { fy, unit }); return; }
+    if (k === 'unit') { const ym = $('[data-month="unit"]', m.el).value; if (!ym) { showToast('กรุณาเลือกเดือน', 'warning'); return; } m.close(); insPrintFuelByUnit(mode, { ym, unit }); return; }
     if (k === 'fy') opts.fy = +$('[data-fy]', m.el).value;
     else { opts.ym = $(`[data-month="${k}"]`, m.el).value; if (!opts.ym) { showToast('กรุณาเลือกเดือน', 'warning'); return; } if (k === 'log' && $('[data-asset]', m.el).value) opts.assetId = $('[data-asset]', m.el).value; }
     m.close(); insPrintFuel(k, mode, opts);
