@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(git push origin HEAD:main)",
+      "Bash(git push origin HEAD:main *)",
+      "Bash(git push origin main)",
+      "Bash(git push origin main *)",
+      "Bash(git push -u origin main)",
+      "Bash(git push -u origin HEAD:main)"
+    ]
+  }
+}
