@@ -6557,11 +6557,11 @@ const insRefresh = async (el) => { if (await insLoad({ loader: false })) insRend
 
 async function insOpen(el, mod) {
   if (!requirePermission('register.manage_insurance')) return;
-  if (['alerts', 'policies', 'tax', 'fuel', 'assets', 'claims'].includes(pageState('tab'))) Is.tab = pageState('tab');
+  if (['alerts', 'policies', 'tax', 'fuel', 'assets', 'claims'].includes(pageState('tab'))) Is.tab = pageState('tab') === 'tax' ? 'policies' : pageState('tab');   // 'tax' = ลิงก์เดิมก่อนรวมแท็บ
   el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-is-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
     + pageHeader({ title: 'ทะเบียนคุมครุภัณฑ์', icon: 'boxes', tone: 'cream', subtitle: 'รถยนต์/ยานพาหนะ อาคารและทรัพย์สิน · ประกันภัยและการเคลม ภาษีรถประจำปี และการเบิกน้ำมันเชื้อเพลิง' })
     + `<div class="flex gap-1 mb-4 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
-        ${[['alerts', 'alarm-clock', 'ใกล้หมดอายุ'], ['policies', 'shield-check', 'ทะเบียนกรมธรรม์'], ['tax', 'receipt', 'ภาษีรถ'], ['fuel', 'fuel', 'น้ำมันเชื้อเพลิง'], ['assets', 'car', 'ทรัพย์สิน'], ['claims', 'file-warning', 'การเคลม']].map(([k, i, l]) =>
+        ${[['alerts', 'alarm-clock', 'ใกล้หมดอายุ'], ['policies', 'shield-check', 'กรมธรรม์และภาษีรถ'], ['fuel', 'fuel', 'น้ำมันเชื้อเพลิง'], ['assets', 'car', 'ทรัพย์สิน'], ['claims', 'file-warning', 'การเคลม']].map(([k, i, l]) =>
           `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-is-tab="${k}" role="tab">${ic(i, 'w-4 h-4')} ${l}<span data-is-count="${k}"></span></button>`).join('')}
       </div><div id="isBody">${skeletonCards(1, 'h-96')}</div>`;
   refreshIcons();
@@ -6587,7 +6587,6 @@ function insRender(el) {
   body.onclick = body.oninput = body.onchange = null;
   if (Is.tab === 'policies') insRenderPolicies(body, el);
   else if (Is.tab === 'alerts') insRenderAlerts(body, el);
-  else if (Is.tab === 'tax') insRenderTaxes(body, el);
   else if (Is.tab === 'fuel') insRenderFuel(body, el);
   else if (Is.tab === 'assets') insRenderAssets(body, el);
   else insRenderClaims(body, el);
@@ -6606,12 +6605,17 @@ function insPolicyRow(p) {
 function insRenderPolicies(body, el) {
   const today = calToday(), fy = thaiFiscalYear(new Date()), fyFrom = rentMonthFirst(fy - 544, 10), fyTo = rentMonthLast(fy - 543, 9);
   const q = Is.filter.trim();
-  let assets = Is.assets.filter(a => (!Is.type || a.asset_type === Is.type) && (!Is.state || insAssetState(a) === Is.state || (Is.state === 'alert' && ['expired', 'soon', 'none'].includes(insAssetState(a)))));
-  if (q) assets = assets.filter(a => (insAssetLabel(a) + ' ' + (a.brand_model || '') + ' ' + (a.asset_code || '') + ' ' + (a.custodian_name || '') + ' ' + Is.policies.filter(p => p.asset_id === a.id).map(p => p.insurer + ' ' + (p.policy_no || '')).join(' ')).includes(q));
-  const active = Is.assets.filter(a => a.is_active), states = active.map(insAssetState);
+  const taxAlert = (a) => a.asset_type === 'vehicle' && a.is_active && insTaxCover(a.id).s !== 'active';
+  let assets = Is.assets.filter(a => (!Is.type || a.asset_type === Is.type) && (!Is.state || insAssetState(a) === Is.state
+    || (Is.state === 'alert' && (['expired', 'soon', 'none'].includes(insAssetState(a)) || taxAlert(a))) || (Is.state === 'tax_alert' && taxAlert(a))));
+  if (q) assets = assets.filter(a => (insAssetLabel(a) + ' ' + (a.brand_model || '') + ' ' + (a.asset_code || '') + ' ' + (a.custodian_name || '') + ' ' + Is.policies.filter(p => p.asset_id === a.id).map(p => p.insurer + ' ' + (p.policy_no || '')).join(' ')
+    + ' ' + insTaxesOf(a.id).map(t => t.receipt_no || '').join(' ')).includes(q));
+  const active = Is.assets.filter(a => a.is_active), states = active.map(insAssetState), taxStates = active.filter(a => a.asset_type === 'vehicle').map(a => insTaxCover(a.id).s);
   const premiumFY = Is.policies.filter(p => { const d = p.doc_date || p.start_date; return d >= fyFrom && d <= fyTo; }).reduce((s, p) => s + (+p.premium), 0);
+  const taxFY = Is.taxes.filter(t => { const d = t.doc_date || t.paid_date; return d && d >= fyFrom && d <= fyTo; }).reduce((s, t) => s + (+t.amount), 0);
   const isOpen = (id) => !!q || Is.open.has(id);
   const assetRow = (a) => { const cov = insCover(a.id), st = insAssetState(a), pols = Is.policies.filter(p => p.asset_id === a.id).sort((x, y) => y.end_date.localeCompare(x.end_date)), open = isOpen(a.id);
+    const isVeh = a.asset_type === 'vehicle', tc = isVeh ? insTaxCover(a.id) : null, taxes = isVeh ? insTaxesOf(a.id) : [];
     return `<tr class="bg-slate-50/80 hover:bg-cream-50/60 cursor-pointer" data-is-toggle="${a.id}">
       <td colspan="2"><div class="flex items-center gap-2"><span class="text-slate-400 transition ${open ? 'rotate-90' : ''}">${ic('chevron-right', 'w-4 h-4')}</span>
         <span class="w-8 h-8 rounded-xl grid place-items-center bg-cream-100 text-cream-600 shrink-0">${ic(INS_TYPE[a.asset_type].icon, 'w-4 h-4')}</span>
@@ -6619,21 +6623,25 @@ function insRenderPolicies(body, el) {
           <div class="text-[11px] text-slate-500">${esc(insAssetSub(a, a.vehicle_kind || INS_TYPE[a.asset_type].label, a.brand_model))}</div></div></div></td>
       <td colspan="2"><div class="flex flex-wrap gap-1">${Object.keys(INS_POLICY).filter(k => cov[k]).map(k => { const { p, s, renewed, next } = cov[k];
         return `<span class="badge ${INS_STATE[s].cls}" title="${esc(INS_POLICY[k])} ${s === 'upcoming' ? 'เริ่ม ' + formatThaiDate(calDate(p.start_date)) : 'ถึง ' + formatThaiDate(calDate(p.end_date))}">${INS_POLICY_SHORT[k]} ${s === 'upcoming' ? 'เริ่ม ' + formatThaiDate(calDate(p.start_date)) : 'ถึง ' + formatThaiDate(calDate(p.end_date))}${renewed ? ` · ต่ออายุแล้วถึง ${formatThaiDate(calDate(next.end_date))}` : ''}</span>`; }).join('') || insStateBadge('none')}${a.asset_type === 'vehicle' ? (() => { const { t, s } = insTaxCover(a.id); return `<span class="badge ${INS_TAX_STATE[s].cls}">${ic('receipt', 'w-3 h-3')} ${t ? `ภาษี ถึง ${formatThaiDate(calDate(t.due_date))}` : 'ไม่มีข้อมูลภาษี'}</span>`; })() : ''}</div></td>
-      <td>${insStateBadge(st)}</td><td class="text-right text-xs text-slate-400">${pols.length} ฉบับ</td></tr>
-      ${open ? (pols.map(insPolicyRow).join('') || '') + `<tr class="bg-white"><td colspan="6" class="!pl-10"><div class="flex flex-wrap gap-2"><button class="btn btn-soft btn-sm" data-is-addpol="${a.id}">${ic('plus', 'w-4 h-4')} เพิ่มกรมธรรม์</button>
+      <td>${insStateBadge(st)}</td><td class="text-right text-xs text-slate-400">${pols.length} ฉบับ${isVeh ? `<div>ภาษี ${taxes.length} ปี</div>` : ''}</td></tr>
+      ${open ? (pols.length ? `<tr class="bg-white"><td colspan="6" class="!pl-10 !py-1.5 text-[11px] font-semibold text-slate-500">${ic('shield-check', 'w-3.5 h-3.5 inline')} กรมธรรม์ประกันภัย</td></tr>` + pols.map(insPolicyRow).join('') : '')
+        + (isVeh ? `<tr class="bg-white"><td colspan="6" class="!pl-10 !py-1.5 text-[11px] font-semibold text-slate-500">${ic('receipt', 'w-3.5 h-3.5 inline')} ภาษีรถประจำปี · ${insTaxBadge(tc.s, tc.t && tc.s === 'soon' ? ` (อีก ${calDaysBetween(today, tc.t.due_date)} วัน)` : tc.t && tc.s === 'expired' ? ` (${-calDaysBetween(today, tc.t.due_date)} วัน)` : '')}</td></tr>`
+          + (taxes.map(insTaxHistRow).join('') || `<tr class="bg-white"><td colspan="6" class="!pl-10 text-xs text-slate-400">ยังไม่มีประวัติการต่อภาษี</td></tr>`) : '')
+        + `<tr class="bg-white"><td colspan="6" class="!pl-10"><div class="flex flex-wrap gap-2"><button class="btn btn-soft btn-sm" data-is-addpol="${a.id}">${ic('plus', 'w-4 h-4')} เพิ่มกรมธรรม์</button>
+        ${isVeh ? `<button class="btn btn-soft btn-sm" data-tx-renew="${a.id}">${ic('refresh-cw', 'w-4 h-4')} ${tc.t ? 'ต่อภาษี' : 'บันทึกภาษี'}</button>` : ''}
         <button class="btn btn-ghost btn-sm" data-is-asset="${a.id}">${ic('pencil', 'w-4 h-4')} แก้ไขข้อมูลทรัพย์สิน</button>${pols.length ? `<button class="btn btn-ghost btn-sm" data-is-addclaim="${a.id}">${ic('file-warning', 'w-4 h-4')} บันทึกการเคลม</button>` : ''}</div></td></tr>` : ''}`; };
   body.innerHTML = `
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
       ${statCard({ label: 'ทรัพย์สินที่ใช้งาน', value: formatNumber(active.length), icon: 'boxes', tone: 'brand', hint: `รถ ${active.filter(a => a.asset_type === 'vehicle').length} · อาคาร/อื่น ${active.filter(a => a.asset_type !== 'vehicle').length}` })}
-      ${statCard({ label: `ใกล้หมดอายุ (${INS_SOON_DAYS} วัน)`, value: formatNumber(states.filter(s => s === 'soon').length), icon: 'alarm-clock', tone: 'cream' })}
-      ${statCard({ label: 'หมดอายุ/ยังไม่มีกรมธรรม์', value: formatNumber(states.filter(s => s === 'expired' || s === 'none').length), icon: 'shield-off', tone: 'blush' })}
-      ${statCard({ label: `เบี้ยประกัน ปีงบ ${fy}`, value: rentMoney(premiumFY), icon: 'banknote', tone: 'mint', hint: 'บาท (ตามวันที่วางฎีกา)' })}
+      ${statCard({ label: 'ใกล้หมดอายุ / ใกล้ต่อภาษี', value: formatNumber(states.filter(s => s === 'soon').length + taxStates.filter(s => s === 'soon').length), icon: 'alarm-clock', tone: 'cream', hint: `กรมธรรม์ ${states.filter(s => s === 'soon').length} (${INS_SOON_DAYS} วัน) · ภาษีรถ ${taxStates.filter(s => s === 'soon').length} (${INS_TAX_SOON_DAYS} วัน)` })}
+      ${statCard({ label: 'หมดอายุ / ภาษีขาดต่อ', value: formatNumber(states.filter(s => s === 'expired' || s === 'none').length + taxStates.filter(s => s === 'expired' || s === 'none').length), icon: 'shield-off', tone: 'blush', hint: `กรมธรรม์ ${states.filter(s => s === 'expired' || s === 'none').length} · ภาษีรถ ${taxStates.filter(s => s === 'expired' || s === 'none').length} (รวมยังไม่มีข้อมูล)` })}
+      ${statCard({ label: `เบี้ยประกัน + ภาษีรถ ปีงบ ${fy}`, value: rentMoney(premiumFY + taxFY), icon: 'banknote', tone: 'mint', hint: `เบี้ย ${rentMoney(premiumFY)} · ภาษี ${rentMoney(taxFY)} บาท` })}
     </div>
     <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
       <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
-        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อ ทะเบียนรถ ผู้รับผิดชอบ บริษัทประกัน เลขที่กรมธรรม์..." value="${esc(Is.filter)}" data-is-q></div>
+        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อ ทะเบียนรถ ผู้รับผิดชอบ บริษัทประกัน เลขที่กรมธรรม์ เลขที่ใบเสร็จภาษี..." value="${esc(Is.filter)}" data-is-q></div>
       <select class="input !w-auto" data-is-type><option value="">ทุกประเภท</option>${Object.entries(INS_TYPE).map(([k, t]) => `<option value="${k}" ${Is.type === k ? 'selected' : ''}>${t.label}</option>`).join('')}</select>
-      <select class="input !w-auto" data-is-state><option value="">ทุกสถานะ</option>${[['alert', 'ต้องดำเนินการ (ใกล้หมด/หมด/ไม่มี)'], ['active', 'คุ้มครองอยู่'], ['soon', 'ใกล้หมดอายุ'], ['expired', 'หมดอายุแล้ว'], ['none', 'ยังไม่มีกรมธรรม์']].map(([k, l]) => `<option value="${k}" ${Is.state === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select class="input !w-auto" data-is-state><option value="">ทุกสถานะ</option>${[['alert', 'ต้องดำเนินการ (กรมธรรม์หรือภาษีรถ)'], ['active', 'คุ้มครองอยู่'], ['soon', 'ใกล้หมดอายุ'], ['expired', 'หมดอายุแล้ว'], ['none', 'ยังไม่มีกรมธรรม์'], ['tax_alert', 'ภาษีรถ: ใกล้ครบกำหนด/ขาดต่อ/ไม่มีข้อมูล']].map(([k, l]) => `<option value="${k}" ${Is.state === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
     </div>
     <div class="flex flex-wrap gap-2 mb-3">
       <button class="btn btn-primary" data-is-act="add-asset">${ic('plus')} เพิ่มทรัพย์สิน</button>
@@ -6644,9 +6652,9 @@ function insRenderPolicies(body, el) {
     </div>
     ${!Is.assets.length ? `<div class="card">${emptyState('ยังไม่มีทรัพย์สิน · กด "เพิ่มทรัพย์สิน" เพื่อเพิ่มรถยนต์ อาคาร หรือทรัพย์สินที่เอาประกัน', 'shield-check')}</div>` : `
     <div class="card !p-0 overflow-x-auto"><table class="sfh-table w-full text-sm min-w-[900px]">
-      <thead class="bg-gradient-to-r from-cream-50 via-white to-blush-50 text-slate-500"><tr><th>ทรัพย์สิน / กรมธรรม์</th><th>ระยะเวลาคุ้มครอง</th><th class="text-right">ทุนประกัน</th><th class="text-right">เบี้ยประกัน</th><th>ฎีกา</th><th class="text-right"></th></tr></thead>
+      <thead class="bg-gradient-to-r from-cream-50 via-white to-blush-50 text-slate-500"><tr><th>ทรัพย์สิน / กรมธรรม์ · ภาษีรถ</th><th>ระยะเวลาคุ้มครอง / วันที่ชำระ</th><th class="text-right">ทุนประกัน</th><th class="text-right">เบี้ยประกัน / ค่าภาษี</th><th>ฎีกา</th><th class="text-right"></th></tr></thead>
       <tbody class="divide-y divide-slate-100">${assets.map(assetRow).join('') || `<tr><td colspan="6">${emptyState('ไม่พบตามเงื่อนไข', 'search-x')}</td></tr>`}</tbody></table></div>`}
-    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} กดแถวทรัพย์สินเพื่อดูกรมธรรม์ทุกฉบับ · ปุ่ม ${ic('refresh-cw', 'w-3 h-3 inline')} ต่ออายุ = สร้างกรมธรรม์ปีถัดไปจากฉบับเดิม</p>`;
+    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} กดแถวทรัพย์สินเพื่อดูกรมธรรม์ทุกฉบับและประวัติภาษีรถ · ปุ่ม ${ic('refresh-cw', 'w-3 h-3 inline')} ต่ออายุ = สร้างกรมธรรม์ปีถัดไปจากฉบับเดิม · "ต่อภาษี" = สร้างรายการภาษีปีถัดไป (วันสิ้นอายุ +1 ปี)</p>`;
   body.oninput = debounce((e) => { if (e.target.matches('[data-is-q]')) { Is.filter = e.target.value; const pos = e.target.selectionStart; insRenderPolicies(body, el); refreshIcons(); const q2 = $('[data-is-q]', body); q2.focus(); q2.setSelectionRange(pos, pos); } }, 250);
   body.onchange = (e) => {
     if (e.target.matches('[data-is-type]')) { Is.type = e.target.value; insRenderPolicies(body, el); refreshIcons(); }
@@ -6655,6 +6663,8 @@ function insRenderPolicies(body, el) {
   body.onclick = (ev) => {
     const t = (s) => ev.target.closest(s);
     const rn = t('[data-is-renew]'); if (rn) { insOpenPolicy(null, insPolicy(rn.dataset.isRenew), null, el); return; }
+    const tr = t('[data-tx-renew]'); if (tr) { insOpenTax(null, tr.dataset.txRenew, el); return; }
+    const te = t('[data-tx-edit]'); if (te) { insOpenTax(Is.taxes.find(x => x.id === te.dataset.txEdit), null, el); return; }
     const pl = t('[data-is-pol]'); if (pl) { insOpenPolicy(insPolicy(pl.dataset.isPol), null, null, el); return; }
     const ap = t('[data-is-addpol]'); if (ap) { insOpenPolicy(null, null, ap.dataset.isAddpol, el); return; }
     const as = t('[data-is-asset]'); if (as) { insOpenAsset(insAsset(as.dataset.isAsset), el); return; }
@@ -6909,63 +6919,12 @@ function insTaxAlertRows() {
   return insVehicles().filter(a => a.is_active).map(a => ({ a, ...insTaxCover(a.id) })).filter(r => r.s !== 'active')
     .sort((x, y) => (x.t?.due_date || '0').localeCompare(y.t?.due_date || '0'));
 }
-function insRenderTaxes(body, el) {
-  const today = calToday(), fy = thaiFiscalYear(new Date()), fyFrom = rentMonthFirst(fy - 544, 10), fyTo = rentMonthLast(fy - 543, 9), q = (Is.taxFilter || '').trim();
-  Is.taxOpen = Is.taxOpen || new Set();
-  const all = insVehicles(), active = all.filter(a => a.is_active), states = active.map(a => insTaxCover(a.id).s);
-  const amountFY = Is.taxes.filter(t => { const d = t.doc_date || t.paid_date; return d && d >= fyFrom && d <= fyTo; }).reduce((s, t) => s + (+t.amount), 0);
-  let list = all.filter(a => !Is.taxState || insTaxCover(a.id).s === Is.taxState || (Is.taxState === 'alert' && a.is_active && insTaxCover(a.id).s !== 'active'));
-  if (q) list = list.filter(a => (insAssetLabel(a) + ' ' + (a.vehicle_kind || '') + ' ' + (a.brand_model || '') + ' ' + (a.custodian_name || '') + ' ' + insTaxesOf(a.id).map(t => t.receipt_no || '').join(' ')).includes(q));
-  const isOpen = (id) => !!q || Is.taxOpen.has(id);
-  const histRow = (t) => `<tr class="bg-white"><td class="!pl-10 whitespace-nowrap">ถึง ${formatThaiDate(calDate(t.due_date))}</td>
-    <td class="whitespace-nowrap">${t.paid_date ? formatThaiDate(calDate(t.paid_date)) : '-'}${t.receipt_no ? `<div class="text-[11px] text-slate-400">ใบเสร็จ ${esc(t.receipt_no)}</div>` : ''}</td>
-    <td class="text-right tabular-nums font-medium">${rentMoney(t.amount)}</td>
+/** แถวประวัติภาษีรถ 1 ปี (ใช้ในแท็บกรมธรรม์และภาษีรถ) */
+const insTaxHistRow = (t) => `<tr class="bg-white"><td class="!pl-10"><div class="text-sm text-slate-700">ภาษีรถ ถึง ${formatThaiDate(calDate(t.due_date))}</div>${t.inspection_date || t.note ? `<div class="text-[11px] text-slate-400">${esc([t.inspection_date ? 'ตรอ. ' + formatThaiDate(calDate(t.inspection_date)) : '', t.note || ''].filter(Boolean).join(' · '))}</div>` : ''}</td>
+    <td class="whitespace-nowrap text-sm">${t.paid_date ? `ชำระ ${formatThaiDate(calDate(t.paid_date))}` : 'ยังไม่ชำระ'}${t.receipt_no ? `<div class="text-[11px] text-slate-400">ใบเสร็จ ${esc(t.receipt_no)}</div>` : ''}</td>
+    <td class="text-right text-slate-300">-</td><td class="text-right tabular-nums font-medium">${rentMoney(t.amount)}</td>
     <td class="text-sm">${esc(t.doc_no || '-')}${t.doc_date ? `<div class="text-[11px] text-slate-400">${formatThaiDate(calDate(t.doc_date))}</div>` : ''}<div><span class="badge ${RENT_STATUS[t.pay_status].cls}">${RENT_STATUS[t.pay_status].label}</span></div></td>
-    <td class="text-xs text-slate-500">${t.inspection_date ? `ตรอ. ${formatThaiDate(calDate(t.inspection_date))}` : ''}${t.note ? `<div>${esc(t.note)}</div>` : ''}</td>
-    <td class="text-right"><button class="btn-icon" data-tx-edit="${t.id}" title="แก้ไข">${ic('pencil')}</button></td></tr>`;
-  const row = (a) => { const { t, s } = insTaxCover(a.id), open = isOpen(a.id), hist = insTaxesOf(a.id), d = t ? calDaysBetween(today, t.due_date) : null;
-    return `<tr class="bg-slate-50/80 hover:bg-cream-50/60 cursor-pointer" data-tx-toggle="${a.id}">
-      <td colspan="2"><div class="flex items-center gap-2"><span class="text-slate-400 transition ${open ? 'rotate-90' : ''}">${ic('chevron-right', 'w-4 h-4')}</span>
-        <span class="w-8 h-8 rounded-xl grid place-items-center bg-cream-100 text-cream-600 shrink-0">${ic('car', 'w-4 h-4')}</span>
-        <div class="min-w-0"><div class="font-semibold text-slate-800">${esc(insAssetLabel(a))} ${a.is_active ? '' : '<span class="badge bg-slate-100 text-slate-500">เลิกใช้</span>'}</div>
-          <div class="text-[11px] text-slate-500">${esc(insAssetSub(a, a.vehicle_kind, a.brand_model))}</div></div></div></td>
-      <td colspan="2" class="text-sm">${t ? `ภาษีถึง <b class="font-medium">${formatThaiDate(calDate(t.due_date))}</b>` : '-'}</td>
-      <td>${insTaxBadge(s, t && s === 'soon' ? ` (อีก ${d} วัน)` : t && s === 'expired' ? ` (${-d} วัน)` : '')}</td>
-      <td class="text-right"><button class="btn btn-soft btn-sm" data-tx-renew="${a.id}">${ic('refresh-cw', 'w-4 h-4')} ${t ? 'ต่อภาษี' : 'บันทึกภาษี'}</button></td></tr>
-      ${open ? (hist.map(histRow).join('') || `<tr class="bg-white"><td colspan="6" class="!pl-10 text-xs text-slate-400">ยังไม่มีประวัติการต่อภาษี</td></tr>`) : ''}`; };
-  body.innerHTML = `
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-      ${statCard({ label: 'รถที่ใช้งาน', value: formatNumber(active.length), icon: 'car', tone: 'brand' })}
-      ${statCard({ label: `ใกล้ครบกำหนด (${INS_TAX_SOON_DAYS} วัน)`, value: formatNumber(states.filter(s => s === 'soon').length), icon: 'alarm-clock', tone: 'cream', hint: 'ชำระล่วงหน้าได้ไม่เกิน 90 วัน' })}
-      ${statCard({ label: 'ภาษีขาดต่อ/ยังไม่มีข้อมูล', value: formatNumber(states.filter(s => s === 'expired' || s === 'none').length), icon: 'alert-octagon', tone: 'blush' })}
-      ${statCard({ label: `ค่าภาษีรถ ปีงบ ${fy}`, value: rentMoney(amountFY), icon: 'receipt', tone: 'mint', hint: 'บาท (ตามวันที่วางฎีกา/วันที่ชำระ)' })}
-    </div>
-    <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
-      <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
-        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อรถ ทะเบียน ยี่ห้อ ผู้รับผิดชอบ เลขที่ใบเสร็จ..." value="${esc(Is.taxFilter || '')}" data-tx-q></div>
-      <select class="input !w-auto" data-tx-state><option value="">ทุกสถานะ</option>${[['alert', 'ต้องดำเนินการ'], ['active', 'ภาษีปกติ'], ['soon', 'ใกล้ครบกำหนด'], ['expired', 'ภาษีขาดต่อ'], ['none', 'ยังไม่มีข้อมูล']].map(([k, l]) => `<option value="${k}" ${Is.taxState === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
-    </div>
-    <div class="flex flex-wrap gap-2 mb-3">
-      <button class="btn btn-ghost" data-tx-act="print" ${all.length ? '' : 'disabled'}>${ic('printer')} พิมพ์</button><button class="btn btn-ghost" data-tx-act="pdf" ${all.length ? '' : 'disabled'}>${ic('file-down')} PDF</button>
-      <button class="btn btn-ghost" data-tx-act="excel" ${Is.policies.length || Is.taxes.length || Is.fuel.length ? '' : 'disabled'}>${ic('file-spreadsheet')} Excel</button>
-      <div class="ml-auto flex gap-1">${eduExpandBtns('tx')}</div>
-    </div>
-    ${!all.length ? `<div class="card">${emptyState('ยังไม่มีรถในทะเบียน · เพิ่มรถได้ที่แท็บ "ทรัพย์สิน" (ประเภท รถยนต์/ยานพาหนะ)', 'car')}</div>` : `
-    <div class="card !p-0 overflow-x-auto"><table class="sfh-table w-full text-sm min-w-[880px]">
-      <thead class="bg-gradient-to-r from-cream-50 via-white to-blush-50 text-slate-500"><tr><th>รถ / วันสิ้นอายุภาษี</th><th>วันที่ชำระ</th><th class="text-right">ค่าภาษี</th><th>ฎีกา</th><th>สถานะ / หมายเหตุ</th><th></th></tr></thead>
-      <tbody class="divide-y divide-slate-100">${list.map(row).join('') || `<tr><td colspan="6">${emptyState('ไม่พบตามเงื่อนไข', 'search-x')}</td></tr>`}</tbody></table></div>`}
-    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} กดแถวรถเพื่อดูประวัติการต่อภาษี · ปุ่ม "ต่อภาษี" สร้างรายการปีถัดไป (วันสิ้นอายุ +1 ปี) จากรายการล่าสุด</p>`;
-  body.oninput = debounce((e) => { if (e.target.matches('[data-tx-q]')) { Is.taxFilter = e.target.value; const pos = e.target.selectionStart; insRenderTaxes(body, el); refreshIcons(); const q2 = $('[data-tx-q]', body); q2.focus(); q2.setSelectionRange(pos, pos); } }, 250);
-  body.onchange = (e) => { if (e.target.matches('[data-tx-state]')) { Is.taxState = e.target.value; insRenderTaxes(body, el); refreshIcons(); } };
-  body.onclick = (ev) => {
-    const t = (s) => ev.target.closest(s);
-    const rn = t('[data-tx-renew]'); if (rn) { insOpenTax(null, rn.dataset.txRenew, el); return; }
-    const ed = t('[data-tx-edit]'); if (ed) { insOpenTax(Is.taxes.find(x => x.id === ed.dataset.txEdit), null, el); return; }
-    const ex = t('[data-tx-expand]'); if (ex) { Is.taxOpen = new Set(ex.dataset.txExpand === 'all' ? list.map(a => a.id) : []); insRenderTaxes(body, el); refreshIcons(); return; }
-    const ac = t('[data-tx-act]'); if (ac) { if (ac.dataset.txAct === 'excel') insExportExcel(); else insTaxPrintMenu(ac.dataset.txAct); return; }
-    const tg = t('[data-tx-toggle]'); if (tg) { const id = tg.dataset.txToggle; Is.taxOpen.has(id) ? Is.taxOpen.delete(id) : Is.taxOpen.add(id); insRenderTaxes(body, el); refreshIcons(); }
-  };
-}
+    <td class="text-right"><button class="btn-icon" data-tx-edit="${t.id}" title="แก้ไขรายการภาษี">${ic('pencil')}</button></td></tr>`;
 /** บันทึก/แก้ไขภาษีรถ · tax = รายการเดิม (แก้ไข) · assetId = บันทึกใหม่/ต่อภาษีจากรายการล่าสุดของรถคันนี้ */
 function insOpenTax(tax, assetId, el) {
   const a = insAsset(tax?.asset_id || assetId); if (!a) return;
@@ -7000,7 +6959,7 @@ function insOpenTax(tax, assetId, el) {
     if (insTaxesOf(a.id).some(x => x.id !== tax?.id && x.due_date === data.due_date)) { showToast('มีรายการภาษีที่สิ้นอายุวันที่นี้แล้ว', 'warning'); return; }
     if (tax && !(await rentConfirmEdit(`ยืนยันแก้ไขภาษีรถ · ${insAssetLabel(a)}`, tax, data, INS_TAX_FIELDS))) return;
     const r = await rpcSecure('sfh_ins_tax_save', { p_id: tax?.id || null, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: last ? 'ต่อภาษีรถแล้ว' : 'บันทึกภาษีรถแล้ว' });
-    if (r.ok) { (Is.taxOpen = Is.taxOpen || new Set()).add(a.id); m.close(); insRefresh(el); }
+    if (r.ok) { Is.open.add(a.id); m.close(); insRefresh(el); }
   };
 }
 
@@ -7036,12 +6995,12 @@ function insRenderFuel(body, el) {
   Is.fuelMonth = Is.fuelMonth || calToday().slice(0, 7); Is.fuelOpen = Is.fuelOpen || new Set();
   const ym = Is.fuelMonth, q = (Is.fuelQ || '').trim(), assets = insFuelAssets();
   const groups = assets.filter(a => !Is.fuelAsset || a.id === Is.fuelAsset).map(a => ({ a, rows: insFuelInMonth(a.id, ym) })).filter(g => g.rows.length)
-    .map(g => q && !(insAssetLabel(g.a) + ' ' + (g.a.custodian_name || '')).includes(q) ? { ...g, rows: g.rows.filter(r => [r.requester_name, r.purpose, r.slip_no, r.station, r.receipt_no].join(' ').includes(q)) } : g).filter(g => g.rows.length)
+    .map(g => q && !(insAssetLabel(g.a) + ' ' + (g.a.custodian_name || '')).includes(q) ? { ...g, rows: g.rows.filter(r => [r.requester_name, r.purpose, r.slip_no, r.station, r.receipt_no, r.note].join(' ').includes(q)) } : g).filter(g => g.rows.length)
     .sort((x, y) => insAssetLabel(x.a).localeCompare(insAssetLabel(y.a), 'th'));
   const month = insFuelSum(groups.flatMap(g => g.rows)), fyRows = Is.fuel.filter(f => f.fuel_date >= fyFrom && f.fuel_date <= fyTo);
   const isOpen = (id) => !!q || Is.fuelOpen.has(id);
   const logRow = (f) => `<tr class="bg-white"><td class="!pl-10 whitespace-nowrap">${formatThaiDate(calDate(f.fuel_date))}${f.slip_no ? `<div class="text-[11px] text-slate-400">ใบเบิก ${esc(f.slip_no)}</div>` : ''}</td>
-    <td class="text-sm">${esc(f.requester_name || '-')}<div class="text-[11px] text-slate-400">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div></td>
+    <td class="text-sm">${esc(f.requester_name || '-')}<div class="text-[11px] text-slate-400">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div>${f.note ? `<div class="text-[11px] text-amber-600 whitespace-pre-line">หมายเหตุ: ${esc(f.note)}</div>` : ''}</td>
     <td class="text-sm whitespace-nowrap">${INS_FUEL_TYPES[f.fuel_type] || esc(f.fuel_type)}<div class="text-[11px] text-slate-400">${insFuelNum(f.liters)} ล. × ${insFuelNum(f.unit_price)}</div></td>
     <td class="text-right tabular-nums font-medium">${rentMoney(f.amount)}</td>
     <td class="text-right tabular-nums text-sm">${f.odometer != null ? formatNumber(+f.odometer) : '-'}<div class="text-[11px] text-slate-400">${f._dist != null ? `${formatNumber(f._dist)} กม. · ${insFuelNum(f._kmpl)} กม./ล.` : ''}</div></td>
@@ -7065,7 +7024,7 @@ function insRenderFuel(body, el) {
     </div>
     <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
       <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
-        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหารถ ผู้เบิก เส้นทาง เลขที่ใบเบิก..." value="${esc(Is.fuelQ || '')}" data-fu-q></div>
+        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหารถ ผู้เบิก เส้นทาง เลขที่ใบเบิก หมายเหตุ..." value="${esc(Is.fuelQ || '')}" data-fu-q></div>
       <input type="month" class="input !w-auto" value="${ym}" data-fu-month>
       <select class="input !w-auto" data-fu-asset><option value="">รถ/ครุภัณฑ์ทั้งหมด</option>${assets.map(a => `<option value="${a.id}" ${Is.fuelAsset === a.id ? 'selected' : ''}>${esc(insAssetLabel(a))}</option>`).join('')}</select>
     </div>
@@ -7128,7 +7087,7 @@ function insOpenFuel(log, assetId, el) {
       <div><label class="label">สถานะเบิกจ่าย</label><select class="input" name="pay_status">${Object.entries(RENT_STATUS).map(([k, s]) => `<option value="${k}" ${k === (v.pay_status || 'pending') ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
       <div><label class="label">เลขที่ฎีกา</label><input class="input" name="doc_no" value="${esc(v.doc_no || '')}"></div>
       <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" name="doc_date" value="${esc(v.doc_date || '')}"></div>
-      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(v.note || '')}"></div></form>`,
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><textarea class="input" name="note" rows="2" placeholder="เช่น เติมน้ำมันเครื่องตัดหญ้า, เติมไม่เต็มถัง, ใบเสร็จชำรุด">${esc(v.note || '')}</textarea></div></form>`,
     footer: `${log ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
   const F = $('form', m.el).elements, num = (k) => { const n = Number(String(F[k].value ?? '').replace(/,/g, '')); return String(F[k].value ?? '').trim() === '' || !isFinite(n) ? null : n; };
   let amountTouched = !!log && Math.abs(+log.amount - Math.round(+log.liters * +log.unit_price * 100) / 100) > 0.005;   // แก้ไข: คำนวณใหม่อัตโนมัติ เว้นแต่ยอดเดิมกรอกเองตามใบเสร็จ
@@ -7210,7 +7169,7 @@ async function insPrintFuel(kind, mode, opts = {}) {
     html = pages.map((pg, pi) => page(`ทะเบียนคุมการเบิกน้ำมันเชื้อเพลิง ประจำเดือน${insYmText(opts.ym)}`, one ? esc(insAssetLabel(one)) + (one.custodian_name ? ` · ผู้รับผิดชอบ ${esc(one.custodian_name)}` : '') : 'รถ/ครุภัณฑ์ทั้งหมด',
       `<th style="width:8mm">ที่</th><th style="width:20mm">วันที่</th><th style="width:20mm">ใบเบิก</th>${one ? '' : '<th style="width:38mm">รถ / ครุภัณฑ์</th>'}<th>ผู้เบิก / ใช้ในราชการ</th><th style="width:22mm">ชนิด</th><th style="width:15mm">ลิตร</th><th style="width:15mm">ราคา/ล.</th><th style="width:20mm">จำนวนเงิน</th><th style="width:20mm">เลขไมล์</th><th style="width:16mm">ระยะทาง</th><th style="width:22mm">ฎีกา</th>`,
       pg.map(({ a, f }, i) => `<tr><td class="n" style="text-align:center">${pi * 15 + i + 1}</td><td>${formatThaiDate(calDate(f.fuel_date))}</td><td style="font-size:10px">${esc(f.slip_no || '')}</td>${one ? '' : `<td style="font-size:10px">${esc(insAssetLabel(a))}</td>`}
-        <td style="font-size:10px">${esc(f.requester_name || '-')}<div style="color:#6b7280">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div></td><td style="font-size:10px">${INS_FUEL_TYPES[f.fuel_type] || ''}</td><td class="n">${n2(f.liters)}</td><td class="n">${n2(f.unit_price)}</td><td class="n">${rentMoney(f.amount)}</td>
+        <td style="font-size:10px">${esc(f.requester_name || '-')}<div style="color:#6b7280">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div>${f.note ? `<div style="color:#6b7280">หมายเหตุ: ${esc(f.note)}</div>` : ''}</td><td style="font-size:10px">${INS_FUEL_TYPES[f.fuel_type] || ''}</td><td class="n">${n2(f.liters)}</td><td class="n">${n2(f.unit_price)}</td><td class="n">${rentMoney(f.amount)}</td>
         <td class="n">${f.odometer != null ? formatNumber(+f.odometer) : '-'}</td><td class="n">${f._dist != null ? formatNumber(f._dist) : '-'}</td><td style="font-size:10px">${esc(f.doc_no || '')}${f.doc_date ? `<div>${formatThaiDate(calDate(f.doc_date))}</div>` : ''}</td></tr>`).join(''), pi, pages.length,
       `<tr class="tot"><td colspan="${one ? 5 : 6}" style="text-align:center">รวม ${rows.length} รายการ</td><td class="n">${n2(tot.liters)}</td><td></td><td class="n">${rentMoney(tot.amount)}</td><td></td><td class="n">${tot.dist != null ? formatNumber(tot.dist) : '-'}</td><td></td></tr>
        <tr><td colspan="${one ? 11 : 12}" style="text-align:right">(${esc(bahtText(tot.amount))})${tot.kmpl != null ? ` · อัตราสิ้นเปลืองเฉลี่ย ${n2(tot.kmpl)} กม./ลิตร` : ''}</td></tr>`)).join('');
@@ -7267,28 +7226,23 @@ async function insPrintTax(kind, mode, opts = {}) {
   await rgOutput(root, 'landscape', mode, filename);
 }
 /** เมนูพิมพ์ของแท็บภาษีรถ */
-function insTaxPrintMenu(mode) {
-  const fyNow = thaiFiscalYear(new Date()), opt = (k, icon, t, d) => `<button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="${k}"><div class="font-medium text-slate-700">${ic(icon, 'w-4 h-4 inline')} ${t}</div><div class="text-xs text-slate-400">${d}</div></button>`;
-  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF · ภาษีรถ' : 'พิมพ์ทะเบียนภาษีรถ', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
-    body: `<div class="grid gap-2">
-      ${opt('current', 'receipt', 'ทะเบียนคุมภาษีรถปัจจุบัน', 'A4 แนวนอน · รถทุกคันที่ใช้งาน วันสิ้นอายุภาษี การชำระล่าสุด และสถานะ')}
-      ${opt('alerts', 'alarm-clock', 'รายการรถที่ต้องต่อภาษี', `ภาษีขาดต่อ / สิ้นอายุภายใน ${INS_TAX_SOON_DAYS} วัน / ยังไม่มีข้อมูล`)}
-      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('banknote', 'w-4 h-4 inline')} สรุปค่าภาษีรถปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (ถ้าไม่มี ใช้วันที่ชำระ)</div>
-        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
-  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const opts = b.dataset.k === 'fy' ? { fy: +$('[data-fy]', m.el).value } : {}; m.close(); insPrintTax(b.dataset.k, mode, opts); });
-}
 function insPrintMenu(mode) {
   const fyNow = thaiFiscalYear(new Date());
-  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
+  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF · กรมธรรม์และภาษีรถ' : 'พิมพ์ทะเบียนกรมธรรม์และภาษีรถ', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
     body: `<div class="grid gap-2">
       <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="current"><div class="font-medium text-slate-700">${ic('shield-check', 'w-4 h-4 inline')} ทะเบียนกรมธรรม์ปัจจุบัน</div><div class="text-xs text-slate-400">A4 แนวนอน · ฉบับล่าสุดของทุกทรัพย์สินแยกตามประเภท</div></button>
       <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="alerts"><div class="font-medium text-slate-700">${ic('alarm-clock', 'w-4 h-4 inline')} รายการที่ต้องต่ออายุ</div><div class="text-xs text-slate-400">หมดอายุแล้ว / หมดภายใน ${INS_SOON_DAYS} วัน / ยังไม่มีกรมธรรม์</div></button>
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="tax"><div class="font-medium text-slate-700">${ic('receipt', 'w-4 h-4 inline')} ทะเบียนภาษีรถประจำปี</div><div class="text-xs text-slate-400">รถทุกคันที่ใช้งาน · วันสิ้นอายุภาษี การชำระล่าสุด และสถานะ</div></button>
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="tax"><div class="font-medium text-slate-700">${ic('receipt', 'w-4 h-4 inline')} ทะเบียนคุมภาษีรถปัจจุบัน</div><div class="text-xs text-slate-400">รถทุกคันที่ใช้งาน · วันสิ้นอายุภาษี การชำระล่าสุด และสถานะ</div></button>
+      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-cream-200 hover:bg-cream-50/50" data-k="tax-alerts"><div class="font-medium text-slate-700">${ic('alarm-clock', 'w-4 h-4 inline')} รายการรถที่ต้องต่อภาษี</div><div class="text-xs text-slate-400">ภาษีขาดต่อ / สิ้นอายุภายใน ${INS_TAX_SOON_DAYS} วัน / ยังไม่มีข้อมูล</div></button>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('banknote', 'w-4 h-4 inline')} สรุปเบี้ยประกันปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (ถ้าไม่มี ใช้วันเริ่มคุ้มครอง)</div>
         <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
-  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const opts = b.dataset.k === 'fy' ? { fy: +$('[data-fy]', m.el).value } : {}; m.close(); if (b.dataset.k === 'tax') insPrintTax('current', mode); else insPrint(b.dataset.k, mode, opts); });
+          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('banknote', 'w-4 h-4 inline')} สรุปค่าภาษีรถปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (ถ้าไม่มี ใช้วันที่ชำระ)</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-tax-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="tax-fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const k = b.dataset.k, fy = +$('[data-fy]', m.el).value, taxFy = +$('[data-tax-fy]', m.el).value; m.close();
+    if (k === 'tax') insPrintTax('current', mode); else if (k === 'tax-alerts') insPrintTax('alerts', mode); else if (k === 'tax-fy') insPrintTax('fy', mode, { fy: taxFy });
+    else insPrint(k, mode, k === 'fy' ? { fy } : {}); });
 }
 async function insPrint(kind, mode, opts = {}) {
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
@@ -7340,10 +7294,10 @@ async function insExportExcel() {
   XLSX.utils.book_append_sheet(wb, ws2, 'ภาษีรถ');
   const fuelRows = insFuelAssets().flatMap(a => insFuelOf(a.id).map(f => ({ a, f }))).sort((x, y) => y.f.fuel_date.localeCompare(x.f.fuel_date) || insAssetLabel(x.a).localeCompare(insAssetLabel(y.a), 'th'))
     .map(({ a, f }, i) => [i + 1, formatThaiDate(calDate(f.fuel_date)), f.slip_no || '', a.name || '', [a.plate_no, a.plate_province].filter(Boolean).join(' '), f.requester_name || '', f.purpose || '', INS_FUEL_TYPES[f.fuel_type] || f.fuel_type,
-      +f.liters, +f.unit_price, +f.amount, f.odometer != null ? +f.odometer : null, f._dist, f._kmpl != null ? Math.round(f._kmpl * 100) / 100 : null, f.station || '', f.receipt_no || '', f.doc_no || '', f.doc_date ? formatThaiDate(calDate(f.doc_date)) : '', RENT_STATUS[f.pay_status].label]);
+      +f.liters, +f.unit_price, +f.amount, f.odometer != null ? +f.odometer : null, f._dist, f._kmpl != null ? Math.round(f._kmpl * 100) / 100 : null, f.station || '', f.receipt_no || '', f.doc_no || '', f.doc_date ? formatThaiDate(calDate(f.doc_date)) : '', RENT_STATUS[f.pay_status].label, f.note || '']);
   const ws3 = XLSX.utils.aoa_to_sheet([['ทะเบียนคุมการเบิกน้ำมันเชื้อเพลิง'], [State.settings.org_name || ''], [], ['ที่', 'วันที่เบิก', 'เลขที่ใบเบิก', 'รถ/ครุภัณฑ์', 'ทะเบียน', 'ผู้เบิก', 'ใช้ในราชการ/เส้นทาง', 'ชนิดน้ำมัน',
-    'ลิตร', 'ราคา/ลิตร', 'จำนวนเงิน', 'เลขไมล์', 'ระยะทาง (กม.)', 'กม./ลิตร', 'สถานีบริการ', 'เลขที่ใบเสร็จ', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะเบิกจ่าย'], ...fuelRows]);
-  ws3['!cols'] = [5, 13, 12, 24, 14, 20, 24, 14, 9, 9, 11, 10, 11, 9, 18, 14, 14, 13, 12].map(w => ({ wch: w }));
+    'ลิตร', 'ราคา/ลิตร', 'จำนวนเงิน', 'เลขไมล์', 'ระยะทาง (กม.)', 'กม./ลิตร', 'สถานีบริการ', 'เลขที่ใบเสร็จ', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะเบิกจ่าย', 'หมายเหตุ'], ...fuelRows]);
+  ws3['!cols'] = [5, 13, 12, 24, 14, 20, 24, 14, 9, 9, 11, 10, 11, 9, 18, 14, 14, 13, 12, 30].map(w => ({ wch: w }));
   XLSX.utils.book_append_sheet(wb, ws3, 'น้ำมันเชื้อเพลิง');
   XLSX.writeFile(wb, 'ทะเบียนคุมครุภัณฑ์.xlsx');
   rpcSecure('sfh_ins_log', { p_kind: 'excel', p_details: { count: data.length } }, { loader: false });
