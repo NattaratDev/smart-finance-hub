@@ -7100,7 +7100,7 @@ function insOpenFuel(log, assetId, el) {
     if (!amountTouched) F.amount.value = l && p != null ? (Math.round(l * p * 100) / 100).toFixed(2) : '';
     const o = num('odometer'), po = prevOdo();
     $('[data-fu-calc]', m.el).innerHTML = o == null ? 'กรอกเลขไมล์เพื่อคำนวณระยะทาง' : po == null ? 'ครั้งแรกของรถคันนี้ (ยังคำนวณระยะทางไม่ได้)'
-      : o < po ? `<span class="text-blush-500">เลขไมล์น้อยกว่าครั้งก่อน (${formatNumber(po)})</span>` : `ระยะทาง ${formatNumber(o - po)} กม.${l ? ` · ${insFuelNum((o - po) / l)} กม./ลิตร` : ''}`;
+      : o < po ? `<span class="text-blush-500">เลขไมล์น้อยกว่าครั้งก่อน (${formatNumber(po)})</span>` : `ระยะทาง ${formatNumber(o - po)} กม.`;
   };
   m.el.addEventListener('input', (e) => { if (e.target.name === 'amount') amountTouched = String(e.target.value).trim() !== ''; refresh(); });
   m.el.addEventListener('change', (e) => {
