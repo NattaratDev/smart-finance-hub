@@ -7036,12 +7036,12 @@ function insRenderFuel(body, el) {
   Is.fuelMonth = Is.fuelMonth || calToday().slice(0, 7); Is.fuelOpen = Is.fuelOpen || new Set();
   const ym = Is.fuelMonth, q = (Is.fuelQ || '').trim(), assets = insFuelAssets();
   const groups = assets.filter(a => !Is.fuelAsset || a.id === Is.fuelAsset).map(a => ({ a, rows: insFuelInMonth(a.id, ym) })).filter(g => g.rows.length)
-    .map(g => q && !(insAssetLabel(g.a) + ' ' + (g.a.custodian_name || '')).includes(q) ? { ...g, rows: g.rows.filter(r => [r.requester_name, r.purpose, r.slip_no, r.station, r.receipt_no].join(' ').includes(q)) } : g).filter(g => g.rows.length)
+    .map(g => q && !(insAssetLabel(g.a) + ' ' + (g.a.custodian_name || '')).includes(q) ? { ...g, rows: g.rows.filter(r => [r.requester_name, r.purpose, r.slip_no, r.station, r.receipt_no, r.note].join(' ').includes(q)) } : g).filter(g => g.rows.length)
     .sort((x, y) => insAssetLabel(x.a).localeCompare(insAssetLabel(y.a), 'th'));
   const month = insFuelSum(groups.flatMap(g => g.rows)), fyRows = Is.fuel.filter(f => f.fuel_date >= fyFrom && f.fuel_date <= fyTo);
   const isOpen = (id) => !!q || Is.fuelOpen.has(id);
   const logRow = (f) => `<tr class="bg-white"><td class="!pl-10 whitespace-nowrap">${formatThaiDate(calDate(f.fuel_date))}${f.slip_no ? `<div class="text-[11px] text-slate-400">ใบเบิก ${esc(f.slip_no)}</div>` : ''}</td>
-    <td class="text-sm">${esc(f.requester_name || '-')}<div class="text-[11px] text-slate-400">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div></td>
+    <td class="text-sm">${esc(f.requester_name || '-')}<div class="text-[11px] text-slate-400">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div>${f.note ? `<div class="text-[11px] text-amber-600 whitespace-pre-line">หมายเหตุ: ${esc(f.note)}</div>` : ''}</td>
     <td class="text-sm whitespace-nowrap">${INS_FUEL_TYPES[f.fuel_type] || esc(f.fuel_type)}<div class="text-[11px] text-slate-400">${insFuelNum(f.liters)} ล. × ${insFuelNum(f.unit_price)}</div></td>
     <td class="text-right tabular-nums font-medium">${rentMoney(f.amount)}</td>
     <td class="text-right tabular-nums text-sm">${f.odometer != null ? formatNumber(+f.odometer) : '-'}<div class="text-[11px] text-slate-400">${f._dist != null ? `${formatNumber(f._dist)} กม. · ${insFuelNum(f._kmpl)} กม./ล.` : ''}</div></td>
@@ -7065,7 +7065,7 @@ function insRenderFuel(body, el) {
     </div>
     <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
       <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
-        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหารถ ผู้เบิก เส้นทาง เลขที่ใบเบิก..." value="${esc(Is.fuelQ || '')}" data-fu-q></div>
+        <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหารถ ผู้เบิก เส้นทาง เลขที่ใบเบิก หมายเหตุ..." value="${esc(Is.fuelQ || '')}" data-fu-q></div>
       <input type="month" class="input !w-auto" value="${ym}" data-fu-month>
       <select class="input !w-auto" data-fu-asset><option value="">รถ/ครุภัณฑ์ทั้งหมด</option>${assets.map(a => `<option value="${a.id}" ${Is.fuelAsset === a.id ? 'selected' : ''}>${esc(insAssetLabel(a))}</option>`).join('')}</select>
     </div>
@@ -7128,7 +7128,7 @@ function insOpenFuel(log, assetId, el) {
       <div><label class="label">สถานะเบิกจ่าย</label><select class="input" name="pay_status">${Object.entries(RENT_STATUS).map(([k, s]) => `<option value="${k}" ${k === (v.pay_status || 'pending') ? 'selected' : ''}>${s.label}</option>`).join('')}</select></div>
       <div><label class="label">เลขที่ฎีกา</label><input class="input" name="doc_no" value="${esc(v.doc_no || '')}"></div>
       <div><label class="label">วันที่วางฎีกา</label><input type="date" class="input" name="doc_date" value="${esc(v.doc_date || '')}"></div>
-      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><input class="input" name="note" value="${esc(v.note || '')}"></div></form>`,
+      <div class="sm:col-span-2"><label class="label">หมายเหตุ</label><textarea class="input" name="note" rows="2" placeholder="เช่น เติมน้ำมันเครื่องตัดหญ้า, เติมไม่เต็มถัง, ใบเสร็จชำรุด">${esc(v.note || '')}</textarea></div></form>`,
     footer: `${log ? `<button type="button" class="btn btn-danger mr-auto" data-del>${ic('trash-2')} ลบ</button>` : ''}<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-save>${ic('save')} บันทึก</button>` });
   const F = $('form', m.el).elements, num = (k) => { const n = Number(String(F[k].value ?? '').replace(/,/g, '')); return String(F[k].value ?? '').trim() === '' || !isFinite(n) ? null : n; };
   let amountTouched = !!log && Math.abs(+log.amount - Math.round(+log.liters * +log.unit_price * 100) / 100) > 0.005;   // แก้ไข: คำนวณใหม่อัตโนมัติ เว้นแต่ยอดเดิมกรอกเองตามใบเสร็จ
@@ -7210,7 +7210,7 @@ async function insPrintFuel(kind, mode, opts = {}) {
     html = pages.map((pg, pi) => page(`ทะเบียนคุมการเบิกน้ำมันเชื้อเพลิง ประจำเดือน${insYmText(opts.ym)}`, one ? esc(insAssetLabel(one)) + (one.custodian_name ? ` · ผู้รับผิดชอบ ${esc(one.custodian_name)}` : '') : 'รถ/ครุภัณฑ์ทั้งหมด',
       `<th style="width:8mm">ที่</th><th style="width:20mm">วันที่</th><th style="width:20mm">ใบเบิก</th>${one ? '' : '<th style="width:38mm">รถ / ครุภัณฑ์</th>'}<th>ผู้เบิก / ใช้ในราชการ</th><th style="width:22mm">ชนิด</th><th style="width:15mm">ลิตร</th><th style="width:15mm">ราคา/ล.</th><th style="width:20mm">จำนวนเงิน</th><th style="width:20mm">เลขไมล์</th><th style="width:16mm">ระยะทาง</th><th style="width:22mm">ฎีกา</th>`,
       pg.map(({ a, f }, i) => `<tr><td class="n" style="text-align:center">${pi * 15 + i + 1}</td><td>${formatThaiDate(calDate(f.fuel_date))}</td><td style="font-size:10px">${esc(f.slip_no || '')}</td>${one ? '' : `<td style="font-size:10px">${esc(insAssetLabel(a))}</td>`}
-        <td style="font-size:10px">${esc(f.requester_name || '-')}<div style="color:#6b7280">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div></td><td style="font-size:10px">${INS_FUEL_TYPES[f.fuel_type] || ''}</td><td class="n">${n2(f.liters)}</td><td class="n">${n2(f.unit_price)}</td><td class="n">${rentMoney(f.amount)}</td>
+        <td style="font-size:10px">${esc(f.requester_name || '-')}<div style="color:#6b7280">${esc([f.purpose, f.station].filter(Boolean).join(' · '))}</div>${f.note ? `<div style="color:#6b7280">หมายเหตุ: ${esc(f.note)}</div>` : ''}</td><td style="font-size:10px">${INS_FUEL_TYPES[f.fuel_type] || ''}</td><td class="n">${n2(f.liters)}</td><td class="n">${n2(f.unit_price)}</td><td class="n">${rentMoney(f.amount)}</td>
         <td class="n">${f.odometer != null ? formatNumber(+f.odometer) : '-'}</td><td class="n">${f._dist != null ? formatNumber(f._dist) : '-'}</td><td style="font-size:10px">${esc(f.doc_no || '')}${f.doc_date ? `<div>${formatThaiDate(calDate(f.doc_date))}</div>` : ''}</td></tr>`).join(''), pi, pages.length,
       `<tr class="tot"><td colspan="${one ? 5 : 6}" style="text-align:center">รวม ${rows.length} รายการ</td><td class="n">${n2(tot.liters)}</td><td></td><td class="n">${rentMoney(tot.amount)}</td><td></td><td class="n">${tot.dist != null ? formatNumber(tot.dist) : '-'}</td><td></td></tr>
        <tr><td colspan="${one ? 11 : 12}" style="text-align:right">(${esc(bahtText(tot.amount))})${tot.kmpl != null ? ` · อัตราสิ้นเปลืองเฉลี่ย ${n2(tot.kmpl)} กม./ลิตร` : ''}</td></tr>`)).join('');
@@ -7340,10 +7340,10 @@ async function insExportExcel() {
   XLSX.utils.book_append_sheet(wb, ws2, 'ภาษีรถ');
   const fuelRows = insFuelAssets().flatMap(a => insFuelOf(a.id).map(f => ({ a, f }))).sort((x, y) => y.f.fuel_date.localeCompare(x.f.fuel_date) || insAssetLabel(x.a).localeCompare(insAssetLabel(y.a), 'th'))
     .map(({ a, f }, i) => [i + 1, formatThaiDate(calDate(f.fuel_date)), f.slip_no || '', a.name || '', [a.plate_no, a.plate_province].filter(Boolean).join(' '), f.requester_name || '', f.purpose || '', INS_FUEL_TYPES[f.fuel_type] || f.fuel_type,
-      +f.liters, +f.unit_price, +f.amount, f.odometer != null ? +f.odometer : null, f._dist, f._kmpl != null ? Math.round(f._kmpl * 100) / 100 : null, f.station || '', f.receipt_no || '', f.doc_no || '', f.doc_date ? formatThaiDate(calDate(f.doc_date)) : '', RENT_STATUS[f.pay_status].label]);
+      +f.liters, +f.unit_price, +f.amount, f.odometer != null ? +f.odometer : null, f._dist, f._kmpl != null ? Math.round(f._kmpl * 100) / 100 : null, f.station || '', f.receipt_no || '', f.doc_no || '', f.doc_date ? formatThaiDate(calDate(f.doc_date)) : '', RENT_STATUS[f.pay_status].label, f.note || '']);
   const ws3 = XLSX.utils.aoa_to_sheet([['ทะเบียนคุมการเบิกน้ำมันเชื้อเพลิง'], [State.settings.org_name || ''], [], ['ที่', 'วันที่เบิก', 'เลขที่ใบเบิก', 'รถ/ครุภัณฑ์', 'ทะเบียน', 'ผู้เบิก', 'ใช้ในราชการ/เส้นทาง', 'ชนิดน้ำมัน',
-    'ลิตร', 'ราคา/ลิตร', 'จำนวนเงิน', 'เลขไมล์', 'ระยะทาง (กม.)', 'กม./ลิตร', 'สถานีบริการ', 'เลขที่ใบเสร็จ', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะเบิกจ่าย'], ...fuelRows]);
-  ws3['!cols'] = [5, 13, 12, 24, 14, 20, 24, 14, 9, 9, 11, 10, 11, 9, 18, 14, 14, 13, 12].map(w => ({ wch: w }));
+    'ลิตร', 'ราคา/ลิตร', 'จำนวนเงิน', 'เลขไมล์', 'ระยะทาง (กม.)', 'กม./ลิตร', 'สถานีบริการ', 'เลขที่ใบเสร็จ', 'เลขที่ฎีกา', 'วันที่วางฎีกา', 'สถานะเบิกจ่าย', 'หมายเหตุ'], ...fuelRows]);
+  ws3['!cols'] = [5, 13, 12, 24, 14, 20, 24, 14, 9, 9, 11, 10, 11, 9, 18, 14, 14, 13, 12, 30].map(w => ({ wch: w }));
   XLSX.utils.book_append_sheet(wb, ws3, 'น้ำมันเชื้อเพลิง');
   XLSX.writeFile(wb, 'ทะเบียนคุมครุภัณฑ์.xlsx');
   rpcSecure('sfh_ins_log', { p_kind: 'excel', p_details: { count: data.length } }, { loader: false });
