@@ -7240,8 +7240,12 @@ function insPrintMenu(mode) {
           <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('banknote', 'w-4 h-4 inline')} สรุปค่าภาษีรถปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (ถ้าไม่มี ใช้วันที่ชำระ)</div>
         <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-tax-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="tax-fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
-  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const k = b.dataset.k, fy = +$('[data-fy]', m.el).value, taxFy = +$('[data-tax-fy]', m.el).value; m.close();
+          <button type="button" class="btn btn-primary btn-sm" data-k="tax-fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
+      <div class="rounded-2xl border border-cream-200 bg-cream-50/40 p-3"><div class="font-medium text-slate-700">${ic('calendar-clock', 'w-4 h-4 inline')} ค่าใช้จ่ายจ่ายล่วงหน้า ณ 30 ก.ย.</div><div class="text-xs text-slate-400 mb-2">จำนวนวันที่กรมธรรม์/ภาษีรถคงเหลือหลังสิ้นปีงบประมาณ และยอดที่ต้องบันทึกเป็นค่าใช้จ่ายจ่ายล่วงหน้า</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-pre-fy>${[fyNow, fyNow - 1, fyNow - 2, fyNow - 3].map(y => `<option value="${y}" ${y === insPrepaidDefaultFy() ? 'selected' : ''}>ณ 30 ก.ย. ${y} (ปีงบ ${y})</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="prepaid">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
+  m.el.addEventListener('click', (e) => { const b = e.target.closest('[data-k]'); if (!b) return; const k = b.dataset.k, fy = +$('[data-fy]', m.el).value, taxFy = +$('[data-tax-fy]', m.el).value, preFy = +$('[data-pre-fy]', m.el).value; m.close();
+    if (k === 'prepaid') { insPrintPrepaid(mode, preFy); return; }
     if (k === 'tax') insPrintTax('current', mode); else if (k === 'tax-alerts') insPrintTax('alerts', mode); else if (k === 'tax-fy') insPrintTax('fy', mode, { fy: taxFy });
     else insPrint(k, mode, k === 'fy' ? { fy } : {}); });
 }
@@ -7275,6 +7279,48 @@ async function insPrint(kind, mode, opts = {}) {
     </tbody></table>${pi === pages.length - 1 ? RG_SIGN : ''}<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
   rpcSecure('sfh_ins_log', { p_kind: `${mode}_${kind}`, p_details: { count: rows.length, ...opts } }, { loader: false });
   await rgOutput(root, 'landscape', mode, filename);
+}
+/** ปีงบที่เพิ่งสิ้นสุด (ต.ค.–ธ.ค. ยังปิดบัญชีปีก่อน) มิฉะนั้นปีงบปัจจุบัน */
+function insPrepaidDefaultFy() { const fy = thaiFiscalYear(new Date()), m = new Date().getMonth() + 1; return m >= 10 ? fy - 1 : fy; }
+/** ค่าใช้จ่ายจ่ายล่วงหน้า ณ 30 ก.ย. ของปีงบ fy
+ *  วันทั้งหมด = วันสิ้นสุด − วันเริ่ม · คงเหลือ = วันสิ้นสุด − 30 ก.ย. (ทั้งหมดถ้าเริ่มหลัง 30 ก.ย.)
+ *  จ่ายล่วงหน้า = จำนวนเงิน × วันคงเหลือ ÷ วันทั้งหมด
+ *  ภาษีรถ: ช่วงมีผล = วันสิ้นอายุ − 1 ปี ถึงวันสิ้นอายุ */
+function insPrepaidRows(fy) {
+  const fyEnd = rentMonthLast(fy - 543, 9), out = [];
+  const calc = (start, end, amount) => { const total = calDaysBetween(start, end), remain = calDaysBetween(start > fyEnd ? start : fyEnd, end);
+    const prepaid = total > 0 ? Math.round(+amount * remain / total * 100) / 100 : 0; return { total, remain, used: total - remain, prepaid, expense: Math.round((+amount - prepaid) * 100) / 100 }; };
+  Is.policies.filter(p => p.end_date > fyEnd && (p.start_date <= fyEnd || (p.doc_date && p.doc_date <= fyEnd)) && +p.premium > 0)
+    .forEach(p => out.push({ kind: 'policy', a: insAsset(p.asset_id), label: INS_POLICY[p.policy_type] + (p.coverage_class ? ' · ' + p.coverage_class : ''), ref: [p.insurer, p.policy_no].filter(Boolean).join(' · '),
+      start: p.start_date, end: p.end_date, amount: +p.premium, doc: p.doc_no, ...calc(p.start_date, p.end_date, p.premium) }));
+  Is.taxes.forEach(t => { const d = calDate(t.due_date); d.setFullYear(d.getFullYear() - 1); const start = calKey(d);
+    if (t.due_date > fyEnd && (start <= fyEnd || (t.paid_date && t.paid_date <= fyEnd)) && +t.amount > 0)
+      out.push({ kind: 'tax', a: insAsset(t.asset_id), label: 'ภาษีรถประจำปี', ref: t.receipt_no ? 'ใบเสร็จ ' + t.receipt_no : '', start, end: t.due_date, amount: +t.amount, doc: t.doc_no, ...calc(start, t.due_date, t.amount) }); });
+  return out.sort((x, y) => x.kind.localeCompare(y.kind) || insAssetLabel(x.a).localeCompare(insAssetLabel(y.a), 'th') || x.start.localeCompare(y.start));
+}
+async function insPrintPrepaid(mode, fy) {
+  const rows = insPrepaidRows(fy), fyEnd = rentMonthLast(fy - 543, 9);
+  if (!rows.length) { showToast(`ไม่มีกรมธรรม์หรือภาษีรถที่คุ้มครองเกิน 30 ก.ย. ${fy}`, 'warning'); return; }
+  const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true }), d = (k) => formatThaiDate(calDate(k));
+  const sum = (arr) => arr.reduce((s, r) => ({ amount: s.amount + r.amount, prepaid: s.prepaid + r.prepaid, expense: s.expense + r.expense }), { amount: 0, prepaid: 0, expense: 0 });
+  const per = 15, pages = []; for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  const totRow = (label, t, n) => `<tr class="tot"><td colspan="8" style="text-align:right">${label} (${n} รายการ)</td><td class="n">${rentMoney(t.amount)}</td><td class="n">${rentMoney(t.expense)}</td><td class="n">${rentMoney(t.prepaid)}</td></tr>`;
+  const pol = rows.filter(r => r.kind === 'policy'), tax = rows.filter(r => r.kind === 'tax'), all = sum(rows);
+  root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>รายงานค่าใช้จ่ายจ่ายล่วงหน้า (เบี้ยประกันภัยและภาษีรถ) ณ วันที่ ${formatThaiDate(calDate(fyEnd), { long: true })}</h1>
+    <div class="sub">${org} · ปีงบประมาณ ${fy} · จำนวนวันที่กรมธรรม์/ภาษีรถคงเหลือหลังวันสิ้นปีงบประมาณ</div>
+    <table><thead><tr><th style="width:7mm">ที่</th><th>ทรัพย์สิน</th><th style="width:34mm">รายการ</th><th style="width:40mm">ระยะเวลาคุ้มครอง / มีผล</th><th style="width:14mm">วันทั้งหมด</th><th style="width:15mm">ใช้แล้ว<br>ถึง 30 ก.ย.</th><th style="width:15mm">คงเหลือ<br>(วัน)</th><th style="width:20mm">ฎีกา</th>
+      <th style="width:22mm">จำนวนเงิน</th><th style="width:22mm">ค่าใช้จ่าย<br>ปีงบ ${fy}</th><th style="width:24mm">ค่าใช้จ่าย<br>จ่ายล่วงหน้า</th></tr></thead><tbody>
+      ${pg.map((r, i) => `<tr><td class="n" style="text-align:center">${pi * per + i + 1}</td><td>${esc(insAssetLabel(r.a))}<div style="color:#6b7280;font-size:9.5px">${esc([r.a?.asset_code, r.a?.custodian_name ? 'ผู้รับผิดชอบ ' + r.a.custodian_name : ''].filter(Boolean).join(' · '))}</div></td>
+        <td>${esc(r.label)}${r.ref ? `<div style="color:#6b7280;font-size:9.5px">${esc(r.ref)}</div>` : ''}</td><td>${d(r.start)} – ${d(r.end)}</td>
+        <td class="n">${formatNumber(r.total)}</td><td class="n">${formatNumber(r.used)}</td><td class="n" style="font-weight:600">${formatNumber(r.remain)}</td><td style="font-size:10px">${esc(r.doc || '')}</td>
+        <td class="n">${rentMoney(r.amount)}</td><td class="n">${rentMoney(r.expense)}</td><td class="n" style="font-weight:600">${rentMoney(r.prepaid)}</td></tr>`).join('')}
+      ${pi === pages.length - 1 ? (pol.length ? totRow('รวมเบี้ยประกันภัย', sum(pol), pol.length) : '') + (tax.length ? totRow('รวมภาษีรถ', sum(tax), tax.length) : '') + totRow('รวมทั้งสิ้น', all, rows.length)
+        + `<tr><td colspan="11" style="text-align:right">ค่าใช้จ่ายจ่ายล่วงหน้า ${rentMoney(all.prepaid)} บาท (${esc(bahtText(Math.round(all.prepaid * 100) / 100))})</td></tr>` : ''}
+    </tbody></table>
+    ${pi === pages.length - 1 ? `<div style="font-size:10px;color:#4b5563;margin-top:4px">วิธีคำนวณ: วันทั้งหมด = วันสิ้นสุด − วันเริ่มคุ้มครอง · คงเหลือ = วันสิ้นสุด − 30 ก.ย. ${fy} (ถ้าเริ่มคุ้มครองหลัง 30 ก.ย. นับทั้งหมด) · ค่าใช้จ่ายจ่ายล่วงหน้า = จำนวนเงิน × คงเหลือ ÷ วันทั้งหมด · ภาษีรถถือช่วงมีผล 1 ปีก่อนวันสิ้นอายุ</div>${RG_SIGN}` : ''}
+    <div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${pages.length}</span></div></div>`).join('');
+  rpcSecure('sfh_ins_log', { p_kind: `${mode}_prepaid`, p_details: { count: rows.length, fy } }, { loader: false });
+  await rgOutput(root, 'landscape', mode, `ค่าใช้จ่ายจ่ายล่วงหน้า_30กย${fy}.pdf`);
 }
 async function insExportExcel() {
   let XLSX; try { XLSX = await loadSheetJS(); } catch (e) { showToast(e.message, 'error'); return; }
