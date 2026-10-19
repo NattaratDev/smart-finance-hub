@@ -5809,24 +5809,44 @@ function rentOpenRates(src, el) {
 
 /* ---------- พิมพ์ / PDF / Excel ---------- */
 function rentPrintMenu(mode) {
-  const months = rentMonths(Rg.fy), today = calToday();
+  const months = rentMonths(Rg.fy), today = calToday(), people = rentPeopleInFy();
   const def = months.filter(mo => rentMonthFirst(mo.y, mo.m) <= today).at(-1) || months[0];
-  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
-    body: `<div class="grid gap-2">
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="summary"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวมทั้งหน่วยงาน</div><div class="text-xs text-slate-400">A4 แนวนอน · ทุกคน × 12 เดือน</div></button>
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า (ทุกคน)</div></button>
-      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('user-search', 'w-4 h-4 inline')} ทะเบียนรายบุคคล (เลือกคน)</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · เฉพาะคนที่เลือก</div>
-        <div class="flex gap-2"><select class="input !py-1.5 flex-1 min-w-0" data-pperson>${rentPeopleInFy().map(p => `<option value="${p.id}" ${Rg.person === p.id ? 'selected' : ''}>${esc(p.full_name)}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="one">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
+  const btn = (k, label) => `<button type="button" class="btn btn-primary btn-sm shrink-0" data-k="${k}">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${label || (mode === 'pdf' ? 'PDF' : 'พิมพ์')}</button>`;
+  const pick = new Set(Rg.person ? [Rg.person] : []);
+  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'md',
+    body: `<div class="grid gap-3">
+      <div class="rounded-2xl border border-brand-100 bg-brand-50/40 p-3">
+        <div class="font-medium text-slate-700 mb-2">${ic('users', 'w-4 h-4 inline')} ผู้ที่จะพิมพ์</div>
+        <div class="grid grid-cols-2 gap-2">${[['all', `ทุกคน (${people.length} คน)`], ['pick', 'เลือกรายคน']].map(([k, l]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-white has-[:checked]:text-brand-700 border-slate-200 text-slate-600">
+          <input type="radio" name="who" value="${k}" class="sr-only" ${(k === 'pick') === !!Rg.person ? 'checked' : ''}>${l}</label>`).join('')}</div>
+        <div data-pickbox class="${Rg.person ? '' : 'hidden'} mt-3">
+          <div class="flex gap-2 mb-2"><div class="relative flex-1"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">${ic('search', 'w-4 h-4')}</span>
+            <input type="search" class="input !py-1.5" style="padding-left:2.25rem" placeholder="ค้นหาชื่อ ตำแหน่ง สังกัด..." data-pq></div>
+            <button type="button" class="btn btn-ghost btn-sm" data-pall>เลือกทั้งหมด</button><button type="button" class="btn btn-ghost btn-sm" data-pnone>ล้าง</button></div>
+          <div class="max-h-56 overflow-y-auto rounded-2xl border border-slate-100 bg-white divide-y divide-slate-50" data-plist>${people.map(p => `<label class="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50" data-prow="${esc((p.full_name + ' ' + (p.position_title || '') + ' ' + (p.unit_name || '')).toLowerCase())}">
+            <input type="checkbox" class="rounded" value="${p.id}" ${pick.has(p.id) ? 'checked' : ''}><span class="flex-1 min-w-0"><span class="text-slate-700">${esc(p.full_name)}</span> <span class="text-xs text-slate-400">${esc(p.position_title || p.unit_name || '')}</span></span></label>`).join('')}</div>
+          <div class="text-xs text-slate-500 mt-1.5" data-pcount></div>
+        </div>
+      </div>
+      <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวม</div><div class="text-xs text-slate-400">A4 แนวนอน · ผู้ที่เลือก × 12 เดือน</div></div>${btn('summary')}</div>
+      <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า</div></div>${btn('person')}</div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · รายชื่อผู้เบิกในเดือนที่เลือก พร้อมยอดรวม</div>
-        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="month">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${mode === 'pdf' ? 'PDF' : 'พิมพ์'}</button></div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select>${btn('month')}</div>
         <label class="inline-flex items-center gap-2 text-xs text-slate-600 mt-2"><input type="checkbox" class="rounded" data-unrec checked> แสดงผู้มีสิทธิ์ที่ยังไม่บันทึกการเบิกด้วย</label></div></div>` });
+  const picking = () => $('input[name="who"]:checked', m.el).value === 'pick';
+  const checked = () => $$('[data-plist] input:checked', m.el).map(x => x.value);
+  const sync = () => { $('[data-pickbox]', m.el).classList.toggle('hidden', !picking()); $('[data-pcount]', m.el).textContent = `เลือกแล้ว ${checked().length} จาก ${people.length} คน`; };
+  m.el.addEventListener('change', sync);
+  m.el.addEventListener('input', (e) => { if (!e.target.matches('[data-pq]')) return; const q = e.target.value.trim().toLowerCase(); $$('[data-prow]', m.el).forEach(r => r.classList.toggle('hidden', !!q && !r.dataset.prow.includes(q))); });
+  sync();
   m.el.addEventListener('click', (e) => {
+    if (e.target.closest('[data-pall]')) { $$('[data-prow]:not(.hidden) input', m.el).forEach(x => { x.checked = true; }); sync(); return; }
+    if (e.target.closest('[data-pnone]')) { $$('[data-plist] input', m.el).forEach(x => { x.checked = false; }); sync(); return; }
     const b = e.target.closest('[data-k]'); if (!b) return;
+    let entIds = null;
+    if (picking()) { const ids = new Set(checked()); if (!ids.size) { showToast('กรุณาเลือกอย่างน้อย 1 คน', 'warning'); return; } entIds = Rg.ents.filter(x => ids.has(x.person_id)).map(x => x.id); }
     const opts = b.dataset.k === 'month' ? (([y, mo]) => ({ y, m: mo, unrecorded: $('[data-unrec]', m.el).checked }))($('[data-month]', m.el).value.split('|').map(Number)) : {};
-    if (b.dataset.k === 'one') { const pid = $('[data-pperson]', m.el).value; m.close(); rentPrint('person', Rg.ents.filter(e => e.person_id === pid).map(e => e.id), mode); return; }
-    m.close(); rentPrint(b.dataset.k, null, mode, opts);
+    m.close(); rentPrint(b.dataset.k, entIds, mode, opts);
   });
 }
 const RENT_PRINT_CSS = `#rgPrintRoot{position:fixed;left:-10000px;top:0}
