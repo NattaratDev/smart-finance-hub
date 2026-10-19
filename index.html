@@ -8938,7 +8938,10 @@ function pcTplNeeds(f) {
   const via = Math.min(5, Math.max(0, ...used.map(n => +(n.match(/^(?:ตำแหน่ง)?ผ่าน([1-5])$/) || [])[1] || 0)));
   return { via, custom: [...new Set(used.filter(n => !known.has(n)))] };
 }
-const pcFill = (text, V) => String(text ?? '').replace(PC_VAR_RE, (m, n) => (n in V ? V[n] : m));
+/** แทนตัวแปร · "{เลขที่คำสั่ง…}/{ปีคำสั่ง}": ถ้ากรอกเลขที่แบบ xxx/xxxx แล้ว ไม่ต่อปีซ้ำ */
+const pcFill = (text, V) => String(text ?? '')
+  .replace(/\{(เลขที่คำสั่ง[^{}\n]*)\}\s*\/\s*\{ปีคำสั่ง\}/g, (m, n) => !(n in V) ? m : String(V[n]).includes('/') ? V[n] : `${V[n]}/${V['ปีคำสั่ง']}`)
+  .replace(PC_VAR_RE, (m, n) => (n in V ? V[n] : m));
 const pcUnknownVars = (blocks) => { const known = new Set(PC_VAR_GROUPS.flatMap(g => g[1].map(x => x[0]))), out = new Set();
   const scan = (o) => ['text', 'unit', 'no', 'date', 'subject', 'top', 'last', 'name', 'pos', 'label'].forEach(k => String(o[k] ?? '').replace(PC_VAR_RE, (m, n) => { if (!known.has(n)) out.add(m); return m; }));
   (blocks || []).forEach(b => { scan(b); (b.rows || []).forEach(scan); }); return [...out]; };
@@ -9268,7 +9271,7 @@ function pcRenderForm(el) {
       <div class="sm:col-span-2 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">${ic('info', 'w-3 h-3')} ไม่ระบุวันที่ → เอกสารแสดงเป็นเส้นจุดให้อัตโนมัติ</div>
       ${pcIn('nos.memo', 'เลขที่บันทึกรายงานขอซื้อ/จ้าง', { ph: 'เช่น 123' })}${pcIn('nos.result', 'เลขที่บันทึกรายงานผลการพิจารณา', { ph: 'เช่น 124' })}
       ${pcIn('nos.pay', 'เลขที่บันทึกขอเบิกเงิน')}
-      ${pcIn('nos.cmd1', 'คำสั่งผู้กำหนดร่าง ที่', { ph: 'เช่น 45' })}${pcIn('nos.cmd2', 'คำสั่งผู้ตรวจรับ ที่', { ph: 'เช่น 46' })}
+      ${pcIn('nos.cmd1', 'คำสั่งผู้กำหนดร่าง ที่', { ph: 'เช่น 45/2569', hint: 'รูปแบบ เลขที่/ปี พ.ศ. (กรอกแค่เลขที่ได้ ระบบต่อปีของวันที่สั่งให้)' })}${pcIn('nos.cmd2', 'คำสั่งผู้ตรวจรับ ที่', { ph: 'เช่น 46/2569', hint: 'รูปแบบ เลขที่/ปี พ.ศ.' })}
       ${pcIn('nos.po', `${k.order}เลขที่`, { ph: 'เช่น 12/2570' })}${pcIn('invoice', 'ใบส่งของ/ใบแจ้งหนี้ เลขที่')}`)}
     ${pcSec('org', 'building-2', '1.1 หน่วยงาน', `
       ${pcIn('org.unit', 'ส่วนราชการ (กอง/สำนัก)', { ph: 'เช่น กองคลัง' })}${pcIn('org.main', 'ชื่อหน่วยงาน (ผู้ออกคำสั่ง/ประกาศ)', { ph: 'เช่น เทศบาลเมือง...' })}
