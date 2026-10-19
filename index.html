@@ -5128,7 +5128,7 @@ const RENT_CLAIM_FIELDS = [['amount', 'จำนวนเงิน', 'money'], [
 const RENT_PERSON_FIELDS = [['full_name', 'ชื่อ-สกุล', 'text'], ['employee_type', 'ประเภทบุคลากร', 'text'], ['unit_name', 'สังกัด', 'text'],
   ['position_title', 'ชื่อตำแหน่ง', 'text'], ['position_type', 'ประเภทตำแหน่ง', 'ptype'], ['position_level', 'ระดับ', 'plevel'],
   ['salary_step', 'ขั้นเงินเดือน', 'num'], ['salary', 'เงินเดือน', 'money'], ['note', 'หมายเหตุ', 'text'], ['is_active', 'ยังปฏิบัติงานอยู่', 'bool']];
-const Rg = { view: 'hub', tab: 'register', fy: null, people: [], ents: [], claims: [], years: [], rates: [], filter: '' };
+const Rg = { view: 'hub', tab: 'register', fy: null, person: null, people: [], ents: [], claims: [], years: [], rates: [], filter: '' };
 
 /* ---------- ปีงบประมาณ / เดือน ---------- */
 const rentMonths = (fy) => {
@@ -5236,6 +5236,7 @@ async function rentOpen(el, mod) {
   Rg.view = 'rent';
   if (+pageState('fy') > 2500) Rg.fy = +pageState('fy');
   if (['register', 'eligible', 'people', 'rates'].includes(pageState('tab'))) Rg.tab = pageState('tab');
+  Rg.person = pageState('person') || null;
   Rg.fy = Rg.fy || thaiFiscalYear(new Date()); Rg.tab = Rg.tab || 'register';
   el.innerHTML = `<button class="btn btn-ghost btn-sm mb-3" data-rg-back>${ic('arrow-left', 'w-4 h-4')} ทะเบียนทั้งหมด</button>`
     + pageHeader({ title: 'ทะเบียนคุมเบิกค่าเช่าบ้าน', icon: 'home', tone: 'brand', subtitle: 'ตามระเบียบกระทรวงมหาดไทยว่าด้วยค่าเช่าบ้านของข้าราชการส่วนท้องถิ่น · ข้อมูลส่วนบุคคล (PDPA)',
@@ -5249,12 +5250,15 @@ async function rentOpen(el, mod) {
     if (e.target.closest('[data-rg-back]')) { renderRegister(el, mod); return; }
     const t = e.target.closest('[data-rg-tab]'); if (t) { Rg.tab = t.dataset.rgTab; rentRender(el); }
   };
-  el.onchange = async (e) => { if (e.target.matches('[data-rg-fy]')) { Rg.fy = +e.target.value; if (await rentLoad()) rentRender(el); } };
+  el.onchange = async (e) => {
+    if (e.target.matches('[data-rg-fy]')) { Rg.fy = +e.target.value; if (await rentLoad()) rentRender(el); }
+    if (e.target.matches('[data-rg-person]')) { Rg.person = e.target.value || null; rentRender(el); }
+  };
   if (!(await rentLoad())) { $('#rgBody', el).innerHTML = errorState('โหลดทะเบียนไม่สำเร็จ', 'ตรวจสอบสิทธิ์ register.manage_rent หรือรันไฟล์ module_register.sql'); return; }
   rentRender(el);
 }
 function rentRender(el) {
-  setPageState({ v: 'rent', tab: Rg.tab, fy: Rg.fy, ay: null });
+  setPageState({ v: 'rent', tab: Rg.tab, fy: Rg.fy, ay: null, person: Rg.tab === 'register' ? Rg.person : null });
   const cur = thaiFiscalYear(new Date());
   const years = [...new Set([...Rg.years, cur - 1, cur, cur + 1, Rg.fy])].sort((a, b) => b - a);
   $('[data-rg-fy]', el).innerHTML = years.map(y => `<option value="${y}" ${y === Rg.fy ? 'selected' : ''}>${y}</option>`).join('');
@@ -5284,6 +5288,8 @@ function rentCellHtml(e, mo, today) {
   return `<td class="text-center p-0"><button type="button" class="w-full h-full min-h-[2.75rem] px-1.5 py-1 hover:bg-brand-50 ${c && c.status === 'pending' ? 'bg-cream-50' : ''}" data-rg-cell="${e.id}|${mo.y}|${mo.m}" title="${esc(mo.label)}">${inner}</button></td>`;
 }
 function rentRenderRegister(body, el) {
+  if (Rg.person && rentPeopleInFy().some(p => p.id === Rg.person)) return rentRenderPerson(body, el);
+  if (Rg.person) { Rg.person = null; setPageState({ person: null }); }
   const months = rentMonths(Rg.fy), today = calToday(), q = Rg.filter.trim().toLowerCase();
   const all = rentRows(), rows = q ? all.filter(r => (r.p.full_name + ' ' + (r.p.position_title || '') + ' ' + (r.p.unit_name || '')).toLowerCase().includes(q)) : all;
   const st = rentStats(all);
@@ -5299,6 +5305,7 @@ function rentRenderRegister(body, el) {
     <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
       <div class="relative flex-1"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('search')}</span>
         <input type="search" class="input" style="padding-left:2.5rem" placeholder="ค้นหาชื่อ ตำแหน่ง สังกัด..." value="${esc(Rg.filter)}" data-rg-q></div>
+      ${all.length ? rentPersonSelect() : ''}
       <div class="flex flex-wrap gap-2">
         <button class="btn btn-primary" data-rg-act="add-ent">${ic('user-plus')} เพิ่มผู้มีสิทธิ์</button>
         <button class="btn btn-soft" data-rg-act="batch" ${all.length ? '' : 'disabled'}>${ic('calendar-check')} บันทึกประจำเดือน</button>
@@ -5316,7 +5323,8 @@ function rentRenderRegister(body, el) {
         <tbody class="divide-y divide-slate-100">${rows.map(({ e, p }) => `<tr>
           <td class="sticky left-0 bg-white z-10"><button type="button" class="text-left" data-rg-ent="${e.id}"><span class="block font-medium text-slate-700 hover:text-brand-600">${esc(p.full_name)}</span>
             <span class="block text-xs text-slate-400 truncate max-w-[13rem]">${esc(rentPositionText(p) || p.unit_name || '')}</span>
-            ${e.contract_end && e.contract_end <= calAddDays(today, 60) ? `<span class="badge ${e.contract_end < today ? 'bg-blush-100 text-blush-500' : 'bg-cream-100 text-cream-600'} mt-0.5">${ic('calendar-clock', 'w-3 h-3')} สัญญา${e.contract_end < today ? 'หมดแล้ว' : 'ใกล้หมด'}</span>` : ''}</button></td>
+            ${e.contract_end && e.contract_end <= calAddDays(today, 60) ? `<span class="badge ${e.contract_end < today ? 'bg-blush-100 text-blush-500' : 'bg-cream-100 text-cream-600'} mt-0.5">${ic('calendar-clock', 'w-3 h-3')} สัญญา${e.contract_end < today ? 'หมดแล้ว' : 'ใกล้หมด'}</span>` : ''}</button>
+            <button type="button" class="block text-[11px] text-brand-500 hover:underline mt-0.5" data-rg-view="${p.id}">${ic('eye', 'w-3 h-3 inline')} ดูรายคน</button></td>
           <td class="text-right whitespace-nowrap"><div class="tabular-nums text-slate-700">${rentMoney(rentLimit(e))}</div><div class="text-[11px] text-slate-400">${RENT_HOUSING[e.housing_type]}</div></td>
           ${months.map(mo => rentCellHtml(e, mo, today)).join('')}
           <td class="text-right font-semibold tabular-nums">${rentMoney(sumPerson(e))}</td></tr>`).join('')}</tbody>
@@ -5327,6 +5335,7 @@ function rentRenderRegister(body, el) {
     <div class="md:hidden grid gap-3">${rows.map(({ e, p }) => `<div class="card p-4">
       <button type="button" class="text-left w-full" data-rg-ent="${e.id}"><div class="flex justify-between gap-2"><span class="font-medium text-slate-800">${esc(p.full_name)}</span><span class="font-semibold tabular-nums">${rentMoney(sumPerson(e))}</span></div>
         <div class="text-xs text-slate-400">สิทธิ์เดือนละ ${rentMoney(rentLimit(e))} บาท · ${RENT_HOUSING[e.housing_type]}</div></button>
+      <button type="button" class="text-xs text-brand-500 mt-1" data-rg-view="${p.id}">${ic('eye', 'w-3 h-3 inline')} ดูรายคน</button>
       <div class="grid grid-cols-4 gap-1 mt-3">${months.map(mo => { const c = rentClaim(e.id, mo.y, mo.m), cov = rentCovered(e, mo.y, mo.m), due = rentMonthFirst(mo.y, mo.m) <= today;
         return `<button type="button" ${cov || c ? `data-rg-cell="${e.id}|${mo.y}|${mo.m}"` : 'disabled'} class="rounded-xl border px-1 py-1.5 text-center ${!cov && !c ? 'bg-slate-50 border-slate-100 text-slate-300' : c ? (c.status === 'paid' ? 'border-mint-200 bg-mint-50' : 'border-cream-200 bg-cream-50') : due ? 'border-blush-200 bg-blush-50' : 'border-slate-200 bg-white'}">
           <span class="block text-[10px] text-slate-500">${mo.short}</span><span class="block text-xs tabular-nums ${c ? 'text-slate-700' : due && cov ? 'text-blush-500' : 'text-slate-300'}">${c ? rentMoney(c.amount) : cov ? (due ? 'ค้าง' : '+') : '–'}</span></button>`; }).join('')}</div>
@@ -5336,6 +5345,7 @@ function rentRenderRegister(body, el) {
   body.onclick = (ev) => {
     const cell = ev.target.closest('[data-rg-cell]');
     if (cell) { const [id, y, m] = cell.dataset.rgCell.split('|'); rentOpenClaim(Rg.ents.find(x => x.id === id), +y, +m, el); return; }
+    const vw = ev.target.closest('[data-rg-view]'); if (vw) { Rg.person = vw.dataset.rgView; rentRender(el); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
     const en = ev.target.closest('[data-rg-ent]'); if (en) { rentOpenEnt(Rg.ents.find(x => x.id === en.dataset.rgEnt), null, el); return; }
     const a = ev.target.closest('[data-rg-act]'); if (!a) return;
     const k = a.dataset.rgAct;
@@ -5344,6 +5354,68 @@ function rentRenderRegister(body, el) {
     if (k === 'print') rentPrintMenu('print');
     if (k === 'pdf') rentPrintMenu('pdf');
     if (k === 'excel') rentExportExcel();
+  };
+}
+
+/* ---------- ทะเบียนคุม: มุมมองรายคน (เลือกบุคลากร 1 คน → ทะเบียน 12 เดือนของปีงบ) ---------- */
+/** รายชื่อผู้มีสิทธิ์ในปีงบ (ไม่ซ้ำคน) สำหรับตัวเลือก "รายคน" */
+const rentPeopleInFy = () => { const seen = new Set(); return rentRows().filter(r => r.p.id && !seen.has(r.p.id) && seen.add(r.p.id)).map(r => r.p); };
+const rentPersonSelect = () => `<select class="input !w-auto max-w-full" data-rg-person title="เลือกดูทะเบียนรายคน">
+    <option value="">ทุกคน (ตารางรวม)</option>${rentPeopleInFy().map(p => `<option value="${p.id}" ${Rg.person === p.id ? 'selected' : ''}>${esc(p.full_name)}</option>`).join('')}</select>`;
+function rentRenderPerson(body, el) {
+  const people = rentPeopleInFy(), idx = people.findIndex(p => p.id === Rg.person), p = people[idx];
+  const ents = rentRows().filter(r => r.p.id === Rg.person).map(r => r.e).sort((a, b) => a.start_date.localeCompare(b.start_date));
+  const months = rentMonths(Rg.fy), today = calToday(), st = rentStats(ents.map(e => ({ e })));
+  const entOf = (mo) => ents.find(e => rentClaim(e.id, mo.y, mo.m)) || ents.find(e => rentCovered(e, mo.y, mo.m)) || null;
+  const rows = months.map(mo => { const e = entOf(mo), c = e ? rentClaim(e.id, mo.y, mo.m) : null, cov = e ? rentCovered(e, mo.y, mo.m) : false;
+    return { mo, e, c, cov, due: rentMonthFirst(mo.y, mo.m) <= today, sg: e && cov ? rentSuggest(e, mo.y, mo.m) : null }; });
+  const entitled = rows.reduce((a, r) => a + (r.sg ? r.sg.amount : 0), 0), claimed = st.paid + st.pending;
+  const nav = (d) => people[idx + d] ? `<button class="btn btn-ghost btn-sm" data-rg-nav="${people[idx + d].id}" title="${esc(people[idx + d].full_name)}">${ic(d < 0 ? 'chevron-left' : 'chevron-right', 'w-4 h-4')}${d < 0 ? 'คนก่อน' : 'คนถัดไป'}</button>` : '';
+  const entCard = (e) => `<div class="rounded-2xl border border-slate-100 bg-white/70 px-3 py-2 text-sm flex flex-wrap items-center gap-x-4 gap-y-1">
+      <span class="badge bg-brand-50 text-brand-600">${RENT_HOUSING[e.housing_type]}</span>
+      <span>สิทธิ์ ${formatThaiDate(calDate(e.start_date))} – ${e.end_date ? formatThaiDate(calDate(e.end_date)) : 'ปัจจุบัน'}</span>
+      <span>เบิกได้เดือนละ <b class="font-semibold tabular-nums">${rentMoney(rentLimit(e))}</b> บาท</span>
+      ${e.contract_end ? `<span class="${e.contract_end < today ? 'text-blush-500' : e.contract_end <= calAddDays(today, 60) ? 'text-cream-600' : 'text-slate-500'}">สัญญาถึง ${formatThaiDate(calDate(e.contract_end))}</span>` : ''}
+      ${e.address ? `<span class="text-slate-500 truncate max-w-[18rem]">${esc(e.address)}</span>` : ''}
+      <button class="btn btn-ghost btn-sm ml-auto" data-rg-ent="${e.id}">${ic('pencil', 'w-4 h-4')} แก้ไขสิทธิ์</button></div>`;
+  body.innerHTML = `
+    <div class="flex flex-col lg:flex-row gap-2 lg:items-center mb-3">
+      <div class="flex items-center gap-2 flex-1 min-w-0"><span class="text-sm text-slate-500 shrink-0">${ic('user-round', 'w-4 h-4 inline')} รายคน</span>${rentPersonSelect()}</div>
+      <div class="flex flex-wrap gap-2">${nav(-1)}${nav(1)}
+        <button class="btn btn-ghost" data-rg-act="pprint">${ic('printer')} พิมพ์รายคน</button><button class="btn btn-ghost" data-rg-act="ppdf">${ic('file-down')} PDF</button>
+        <button class="btn btn-soft" data-rg-act="all">${ic('table', 'w-4 h-4')} ดูทุกคน</button></div>
+    </div>
+    <div class="card p-4 mb-4">
+      <div class="flex items-center gap-3 mb-3"><span class="w-11 h-11 rounded-2xl grid place-items-center bg-brand-100 text-brand-600 shrink-0">${ic('user-round', 'w-5 h-5')}</span>
+        <div class="min-w-0"><div class="font-semibold text-slate-800 text-lg">${esc(p.full_name)}</div><div class="text-sm text-slate-500">${esc([rentPositionText(p), p.unit_name].filter(Boolean).join(' · '))}</div></div></div>
+      <div class="grid gap-2">${ents.map(entCard).join('')}</div>
+    </div>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+      ${statCard({ label: `สิทธิ์เบิกทั้งปีงบ ${Rg.fy}`, value: rentMoney(entitled), icon: 'wallet', tone: 'brand', hint: 'บาท (ตามเดือนที่มีสิทธิ์)' })}
+      ${statCard({ label: 'เบิกแล้ว', value: rentMoney(st.paid), icon: 'check-circle-2', tone: 'mint', hint: st.pending ? `รอเบิก ${rentMoney(st.pending)} บาท` : 'บาท' })}
+      ${statCard({ label: 'คงเหลือสิทธิ์', value: rentMoney(Math.max(0, entitled - claimed)), icon: 'piggy-bank', tone: 'cream', hint: 'บาท (สิทธิ์ − เบิกแล้ว − รอเบิก)' })}
+      ${statCard({ label: 'เดือนที่ยังไม่บันทึก', value: formatNumber(st.missing), icon: 'alert-circle', tone: 'blush', hint: 'ถึงกำหนดแล้วแต่ยังไม่มีรายการ' })}
+    </div>
+    <div class="card !p-0 overflow-x-auto"><table class="sfh-table w-full text-sm min-w-[720px]">
+      <thead class="bg-gradient-to-r from-brand-50 via-white to-lilac-50 text-slate-500"><tr><th>เดือน</th><th class="text-right">สิทธิ์เบิก</th><th class="text-right">จำนวนเบิก</th><th>เลขที่ฎีกา</th><th>วันที่วางฎีกา</th><th>สถานะ</th><th></th></tr></thead>
+      <tbody class="divide-y divide-slate-100">${rows.map(({ mo, e, c, cov, due, sg }) => `<tr class="${!cov && !c ? 'bg-slate-50/60 text-slate-400' : c ? '' : due ? 'bg-blush-50/40' : ''}">
+        <td class="whitespace-nowrap font-medium ${!cov && !c ? '' : 'text-slate-700'}">${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</td>
+        <td class="text-right tabular-nums">${sg ? rentMoney(sg.amount) + (sg.prorated ? `<div class="text-[11px] text-slate-400">${sg.days}/${sg.dim} วัน</div>` : '') : '–'}</td>
+        <td class="text-right tabular-nums font-semibold ${c ? (c.status === 'paid' ? 'text-mint-600' : 'text-cream-600') : ''}">${c ? rentMoney(c.amount) : '-'}</td>
+        <td>${esc(c?.doc_no || '')}</td><td class="whitespace-nowrap">${c?.paid_date ? formatThaiDate(calDate(c.paid_date)) : ''}</td>
+        <td>${c ? `<span class="badge ${RENT_STATUS[c.status].cls}">${RENT_STATUS[c.status].label}</span>` : cov ? (due ? `<span class="badge bg-blush-100 text-blush-500">${ic('alert-circle', 'w-3 h-3')} ค้างบันทึก</span>` : '<span class="text-xs text-slate-400">ยังไม่ถึงกำหนด</span>') : '<span class="text-xs">ไม่มีสิทธิ์</span>'}</td>
+        <td class="text-right">${e && (cov || c) ? `<button class="btn ${c ? 'btn-ghost' : 'btn-soft'} btn-sm" data-rg-cell="${e.id}|${mo.y}|${mo.m}">${ic(c ? 'pencil' : 'plus', 'w-4 h-4')} ${c ? 'แก้ไข' : 'บันทึก'}</button>` : ''}</td></tr>`).join('')}</tbody>
+      <tfoot><tr class="bg-slate-50 font-semibold"><td>รวมปีงบประมาณ ${Rg.fy}</td><td class="text-right tabular-nums">${rentMoney(entitled)}</td><td class="text-right tabular-nums">${rentMoney(claimed)}</td><td colspan="4"></td></tr></tfoot>
+    </table></div>
+    <p class="text-xs text-slate-400 mt-3">${ic('info', 'w-3.5 h-3.5 inline')} "สิทธิ์เบิก" คิดตามส่วนจำนวนวันในเดือนแรก/เดือนสุดท้ายของสิทธิ์ · กดปุ่มบันทึก/แก้ไขในแต่ละเดือน · ปุ่มคนก่อน/คนถัดไป เลื่อนดูทีละคนตามลำดับชื่อ</p>`;
+  body.onclick = (ev) => {
+    const cell = ev.target.closest('[data-rg-cell]');
+    if (cell) { const [id, y, m] = cell.dataset.rgCell.split('|'); rentOpenClaim(Rg.ents.find(x => x.id === id), +y, +m, el); return; }
+    const en = ev.target.closest('[data-rg-ent]'); if (en) { rentOpenEnt(Rg.ents.find(x => x.id === en.dataset.rgEnt), null, el); return; }
+    const nv = ev.target.closest('[data-rg-nav]'); if (nv) { Rg.person = nv.dataset.rgNav; rentRender(el); return; }
+    const a = ev.target.closest('[data-rg-act]'); if (!a) return;
+    if (a.dataset.rgAct === 'all') { Rg.person = null; rentRender(el); }
+    if (a.dataset.rgAct === 'pprint' || a.dataset.rgAct === 'ppdf') rentPrint('person', ents.map(e => e.id), a.dataset.rgAct === 'ppdf' ? 'pdf' : 'print');
   };
 }
 
@@ -5395,6 +5467,7 @@ function rentRenderEligible(body, el) {
       <button class="btn btn-primary" data-rg-act="add-ent">${ic('user-plus')} เพิ่มผู้มีสิทธิ์</button></div><div id="rgEligible"></div>`;
   const actions = (r) => `<button class="btn-icon" data-el-ent="${r.e.id}" title="แก้ไขสิทธิ์">${ic('pencil')}</button>
     <button class="btn-icon" data-el-person="${r.p.id}" title="แก้ไขข้อมูลบุคลากร">${ic('user-cog')}</button>
+    <button class="btn-icon" data-el-view="${r.p.id}" title="ดูทะเบียนรายคน">${ic('eye')}</button>
     <button class="btn-icon" data-el-print="${r.e.id}" title="พิมพ์ทะเบียนรายบุคคล">${ic('printer')}</button>`;
   const contract = (e) => !e.contract_end ? '<span class="text-slate-400">-</span>'
     : `${formatThaiDate(calDate(e.contract_end))}${e.contract_end < today ? ` <span class="badge bg-blush-100 text-blush-500">หมดแล้ว</span>` : e.contract_end <= soon ? ` <span class="badge bg-cream-100 text-cream-600">ใกล้หมด</span>` : ''}`;
@@ -5421,6 +5494,7 @@ function rentRenderEligible(body, el) {
     if (ev.target.closest('[data-rg-act="add-ent"]')) { rentPickPerson(el); return; }
     const a = ev.target.closest('[data-el-ent]'); if (a) { rentOpenEnt(Rg.ents.find(x => x.id === a.dataset.elEnt), null, el); return; }
     const b = ev.target.closest('[data-el-person]'); if (b) { rentOpenPerson(rentPerson(b.dataset.elPerson), el); return; }
+    const vw = ev.target.closest('[data-el-view]'); if (vw) { Rg.person = vw.dataset.elView; Rg.tab = 'register'; rentRender(el); return; }
     const c = ev.target.closest('[data-el-print]'); if (c) rentPrint('person', [c.dataset.elPrint], 'print');
   };
 }
@@ -5741,6 +5815,9 @@ function rentPrintMenu(mode) {
     body: `<div class="grid gap-2">
       <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="summary"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวมทั้งหน่วยงาน</div><div class="text-xs text-slate-400">A4 แนวนอน · ทุกคน × 12 เดือน</div></button>
       <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-brand-200 hover:bg-brand-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า (ทุกคน)</div></button>
+      <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('user-search', 'w-4 h-4 inline')} ทะเบียนรายบุคคล (เลือกคน)</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · เฉพาะคนที่เลือก</div>
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1 min-w-0" data-pperson>${rentPeopleInFy().map(p => `<option value="${p.id}" ${Rg.person === p.id ? 'selected' : ''}>${esc(p.full_name)}</option>`).join('')}</select>
+          <button type="button" class="btn btn-primary btn-sm" data-k="one">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · รายชื่อผู้เบิกในเดือนที่เลือก พร้อมยอดรวม</div>
         <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select>
           <button type="button" class="btn btn-primary btn-sm" data-k="month">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${mode === 'pdf' ? 'PDF' : 'พิมพ์'}</button></div>
@@ -5748,6 +5825,7 @@ function rentPrintMenu(mode) {
   m.el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-k]'); if (!b) return;
     const opts = b.dataset.k === 'month' ? (([y, mo]) => ({ y, m: mo, unrecorded: $('[data-unrec]', m.el).checked }))($('[data-month]', m.el).value.split('|').map(Number)) : {};
+    if (b.dataset.k === 'one') { const pid = $('[data-pperson]', m.el).value; m.close(); rentPrint('person', Rg.ents.filter(e => e.person_id === pid).map(e => e.id), mode); return; }
     m.close(); rentPrint(b.dataset.k, null, mode, opts);
   });
 }
@@ -5832,7 +5910,8 @@ async function rentPrint(kind, entIds, mode, opts = {}) {
   if (!count) { showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
   rpcSecure('sfh_rent_log', { p_kind: `${mode}_${kind}`, p_details: { fiscal_year: Rg.fy, count, ...(kind === 'month' ? { year: opts.y, month: opts.m } : {}) } }, { loader: false });
   if (mode === 'pdf') {
-    const label = kind === 'summary' ? 'รวม' : kind === 'month' ? `ประจำเดือน${TH_MONTHS[opts.m - 1]}${opts.y + 543}` : 'รายบุคคล';
+    const label = kind === 'summary' ? 'รวม' : kind === 'month' ? `ประจำเดือน${TH_MONTHS[opts.m - 1]}${opts.y + 543}`
+      : (() => { const ids = new Set((entIds || []).map(id => Rg.ents.find(e => e.id === id)?.person_id)); return ids.size === 1 ? rentPerson([...ids][0])?.full_name || 'รายบุคคล' : 'รายบุคคล'; })();
     await sfhPagesToPdf($$('.rg-page', root), `ทะเบียนค่าเช่าบ้าน_${label}_ปีงบ${Rg.fy}.pdf`, orientation);
     root.innerHTML = '';
     return;
