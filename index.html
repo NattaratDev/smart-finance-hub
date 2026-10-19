@@ -9126,7 +9126,7 @@ async function pcLoad() {
   const L = pcLocal(), cut = calAddDays(calToday(), -PC_KEEP_DAYS);
   const projects = (L.projects || []).filter(p => String(p.updated_at || '').slice(0, 10) >= cut);
   if (projects.length !== (L.projects || []).length) pcLocalSave({ ...L, projects });
-  Object.assign(Pc, { projects, vendors: L.vendors || [], settings: L.settings || {}, tpls: L.templates || [], canTpl: true });
+  Object.assign(Pc, { projects, vendors: L.vendors || [], settings: L.settings || {}, tpls: L.templates || [], canTpl: false });   // บุคคลทั่วไปแก้ได้เฉพาะข้อความของโครงการ
   return true;
 }
 function pcRenderShell(el) {
@@ -9391,13 +9391,13 @@ function pcOpenList(el) {
 const PC_TPL_MODE = { org: 'Template ของหน่วยงาน', local: 'Template ของฉัน (ในเบราว์เซอร์นี้)', project: 'ข้อความเฉพาะโครงการนี้' };
 function pcTplMenu(el) {
   const f = Pc.f, latest = pcTplLatest(), cur = f.tplv ? (pcTplVersion(f.tplv) ? f.tplv : latest?.version) : 0, over = Object.keys(f.tplo || {}).map(Number).sort();
-  const canBase = Pc.mode === 'local' || Pc.canTpl;
+  const canBase = Pc.mode === 'db' && Pc.canTpl;   // แก้ Template กลางได้เฉพาะผู้มีสิทธิ์ procurement.manage_templates (Org Admin)
   const opt = (k, icon, t, d, dis) => `<button type="button" class="text-left rounded-2xl border border-slate-100 p-3 ${dis ? 'opacity-50 cursor-not-allowed' : 'hover:border-blush-200 hover:bg-blush-50/50'}" ${dis ? 'disabled' : `data-k="${k}"`}><div class="font-medium text-slate-700">${ic(icon, 'w-4 h-4 inline')} ${t}</div><div class="text-xs text-slate-400">${d}</div></button>`;
   const m = openModal({ title: 'Template เอกสาร', icon: 'file-cog', size: 'sm',
     body: `<div class="rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 mb-3 text-xs text-slate-600">โครงการนี้ใช้: <b>${cur ? `${Pc.mode === 'db' ? 'Template หน่วยงาน' : 'Template ของฉัน'} ฉบับที่ ${cur}` : 'แบบมาตรฐานของระบบ'}</b>${latest && cur !== latest.version ? ` · <span class="text-cream-600">มีฉบับล่าสุด ${latest.version}</span>` : ''}${over.length ? `<br>แก้ข้อความเฉพาะโครงการ: ฉบับที่ ${over.join(', ')}` : ''}</div>
       <div class="grid gap-2">
         ${opt('project', 'pencil-line', 'แก้ข้อความเฉพาะโครงการนี้', 'แก้เฉพาะเอกสารของโครงการนี้ ไม่กระทบโครงการอื่น')}
-        ${opt(Pc.mode === 'db' ? 'org' : 'local', 'file-cog', Pc.mode === 'db' ? 'แก้ไข Template ของหน่วยงาน' : 'แก้ไข Template ของฉัน', Pc.mode === 'db' ? (Pc.canTpl ? 'ทุกคนในหน่วยงานใช้ร่วมกัน · บันทึกเป็นฉบับใหม่' : 'เฉพาะ Org Admin') : 'ใช้กับโครงการใหม่ในเบราว์เซอร์นี้ · บันทึกเป็นฉบับใหม่', !canBase)}
+        ${canBase ? opt('org', 'file-cog', 'แก้ไข Template ของหน่วยงาน', 'ทุกคนในหน่วยงานใช้ร่วมกัน · บันทึกเป็นฉบับใหม่') : ''}
         ${latest && cur !== latest.version ? opt('uselatest', 'refresh-cw', `ใช้ Template ฉบับล่าสุด (ฉบับที่ ${latest.version})`, 'เปลี่ยนข้อความของโครงการนี้ตาม template ล่าสุด') : ''}
         ${over.length ? opt('clearover', 'undo-2', 'เลิกใช้ข้อความเฉพาะโครงการ', 'กลับไปใช้ข้อความตาม template') : ''}
         ${opt('history', 'history', 'ประวัติฉบับแก้ไข', `${Pc.tpls.length} ฉบับ · ดูผู้แก้ วันที่ และหมายเหตุ`)}
@@ -9529,7 +9529,7 @@ function pcTplHistory(el) {
       <div class="grid gap-2">${[...Pc.tpls, { version: 0, note: 'ข้อความเริ่มต้นของโปรแกรม' }].map(t => `<div class="rounded-2xl border ${t.version === (Pc.f.tplv || 0) ? 'border-blush-200 bg-blush-50/40' : 'border-slate-100'} p-3 flex flex-col sm:flex-row sm:items-center gap-2">
         <div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${t.version ? `ฉบับที่ ${t.version}` : 'แบบมาตรฐานของระบบ'}${t.version && t.version === latest?.version ? ' <span class="badge bg-mint-100 text-mint-600">ล่าสุด</span>' : ''}${t.version === (Pc.f.tplv || 0) ? ' <span class="badge bg-blush-100 text-blush-500">โครงการนี้ใช้</span>' : ''}</div>
           <div class="text-xs text-slate-500">${t.created_at ? `${formatThaiDate(new Date(t.created_at), { time: true })} · ${esc(t.created_by_name || '-')}` : ''}${t.note ? `${t.created_at ? ' · ' : ''}${esc(t.note)}` : ''}</div></div>
-        <div class="flex gap-1"><button class="btn btn-ghost btn-sm" data-use="${t.version}">ใช้กับโครงการนี้</button>${(Pc.mode === 'local' || Pc.canTpl) ? `<button class="btn btn-soft btn-sm" data-restore="${t.version}" title="เปิดฉบับนี้ในตัวแก้ไข แล้วบันทึกเป็นฉบับใหม่">คืนฉบับนี้</button>` : ''}</div></div>`).join('')}</div>` });
+        <div class="flex gap-1"><button class="btn btn-ghost btn-sm" data-use="${t.version}">ใช้กับโครงการนี้</button>${(Pc.mode === 'db' && Pc.canTpl) ? `<button class="btn btn-soft btn-sm" data-restore="${t.version}" title="เปิดฉบับนี้ในตัวแก้ไข แล้วบันทึกเป็นฉบับใหม่">คืนฉบับนี้</button>` : ''}</div></div>`).join('')}</div>` });
   m.el.addEventListener('click', (e) => {
     const u = e.target.closest('[data-use]'); if (u) { Pc.f.tplv = +u.dataset.use; m.close(); pcDraftSave(); pcPreview(el); showToast(`โครงการนี้ใช้ ${+u.dataset.use ? 'Template ฉบับที่ ' + u.dataset.use : 'แบบมาตรฐานของระบบ'} แล้ว (กดบันทึกโครงการเพื่อเก็บ)`, 'info'); return; }
     const r = e.target.closest('[data-restore]'); if (r) { m.close(); pcTplOpen(el, Pc.mode === 'db' ? 'org' : 'local', +r.dataset.restore); Pc.tpl.orig = pcClone(Object.fromEntries(PC_DOCS.map(d => [d.no, pcTplLatest()?.data?.docs?.[d.no] || PC_TPL_DEFAULT[d.no]])));
