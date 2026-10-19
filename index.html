@@ -9113,7 +9113,7 @@ const PC_CSS = `
 .pc-sign{margin-left:65mm;width:95mm;text-align:center}.pc-sign p{margin:0}
 .pc-grid{display:grid;grid-template-columns:65mm 95mm;row-gap:5mm}.pc-grid .c{text-align:center}.pc-grid .c p{margin:0}.pc-grid .lb{text-align:left}.pc-grid.eq{grid-template-columns:1fr 1fr;column-gap:6mm}
 .pc-grid.one .c{grid-column:2}
-.pc-kv2{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;border:.6pt solid #000;padding:1.5mm 2mm;margin-top:2mm}.pc-kv2 p{margin:0}
+.pc-kv2{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;margin-top:2mm}.pc-kv2 p{margin:0}
 .pc-measure{position:fixed;left:-10000px;top:0;width:160mm;visibility:hidden}.pc-blk{display:flow-root}
 @media print{body.pc-printing{background:#fff!important}body.pc-printing>*:not(#rgPrintRoot){display:none!important}body.pc-printing #rgPrintRoot{position:static!important;left:auto!important}
   body.pc-printing .pc-page{page-break-after:always;break-after:page}body.pc-printing .pc-guide{display:none!important}}`;
@@ -9722,8 +9722,8 @@ async function pcDocx(docs, filename) {
         return [para([], { sb: b.sb || 12 }), new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: NONE, rows: rows.map(pair => new D.TableRow({ children: [0, 1].map(j => { const c = pair[j];
           return cell(c ? [...(c.label ? [para([run(c.label)])] : []), para([]), ...(c.label || (c.gap ?? 0) >= 12 ? [para([])] : []), ...c.lines.map(l => para([run(l)], { al: 'center' }))] : [para([])], { w: b.eq ? 50 : j ? 59.375 : 40.625, borders: NONE }); }) })) })];
       }
-      if (b.t === 'kv2') return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: { top: LN, bottom: LN, left: LN, right: LN, insideHorizontal: NB, insideVertical: NB },
-        rows: [new D.TableRow({ children: [cell(b.left.map(l => para([run(l)])), { w: 50 }), cell(b.right.map(l => para([run(l)])), { w: 50 })] })] })];
+      if (b.t === 'kv2') return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: NONE,   // ส่วนหัวใบสั่ง: ไม่มีกรอบ
+        rows: [new D.TableRow({ children: [cell(b.left.map(l => para([run(l)])), { w: 50, borders: NONE }), cell(b.right.map(l => para([run(l)])), { w: 50, borders: NONE })] })] })];
       return [];
     };
     const doc = new D.Document({ styles: { default: { document: { run: { font: FONT, size: 32 } } } },
