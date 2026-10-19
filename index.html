@@ -9175,10 +9175,6 @@ function pcPane(el, k) {
 /* ---------- ฟอร์ม (ซ้าย) ---------- */
 const pcIn = (path, label, o = {}) => `<div class="${o.span ? 'sm:col-span-2' : ''}"><label class="label">${label}</label>${o.area
   ? `<textarea class="input" rows="${o.rows || 2}" data-f="${path}" placeholder="${esc(o.ph || '')}">${esc(pcGet(path) ?? '')}</textarea>`
-  : o.type === 'date' ? `<div class="flex gap-1"><input class="input flex-1 min-w-0" type="date" data-f="${path}" value="${esc(pcGet(path) ?? '')}">
-      <button type="button" class="btn btn-ghost btn-sm !px-2 shrink-0" data-dt-today="${path}" title="ใส่วันที่วันนี้">วันนี้</button>
-      <button type="button" class="btn-icon shrink-0 hover:!text-blush-500" data-dt-clear="${path}" title="ล้างวันที่ (เว้นว่าง)" ${pcGet(path) ? '' : 'disabled'}>${ic('x')}</button></div>
-      ${pcGet(path) ? '' : '<div class="text-[11px] text-slate-400 mt-1">เว้นว่าง → เอกสารแสดงเส้นจุด</div>'}`
   : `<input class="input" ${o.type ? `type="${o.type}"` : ''} ${o.list ? `list="${o.list}"` : ''} ${o.num ? 'inputmode="decimal"' : ''} data-f="${path}" value="${esc(pcGet(path) ?? '')}" placeholder="${esc(o.ph || '')}">`}${o.hint ? `<div class="text-[11px] text-slate-400 mt-1">${o.hint}</div>` : ''}</div>`;
 const pcGet = (path) => path.split('.').reduce((o, k) => o?.[k], Pc.f);
 const pcSet = (path, v) => { const ks = path.split('.'), last = ks.pop(); ks.reduce((o, k) => o[k], Pc.f)[last] = v; };
@@ -9208,7 +9204,7 @@ function pcRenderForm(el) {
       ${pcIn('place', 'สถานที่ส่งมอบ', { span: true, ph: 'ว่าง = ชื่อหน่วยงาน' })}
       ${pcIn('dates.report', 'วันที่รายงานขอซื้อ/จ้าง', { type: 'date' })}${pcIn('dates.order', 'วันที่คำสั่ง/ประกาศ/ใบสั่ง', { type: 'date' })}
       ${pcIn('dates.inspect', 'วันที่ตรวจรับ', { type: 'date' })}${pcIn('dates.pay', 'วันที่ขอเบิกเงิน', { type: 'date' })}
-      <div class="sm:col-span-2 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">${ic('info', 'w-3 h-3')} วันที่เว้นว่างได้ (เอกสารจะแสดงเส้นจุดให้เขียนเอง)<span class="ml-auto flex gap-1"><button type="button" class="btn btn-ghost btn-sm !py-0.5" data-pc="todaydates">${ic('calendar-check', 'w-3.5 h-3.5')} ใส่วันนี้ทั้งหมด</button><button type="button" class="btn btn-ghost btn-sm !py-0.5" data-pc="cleardates">${ic('eraser', 'w-3.5 h-3.5')} ล้างวันที่ทั้งหมด</button></span></div>
+      <div class="sm:col-span-2 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">${ic('info', 'w-3 h-3')} ไม่ระบุวันที่ → เอกสารแสดงเป็นเส้นจุดให้อัตโนมัติ</div>
       ${pcIn('nos.memo', 'เลขที่บันทึกรายงานขอซื้อ/จ้าง', { ph: 'เช่น 123' })}${pcIn('nos.result', 'เลขที่บันทึกรายงานผลการพิจารณา', { ph: 'เช่น 124' })}
       ${pcIn('nos.pay', 'เลขที่บันทึกขอเบิกเงิน')}
       ${pcIn('nos.cmd1', 'คำสั่งผู้กำหนดร่าง ที่', { ph: 'เช่น 45' })}${pcIn('nos.cmd2', 'คำสั่งผู้ตรวจรับ ที่', { ph: 'เช่น 46' })}
@@ -9298,12 +9294,9 @@ async function pcOnClick(e, el) {
   const pn = t('[data-pc-pane]'); if (pn) { pcPane(el, pn.dataset.pcPane); return; }
   const nm = t('[data-pc-num]'); if (nm) { Pc.num = nm.dataset.pcNum; pcDraftSave(); pcRenderShell(el); return; }
   const di = t('[data-it-del]'); if (di) { Pc.f.items.splice(+di.dataset.itDel, 1); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
-  const dt = t('[data-dt-today],[data-dt-clear]'); if (dt) { pcSet(dt.dataset.dtToday || dt.dataset.dtClear, dt.dataset.dtToday ? calToday() : ''); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
   const dv = t('[data-via-del]'); if (dv) { e.preventDefault(); Pc.f.staff.via.splice(+dv.dataset.viaDel, 1); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
   const a = t('[data-pc]'); if (!a) return;
   const k = a.dataset.pc;
-  if (k === 'cleardates') { Pc.f.dates = { report: '', order: '', inspect: '', pay: '' }; pcRenderForm(el); pcPreview(el); pcDraftSave(); }
-  if (k === 'todaydates') { const t0 = calToday(); Pc.f.dates = { report: t0, order: t0, inspect: t0, pay: t0 }; pcRenderForm(el); pcPreview(el); pcDraftSave(); }
   if (k === 'additem') { Pc.f.items.push({ name: '', qty: 1, unit: '', price: '' }); pcRenderForm(el); $$('[data-it$="|name"]', el).at(-1)?.focus(); }
   if (k === 'addvia') { Pc.f.staff.via.push(pcPerson()); pcRenderForm(el); }
   if (k === 'new') { if (!(await confirmModal({ title: 'เริ่มโครงการใหม่', danger: false, icon: 'file-plus', confirmText: 'เริ่มใหม่', message: 'ล้างข้อมูลในแบบฟอร์ม แล้วเริ่มโครงการใหม่ (ใช้ข้อมูลหน่วยงาน/เจ้าหน้าที่จากค่าเริ่มต้น)?<br><span class="text-xs text-slate-400">ข้อมูลที่ยังไม่ได้กดบันทึกจะหายไป</span>' }))) return;
