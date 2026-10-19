@@ -5955,7 +5955,7 @@ async function rentPrint(kind, entIds, mode, opts = {}) {
   setTimeout(() => window.print(), 150);
 }
 /** แปลงหน้าเอกสาร (A4) หลายหน้าเป็นไฟล์ PDF – ใช้ตัวแปลงเดียวกับโปรแกรมคำนวณค่าใช้จ่ายไปราชการ */
-async function sfhPagesToPdf(pages, filename, orientation = 'portrait') {
+async function sfhPagesToPdf(pages, filename, orientation = 'portrait', fontCSS) {
   showLoader(true, 'กำลังสร้างไฟล์ PDF...');
   const root = pages[0]?.parentElement;
   try {
@@ -5964,7 +5964,7 @@ async function sfhPagesToPdf(pages, filename, orientation = 'portrait') {
       trvLoadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', () => !!window.jspdf?.jsPDF),
     ]);
     if (document.fonts?.ready) await document.fonts.ready;
-    const fontEmbedCSS = await trvFontCSS();
+    const fontEmbedCSS = fontCSS ?? await trvFontCSS();
     if (root) root.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;';
     const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation });
     const W = orientation === 'landscape' ? 297 : 210, H = orientation === 'landscape' ? 210 : 297;
@@ -8783,6 +8783,661 @@ function pmDelete(el, s) {
 /* ===== MODULE REGISTRY =====
    Router เรียก MODULES[module_key].render(section, moduleInfo, menu)
    เพิ่มโมดูลใหม่: เพิ่ม key + render ที่นี่ และเพิ่มแถวในตาราง modules / menus / permissions */
+/* ===== MODULE: procurement (งานจัดซื้อจัดจ้าง วงเงินไม่เกิน 5,000 บาท) =====
+ * ซ้าย = กรอกข้อมูล · ขวา = ตัวอย่างหนังสือ A4 8 ฉบับ (ขอบ ซ้าย 3 ขวา 2 บน 1.5 ล่าง 2 ซม. · TH Sarabun New 16 pt)
+ * บุคคลทั่วไป: เก็บข้อมูลในเบราว์เซอร์ (localStorage) · เจ้าหน้าที่: RPC sfh_proc_* (module_procurement.sql)
+ * โครงการเก็บ 3 เดือนนับจากแก้ไขล่าสุด · ร้านค้าเก็บจนกว่าจะลบ
+ * เอกสารทุกฉบับสร้างจาก "บล็อก" ชุดเดียว → ตัวอย่างบนจอ / พิมพ์ / PDF / Word ตรงกัน */
+const PC_LIMIT = 5000;
+const PC_LOCAL = 'sfh_proc_v1', PC_DRAFT = 'sfh_proc_draft_v1', PC_KEEP_DAYS = 92;
+const PC_GARUDA = 'assets/garuda.png';
+const PC_FONT = "'PcSarabun','TH Sarabun New','THSarabunNew','TH SarabunPSK','Sarabun',sans-serif";
+const PC_KIND = {
+  buy:  { v: 'ซื้อ', obj: 'พัสดุ', vendor: 'ผู้ขาย', order: 'ใบสั่งซื้อ', scope: 'รายละเอียดคุณลักษณะเฉพาะ', occ: 'ขาย', deliver: 'ส่งมอบพัสดุ' },
+  hire: { v: 'จ้าง', obj: 'งาน', vendor: 'ผู้รับจ้าง', order: 'ใบสั่งจ้าง', scope: 'ขอบเขตของงาน', occ: 'รับจ้าง', deliver: 'ส่งมอบงาน' },
+};
+const PC_DOCS = [
+  { no: 1, name: 'รายงานขอซื้อขอจ้าง', short: 'รายงานขอ' }, { no: 2, name: 'คำสั่งแต่งตั้งผู้กำหนดร่างขอบเขตงาน/คุณลักษณะเฉพาะ', short: 'คำสั่งผู้กำหนดร่าง' },
+  { no: 3, name: 'คำสั่งแต่งตั้งผู้ตรวจรับพัสดุ', short: 'คำสั่งผู้ตรวจรับ' }, { no: 4, name: 'รายงานผลการพิจารณา', short: 'รายงานผล' },
+  { no: 5, name: 'ประกาศผู้ชนะการเสนอราคา', short: 'ประกาศผู้ชนะ' }, { no: 6, name: 'ใบสั่งซื้อ/สั่งจ้าง', short: 'ใบสั่ง' },
+  { no: 7, name: 'ใบตรวจรับพัสดุ', short: 'ใบตรวจรับ' }, { no: 8, name: 'บันทึกขออนุมัติเบิกจ่ายเงิน', short: 'ส่งเบิกเงิน' },
+];
+const Pc = { mode: 'local', projects: [], vendors: [], settings: {}, f: null, id: null, seq: null, doc: 1, num: 'thai', garuda: undefined, timer: null, ro: null };
+const PX_MM = 96 / 25.4;
+const PC_PAGE = { w: 210, h: 297, t: 15, r: 20, b: 20, l: 30 };
+
+/* ---------- เก็บข้อมูลในเบราว์เซอร์ (บุคคลทั่วไป / ร่างที่กำลังทำ) ---------- */
+function pcLocal() { try { return JSON.parse(localStorage.getItem(PC_LOCAL) || '{}'); } catch { return {}; } }
+function pcLocalSave(v) { try { localStorage.setItem(PC_LOCAL, JSON.stringify(v)); return true; } catch { showToast('บันทึกในเบราว์เซอร์ไม่ได้ (พื้นที่เต็มหรือถูกปิดกั้น)', 'error'); return false; } }
+function pcDraftSave() { try { localStorage.setItem(PC_DRAFT, JSON.stringify({ f: Pc.f, id: Pc.id, seq: Pc.seq, doc: Pc.doc, num: Pc.num, mode: Pc.mode })); } catch { /* ไม่เป็นไร */ } }
+function pcDraftLoad() { try { return JSON.parse(localStorage.getItem(PC_DRAFT) || 'null'); } catch { return null; } }
+
+/* ---------- ค่าเริ่มต้น / คำนวณ ---------- */
+const pcPerson = (o = {}) => ({ name: o.name || '', pos: o.pos || '' });
+function pcBlank(s = Pc.settings) {
+  const on = String(State.settings.org_name || ''), sp = on.indexOf(' ');
+  const org = { unit: sp > 0 ? on.slice(0, sp) : '', main: sp > 0 ? on.slice(sp + 1) : on, prefix: '', phone: '', address: '', tax_id: '', ...(s.org || {}) };
+  const st = s.staff || {}, today = calToday();
+  return {
+    kind: 'buy', subject: '', reason: '', source: '', budget: '', mprice: '', days: 7, place: '', fine: '0.10', invoice: '',
+    dates: { report: today, order: today, inspect: today, pay: today }, nos: { memo: '', cmd1: '', cmd2: '', po: '', pay: '' },
+    org, vendor: { name: '', tax_id: '', address: '', phone: '' }, items: [{ name: '', qty: 1, unit: '', price: '' }], vat: 'incl',
+    staff: { maker: pcPerson(st.maker), officer: pcPerson(st.officer), head: pcPerson(st.head), via: (st.via || []).map(pcPerson), approver: { ...pcPerson(st.approver), acting: st.approver?.acting || '' },
+      drafter: pcPerson(st.drafter), inspector: pcPerson(st.inspector) },
+  };
+}
+const pcNum = (v) => { const n = Number(String(v ?? '').replace(/,/g, '')); return isFinite(n) ? n : 0; };
+function pcTotals(f) {
+  const sub = Math.round(f.items.reduce((a, i) => a + pcNum(i.qty) * pcNum(i.price), 0) * 100) / 100;
+  if (f.vat === 'add') { const vat = Math.round(sub * 7) / 100; return { pre: sub, vat, total: Math.round((sub + vat) * 100) / 100 }; }
+  if (f.vat === 'incl') { const vat = Math.round(sub * 7 / 107 * 100) / 100; return { pre: Math.round((sub - vat) * 100) / 100, vat, total: sub }; }
+  return { pre: sub, vat: 0, total: sub };
+}
+const pcFy = (f) => thaiFiscalYear(calDate(f.dates.report || calToday()));
+const pcK = (f) => PC_KIND[f.kind] || PC_KIND.buy;
+const pcTitle = (f) => { const k = pcK(f), s = (f.subject || '').trim(); return s ? (s.startsWith(k.v) ? s : k.v + s) : k.v + '........................'; };
+
+/* ---------- ข้อความ ---------- */
+const PC_TH_DIGIT = '๐๑๒๓๔๕๖๗๘๙';
+const pcN = (s) => Pc.num === 'thai' ? String(s ?? '').replace(/[0-9]/g, d => PC_TH_DIGIT[d]) : String(s ?? '');
+const pcMoney = (n) => (+n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const pcDate = (iso) => { if (!iso) return '..........................'; const d = calDate(iso); return `${d.getDate()} ${TH_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`; };
+const pcBE = (iso) => (iso ? calDate(iso).getFullYear() : new Date().getFullYear()) + 543;
+const pcPh = (v, n = 24) => String(v ?? '').trim() || '.'.repeat(n);
+const pcWho = (p) => p?.name ? p.name : '.'.repeat(30);
+/** ช่องว่างความกว้างศูนย์ระหว่างคำไทย → Word ตัดบรรทัดภาษาไทยได้ถูกตำแหน่ง */
+let PC_SEG = null;
+function pcZws(s) {
+  if (!/[฀-๿]/.test(s)) return s;
+  try { PC_SEG = PC_SEG || new Intl.Segmenter('th', { granularity: 'word' }); } catch { return s; }
+  let out = '', prev = false;
+  for (const { segment } of PC_SEG.segment(s)) { const th = /[฀-๿]/.test(segment); if (th && prev) out += '​'; out += segment; prev = th; }
+  return out;
+}
+
+/* ---------- บล็อกเอกสาร ----------
+ * { t:'memo', unit, no, date, subject } หัวบันทึกข้อความ (ครุฑ 1.5 ซม.)
+ * { t:'garuda' } ครุฑ 3 ซม. กึ่งกลาง (คำสั่ง/ประกาศ)
+ * { t:'p', r:[runs]|text, ind, al, sz, b, sb(pt) , ml(mm) }  ย่อหน้า (ind = ย่อหน้าบรรทัดแรก 2.5 ซม.)
+ * { t:'rule' } เส้นคั่นใต้หัวคำสั่ง/ประกาศ
+ * { t:'table', cols:[{w,al}], head:[...], rows:[[...]], foot:[[{v,span,al,b}]] }
+ * { t:'sign', lines:[...], sb } ลายมือชื่อ (ชิดขวา-กึ่งกลาง)
+ * { t:'grid', cells:[{label, lines}] } ช่องความเห็น/ลายมือชื่อ 2 คอลัมน์ */
+const P = (r, o = {}) => ({ t: 'p', r: Array.isArray(r) ? r : [{ x: r }], ...o });
+const B = (x) => ({ x, b: true });
+function pcItemsTable(f, opt = {}) {
+  const k = pcK(f), tt = pcTotals(f), rows = f.items.filter(i => i.name || pcNum(i.price));
+  const foot = [[{ v: `รวมเป็นเงิน${f.vat === 'incl' ? ' (ก่อนภาษีมูลค่าเพิ่ม)' : ''}`, span: 5, al: 'right' }, { v: pcMoney(tt.pre), al: 'right' }]];
+  if (f.vat !== 'none') foot.push([{ v: 'ภาษีมูลค่าเพิ่ม 7%', span: 5, al: 'right' }, { v: pcMoney(tt.vat), al: 'right' }]);
+  foot.push([{ v: `รวมเป็นเงินทั้งสิ้น (${bahtText(tt.total)})`, span: 5, al: 'right', b: true }, { v: pcMoney(tt.total), al: 'right', b: true }]);
+  return { t: 'table', cols: [{ w: 8, al: 'center' }, { w: 42 }, { w: 10, al: 'center' }, { w: 10, al: 'center' }, { w: 15, al: 'right' }, { w: 15, al: 'right' }],
+    head: ['ลำดับ', `รายการ${k.v === 'ซื้อ' ? 'พัสดุ' : 'งานจ้าง'}`, 'จำนวน', 'หน่วย', 'ราคาต่อหน่วย', 'จำนวนเงิน'],
+    rows: (rows.length ? rows : [{ name: '', qty: '', unit: '', price: '' }]).map((i, n) => [String(n + 1), pcPh(i.name, 30), i.qty === '' ? '' : String(pcNum(i.qty)), i.unit || '', i.price === '' ? '' : pcMoney(i.price), i.price === '' ? '' : pcMoney(pcNum(i.qty) * pcNum(i.price))]),
+    foot: opt.noFoot ? [] : foot };
+}
+const pcSignLines = (p, extra = []) => [`(${p?.name ? p.name : '.'.repeat(36)})`, ...(p?.pos ? [p.pos] : ['ตำแหน่ง ' + '.'.repeat(28)]), ...extra.filter(Boolean)];
+/** ความเห็น/อนุมัติตามลำดับขั้น: หัวหน้าเจ้าหน้าที่พัสดุ → ผ่าน (หลายขั้น) → ผู้อนุมัติ */
+function pcApprovals(f, last = 'อนุมัติ') {
+  const s = f.staff, cells = [];
+  if (s.head.name || s.head.pos) cells.push({ label: '- เห็นชอบ', lines: pcSignLines(s.head) });
+  s.via.filter(v => v.name || v.pos).forEach(v => cells.push({ label: '- เห็นควรอนุมัติ', lines: pcSignLines(v) }));
+  if (cells.length % 2 === 0) cells.push(null);   // ผู้อนุมัติอยู่คอลัมน์ขวาเสมอ
+  cells.push({ label: `- ${last}`, lines: pcSignLines(s.approver, [s.approver.acting]) });
+  return { t: 'grid', cells };
+}
+const pcVatNote = (f) => f.vat === 'none' ? '' : ' ซึ่งรวมภาษีมูลค่าเพิ่มแล้ว';
+const pcApproverTitle = (f) => f.staff.approver.pos || '.'.repeat(30);
+const pcMemoUnit = (f) => [f.org.unit, f.org.main].filter(Boolean).join(' ') + (f.org.phone ? ` โทร. ${f.org.phone}` : '');
+
+function pcDocs(f) {
+  const k = pcK(f), tt = pcTotals(f), title = pcTitle(f), s = f.staff, v = pcPh(f.vendor.name, 30), main = pcPh(f.org.main, 30);
+  const money = `${pcMoney(tt.total)} บาท (${bahtText(tt.total)})`, d = f.dates, nItems = f.items.filter(i => i.name).length || 1;
+  const budget = pcNum(f.budget) || tt.total, mprice = pcNum(f.mprice) || tt.total;
+  const due = d.order && +f.days ? calAddDays(d.order, +f.days) : '';
+  const cmdHead = (subject, no) => [{ t: 'garuda' }, P([B(`คำสั่ง${main}`)], { al: 'center', sb: 6 }), P([B(`ที่ ${pcPh(no, 6)}/${pcBE(d.order)}`)], { al: 'center' }),
+    P([B(`เรื่อง ${subject}`)], { al: 'center' }), { t: 'rule' }];
+  const officer = { t: 'sign', lines: pcSignLines(s.officer.name ? s.officer : s.maker), sb: 24 };
+  return [
+    { no: 1, kind: 'memo', blocks: [
+      { t: 'memo', unit: pcMemoUnit(f), no: (f.org.prefix || '') + (f.nos.memo || ''), date: pcDate(d.report), subject: `รายงานขอ${title}` },
+      P(`เรียน  ${pcApproverTitle(f)}`, { sb: 6 }),
+      P(`ด้วย ${pcPh(f.org.unit, 16)} มีความประสงค์จะ${title} โดยวิธีเฉพาะเจาะจง ซึ่งมีรายละเอียด ดังต่อไปนี้`, { ind: true, sb: 6 }),
+      P(`1. เหตุผลและความจำเป็นที่ต้อง${k.v}  ${pcPh(f.reason, 60)}`, { ind: true }),
+      P(`2. รายละเอียดของ${k.obj}ที่จะ${k.v} จำนวน ${nItems} รายการ ดังนี้`, { ind: true }),
+      pcItemsTable(f),
+      P(`3. ราคากลางของ${k.obj}ที่จะ${k.v} เป็นเงิน ${pcMoney(mprice)} บาท (${bahtText(mprice)})`, { ind: true, sb: 4 }),
+      P(`4. วงเงินที่จะ${k.v} ${f.source ? f.source + ' ' : ''}เป็นเงิน ${pcMoney(budget)} บาท`, { ind: true }),
+      P(`5. กำหนดเวลาที่ต้องการใช้${k.obj}หรือให้งานนั้นแล้วเสร็จ ภายใน ${pcPh(f.days, 4)} วัน นับถัดจากวันลงนามใน${k.order}`, { ind: true }),
+      P(`6. วิธีที่จะ${k.v}และเหตุผลที่ต้อง${k.v}โดยวิธีนั้น ดำเนินการโดยวิธีเฉพาะเจาะจง ตามพระราชบัญญัติการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 มาตรา 56 วรรคหนึ่ง (2) (ข) เนื่องจากเป็นการจัดซื้อจัดจ้างพัสดุที่มีการผลิต จำหน่าย ก่อสร้าง หรือให้บริการทั่วไป และมีวงเงินในการจัดซื้อจัดจ้างครั้งหนึ่งไม่เกินวงเงินตามที่กำหนดในกฎกระทรวง`, { ind: true }),
+      P(`7. หลักเกณฑ์การพิจารณาคัดเลือกข้อเสนอ โดยใช้เกณฑ์ราคา`, { ind: true }),
+      P(`8. การขออนุมัติแต่งตั้งผู้รับผิดชอบ ดังนี้`, { ind: true }),
+      P(`8.1 ผู้จัดทำร่าง${k.scope} ได้แก่ ${pcWho(s.drafter)} ตำแหน่ง ${pcPh(s.drafter.pos, 20)}`, { ind: true }),
+      P(`8.2 ผู้ตรวจรับพัสดุ ได้แก่ ${pcWho(s.inspector)} ตำแหน่ง ${pcPh(s.inspector.pos, 20)}`, { ind: true }),
+      P(`จึงเรียนมาเพื่อโปรดพิจารณา หากเห็นชอบขอได้โปรดอนุมัติให้ดำเนินการตามรายละเอียดในรายงานขอ${k.v}ดังกล่าวข้างต้น และลงนามในคำสั่งแต่งตั้งผู้จัดทำร่าง${k.scope}และผู้ตรวจรับพัสดุที่แนบมาพร้อมนี้`, { ind: true, sb: 6 }),
+      officer, pcApprovals(f),
+    ] },
+    { no: 2, kind: 'cmd', blocks: [
+      ...cmdHead(`แต่งตั้งผู้จัดทำร่าง${k.scope} สำหรับการ${title}`, f.nos.cmd1),
+      P(`ด้วย${main} มีความประสงค์จะ${title} โดยวิธีเฉพาะเจาะจง เพื่อให้การดำเนินการเป็นไปด้วยความเรียบร้อยและถูกต้องตามระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 จึงแต่งตั้งผู้รับผิดชอบจัดทำร่าง${k.scope} ดังนี้`, { ind: true }),
+      P(`${pcWho(s.drafter)}  ตำแหน่ง ${pcPh(s.drafter.pos, 24)}`, { ind: true, sb: 4 }),
+      P(`ให้มีหน้าที่จัดทำร่าง${k.scope}สำหรับการ${title} ให้แล้วเสร็จ และเสนอต่อผู้มีอำนาจเพื่อพิจารณาให้ความเห็นชอบต่อไป`, { ind: true, sb: 4 }),
+      P('ทั้งนี้ ตั้งแต่บัดนี้เป็นต้นไป', { ind: true, sb: 4 }),
+      P(`สั่ง ณ วันที่ ${pcDate(d.order)}`, { ind: true, sb: 10 }),
+      { t: 'sign', lines: pcSignLines(s.approver, [s.approver.acting]), sb: 30 },
+    ] },
+    { no: 3, kind: 'cmd', blocks: [
+      ...cmdHead(`แต่งตั้งผู้ตรวจรับพัสดุ สำหรับการ${title}`, f.nos.cmd2),
+      P(`ด้วย${main} มีความประสงค์จะ${title} โดยวิธีเฉพาะเจาะจง เพื่อให้การดำเนินการเป็นไปด้วยความเรียบร้อยและถูกต้องตามระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560 จึงแต่งตั้งผู้ตรวจรับพัสดุ ดังนี้`, { ind: true }),
+      P(`${pcWho(s.inspector)}  ตำแหน่ง ${pcPh(s.inspector.pos, 24)}`, { ind: true, sb: 4 }),
+      P(`ให้มีหน้าที่ตรวจรับ${k.obj}ให้ถูกต้องครบถ้วนตามเงื่อนไขของ${k.order} และปฏิบัติหน้าที่ตามระเบียบกระทรวงการคลังว่าด้วยการจัดซื้อจัดจ้างและการบริหารพัสดุภาครัฐ พ.ศ. 2560`, { ind: true, sb: 4 }),
+      P('ทั้งนี้ ตั้งแต่บัดนี้เป็นต้นไป', { ind: true, sb: 4 }),
+      P(`สั่ง ณ วันที่ ${pcDate(d.order)}`, { ind: true, sb: 10 }),
+      { t: 'sign', lines: pcSignLines(s.approver, [s.approver.acting]), sb: 30 },
+    ] },
+    { no: 4, kind: 'memo', blocks: [
+      { t: 'memo', unit: pcMemoUnit(f), no: (f.org.prefix || '') + (f.nos.memo || ''), date: pcDate(d.order), subject: `รายงานผลการพิจารณาและขออนุมัติสั่ง${title}` },
+      P(`เรียน  ${pcApproverTitle(f)}`, { sb: 6 }),
+      P(`ตามที่ ${pcApproverTitle(f)} ได้เห็นชอบรายงานขอ${title} โดยวิธีเฉพาะเจาะจง ลงวันที่ ${pcDate(d.report)} นั้น`, { ind: true, sb: 6 }),
+      P(`เจ้าหน้าที่ได้เจรจาตกลงราคากับ ${v} ซึ่งเป็นผู้มีอาชีพ${k.occ}โดยตรง และได้พิจารณาแล้ว ปรากฏผล ดังนี้`, { ind: true }),
+      { t: 'table', cols: [{ w: 8, al: 'center' }, { w: 34 }, { w: 26 }, { w: 16, al: 'right' }, { w: 16, al: 'right' }], head: ['ลำดับ', 'รายการพิจารณา', 'ผู้เสนอราคา', 'ราคาที่เสนอ', 'ราคาที่ตกลง'],
+        rows: [['1', title, v, pcMoney(tt.total), pcMoney(tt.total)]], foot: [] },
+      P(`โดยใช้เกณฑ์ราคา เห็นควร${k.v}จาก ${v} เป็นเงินทั้งสิ้น ${money}${pcVatNote(f)} เป็นราคาที่ไม่สูงกว่าราคากลาง`, { ind: true, sb: 4 }),
+      P(`จึงเรียนมาเพื่อโปรดพิจารณา หากเห็นชอบขอได้โปรดอนุมัติให้สั่ง${k.v}จากผู้เสนอราคาดังกล่าว และลงนามในประกาศผู้ชนะการเสนอราคาที่แนบมาพร้อมนี้`, { ind: true, sb: 6 }),
+      officer, pcApprovals(f),
+    ] },
+    { no: 5, kind: 'cmd', blocks: [
+      { t: 'garuda' }, P([B(`ประกาศ${main}`)], { al: 'center', sb: 6 }), P([B(`เรื่อง ประกาศผู้ชนะการเสนอราคา ${title} โดยวิธีเฉพาะเจาะจง`)], { al: 'center' }), { t: 'rule' },
+      P(`ตามที่ ${main} ได้มีโครงการ ${title} โดยวิธีเฉพาะเจาะจง นั้น`, { ind: true }),
+      P(`${title} จำนวน ${nItems} รายการ ผู้ได้รับการคัดเลือก ได้แก่ ${v}${f.vendor.tax_id ? ` (เลขประจำตัวผู้เสียภาษี ${f.vendor.tax_id})` : ''} โดยเสนอราคา เป็นเงินทั้งสิ้น ${money}${f.vat === 'none' ? '' : ' รวมภาษีมูลค่าเพิ่มและภาษีอื่น ค่าขนส่ง ค่าจดทะเบียน และค่าใช้จ่ายอื่น ๆ ทั้งปวง'}`, { ind: true, sb: 4 }),
+      P(`ประกาศ ณ วันที่ ${pcDate(d.order)}`, { ind: true, sb: 10 }),
+      { t: 'sign', lines: pcSignLines(s.approver, [s.approver.acting]), sb: 30 },
+    ] },
+    { no: 6, kind: 'form', blocks: [
+      P([B(k.order)], { al: 'center', sz: 20 }),
+      { t: 'kv2', left: [`${k.vendor}  ${v}`, `ที่อยู่  ${pcPh(f.vendor.address, 30)}`, `โทรศัพท์  ${pcPh(f.vendor.phone, 14)}`, `เลขประจำตัวผู้เสียภาษี  ${pcPh(f.vendor.tax_id, 14)}`],
+        right: [`${k.order}เลขที่  ${pcPh(f.nos.po, 10)}`, `วันที่  ${pcDate(d.order)}`, `ส่วนราชการ  ${pcPh([f.org.unit, f.org.main].filter(Boolean).join(' '), 24)}`, `ที่อยู่  ${pcPh(f.org.address, 24)}`, `โทรศัพท์  ${pcPh(f.org.phone, 14)}`] },
+      P(`ตามที่ ${v} ได้เสนอราคา ไว้ต่อ ${main} ซึ่งได้รับราคาและตกลง${k.v} ตามรายการดังต่อไปนี้`, { ind: true, sb: 6 }),
+      pcItemsTable(f),
+      P(`การ${k.v} อยู่ภายใต้เงื่อนไขต่อไปนี้`, { ind: true, sb: 6 }),
+      P(`1. กำหนด${k.deliver}ภายใน ${pcPh(f.days, 4)} วัน นับถัดจากวันที่${k.vendor}ได้รับ${k.order}${due ? ` (ภายในวันที่ ${pcDate(due)})` : ''}`, { ind: true }),
+      P(`2. สถานที่${k.deliver} ${pcPh(f.place || main, 30)}`, { ind: true }),
+      P(`3. หาก${k.vendor}${k.deliver}เกินกำหนด จะคิดค่าปรับเป็นรายวันในอัตราร้อยละ ${pcPh(f.fine, 4)} ของราคา${k.v === 'ซื้อ' ? 'สิ่งของที่ยังไม่ได้รับมอบ' : 'งานจ้าง'}`, { ind: true }),
+      { t: 'grid', sb: 14, cells: [{ label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้สั่ง${k.v}`, ...pcSignLines(s.approver, [s.approver.acting])] },
+        { label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้รับ${k.order}`, `(${f.vendor.name ? f.vendor.name : '.'.repeat(36)})`, k.vendor, 'วันที่ ' + '.'.repeat(30)] }] },
+    ] },
+    { no: 7, kind: 'form', blocks: [
+      P([B('ใบตรวจรับพัสดุ')], { al: 'center', sz: 20 }),
+      P(`เขียนที่ ${pcPh([f.org.unit, f.org.main].filter(Boolean).join(' '), 30)}`, { al: 'right', sb: 6 }),
+      P(`วันที่ ${pcDate(d.inspect)}`, { al: 'right' }),
+      P(`ตามที่ ${main} ได้ตกลง${title} กับ ${v} ตาม${k.order}เลขที่ ${pcPh(f.nos.po, 10)} ลงวันที่ ${pcDate(d.order)} เป็นเงิน ${money} นั้น`, { ind: true, sb: 6 }),
+      P(`บัดนี้ ${k.vendor}ได้${k.deliver} ตามใบส่งของ/ใบแจ้งหนี้ เลขที่ ${pcPh(f.invoice, 10)} ลงวันที่ ${pcDate(d.inspect)} ผู้ตรวจรับพัสดุได้ตรวจรับแล้ว ปรากฏว่าถูกต้องครบถ้วนตาม${k.order}ทุกประการ ตามรายการดังนี้`, { ind: true }),
+      pcItemsTable(f),
+      P('จึงลงชื่อไว้เป็นหลักฐาน', { ind: true, sb: 6 }),
+      { t: 'sign', lines: ['ลงชื่อ ' + '.'.repeat(36) + ' ผู้ตรวจรับพัสดุ', ...pcSignLines(s.inspector)], sb: 24 },
+      P(`เรียน  ${pcApproverTitle(f)}  เพื่อโปรดทราบผลการตรวจรับพัสดุ`, { sb: 10 }),
+      { t: 'sign', lines: pcSignLines(s.officer), sb: 20 },
+      { t: 'grid', cells: [{ label: '- ทราบ', lines: pcSignLines(s.approver, [s.approver.acting]) }] },
+    ] },
+    { no: 8, kind: 'memo', blocks: [
+      { t: 'memo', unit: pcMemoUnit(f), no: (f.org.prefix || '') + (f.nos.pay || ''), date: pcDate(d.pay), subject: `ขออนุมัติเบิกจ่ายเงินค่า${title}` },
+      P(`เรียน  ${pcApproverTitle(f)}`, { sb: 6 }),
+      P(`ตามที่ ${pcApproverTitle(f)} ได้อนุมัติให้${title} จาก ${v} ตาม${k.order}เลขที่ ${pcPh(f.nos.po, 10)} ลงวันที่ ${pcDate(d.order)} เป็นเงิน ${money} นั้น`, { ind: true, sb: 6 }),
+      P(`บัดนี้ ${k.vendor}ได้${k.deliver}เรียบร้อยแล้ว และผู้ตรวจรับพัสดุได้ตรวจรับไว้ถูกต้องครบถ้วน เมื่อวันที่ ${pcDate(d.inspect)}`, { ind: true }),
+      P(`จึงขออนุมัติเบิกจ่ายเงินให้แก่ ${v} เป็นเงิน ${money}${pcVatNote(f)}${f.source ? ` โดยเบิกจ่ายจาก${f.source}` : ''}`, { ind: true }),
+      P(`พร้อมนี้ได้แนบหลักฐานประกอบการเบิกจ่าย ได้แก่ ${k.order} ใบส่งของ/ใบกำกับภาษี และใบตรวจรับพัสดุ`, { ind: true }),
+      P('จึงเรียนมาเพื่อโปรดพิจารณาอนุมัติ', { ind: true, sb: 6 }),
+      { t: 'sign', lines: pcSignLines(s.maker.name ? s.maker : s.officer), sb: 24 }, pcApprovals(f),
+    ] },
+  ];
+}
+
+/* ---------- แสดงผลเป็น HTML ---------- */
+const PC_CSS = `
+@font-face{font-family:'PcSarabun';font-weight:400;src:local('TH Sarabun New'),local('THSarabunNew'),url('fonts/THSarabunNew.woff2') format('woff2'),url('fonts/THSarabunNew.ttf') format('truetype')}
+@font-face{font-family:'PcSarabun';font-weight:700;src:local('TH Sarabun New Bold'),local('THSarabunNew-Bold'),url('fonts/THSarabunNew-Bold.woff2') format('woff2'),url('fonts/THSarabunNew-Bold.ttf') format('truetype')}
+.pc-page{width:210mm;height:297mm;padding:15mm 20mm 20mm 30mm;box-sizing:border-box;background:#fff;color:#000;position:relative;overflow:hidden;font-family:${PC_FONT};font-size:16pt;line-height:1.27;text-align:left}
+.pc-page *{box-sizing:border-box}.pc-body{position:relative}
+.pc-guide{position:absolute;left:30mm;right:20mm;top:15mm;bottom:20mm;outline:1px dashed #f0a7c2;pointer-events:none}
+.pc-pno{height:10mm;text-align:center;font-size:16pt}
+.pc-p{margin:0;white-space:pre-wrap;word-break:normal;overflow-wrap:anywhere}.pc-p.ind{text-indent:25mm}
+.pc-memo-top{position:relative;height:15mm;margin-bottom:2mm}.pc-memo-top img,.pc-memo-top .pc-gph{position:absolute;left:0;top:0;height:15mm}
+.pc-memo-title{text-align:center;font-size:29pt;font-weight:700;line-height:15mm}
+.pc-lbl{font-size:20pt;font-weight:700}.pc-row2{display:flex}.pc-row2>span{flex:1}
+.pc-gar{text-align:center;height:30mm}.pc-gar img,.pc-gar .pc-gph{height:30mm}
+.pc-gph{display:inline-flex;align-items:center;justify-content:center;aspect-ratio:1/1.1;border:1.5px dashed #c9a227;border-radius:50%;color:#a08017;font-size:11pt;line-height:1.1;text-align:center}
+.pc-rule{text-align:center;line-height:1;margin:1mm 0 3mm}
+.pc-tbl{width:100%;border-collapse:collapse;margin-top:1mm}.pc-tbl th,.pc-tbl td{border:.6pt solid #000;padding:0 1.5mm;vertical-align:top;font-size:15pt;line-height:1.2}
+.pc-tbl th{font-weight:700;text-align:center}
+.pc-sign{margin-left:65mm;width:95mm;text-align:center}.pc-sign p{margin:0}
+.pc-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;row-gap:5mm}.pc-grid .c{text-align:center}.pc-grid .c p{margin:0}.pc-grid .lb{text-align:left}
+.pc-grid.one{grid-template-columns:1fr}.pc-grid.one .c{margin-left:65mm;width:95mm}
+.pc-kv2{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;border:.6pt solid #000;padding:1.5mm 2mm;margin-top:2mm}.pc-kv2 p{margin:0}
+.pc-measure{position:fixed;left:-10000px;top:0;width:160mm;visibility:hidden}.pc-blk{display:flow-root}
+@media print{body.pc-printing{background:#fff!important}body.pc-printing>*:not(#rgPrintRoot){display:none!important}body.pc-printing #rgPrintRoot{position:static!important;left:auto!important}
+  body.pc-printing .pc-page{page-break-after:always;break-after:page}body.pc-printing .pc-guide{display:none!important}}`;
+function pcEnsureCss() {
+  if ($('#pc-style')) return;
+  const st = document.createElement('style'); st.id = 'pc-style'; st.textContent = PC_CSS; document.head.appendChild(st);
+  if (!$('link[href*="family=Sarabun"]')) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap'; document.head.appendChild(l); }
+}
+const pcRuns = (r) => (r || []).map(x => { const t = esc(pcN(x.x)); return x.b ? `<b>${t}</b>` : t; }).join('');
+function pcGaruda(cls) { return Pc.garuda ? `<img src="${PC_GARUDA}" alt="ตราครุฑ" class="${cls || ''}">` : `<span class="pc-gph">ตราครุฑ</span>`; }
+function pcBlockHtml(b) {
+  const sb = b.sb ? `padding-top:${b.sb}pt;` : '';
+  if (b.t === 'memo') return `<div class="pc-memo-top">${pcGaruda()}<div class="pc-memo-title">บันทึกข้อความ</div></div>
+    <p class="pc-p"><span class="pc-lbl">ส่วนราชการ</span>  ${esc(pcN(b.unit || '.'.repeat(60)))}</p>
+    <p class="pc-p pc-row2"><span><span class="pc-lbl">ที่</span>  ${esc(pcN(b.no || '.'.repeat(24)))}</span><span><span class="pc-lbl">วันที่</span>  ${esc(pcN(b.date))}</span></p>
+    <p class="pc-p"><span class="pc-lbl">เรื่อง</span>  ${esc(pcN(b.subject))}</p>`;
+  if (b.t === 'garuda') return `<div class="pc-gar">${pcGaruda()}</div>`;
+  if (b.t === 'p') return `<p class="pc-p ${b.ind ? 'ind' : ''}" style="${sb}text-align:${b.al || 'left'};${b.sz ? `font-size:${b.sz}pt;` : ''}${b.ml ? `margin-left:${b.ml}mm;` : ''}">${pcRuns(b.r)}</p>`;
+  if (b.t === 'rule') return `<div class="pc-rule">${'-'.repeat(30)}</div>`;
+  if (b.t === 'table') return `<table class="pc-tbl"><colgroup>${b.cols.map(c => `<col style="width:${c.w}%">`).join('')}</colgroup>
+    <thead><tr>${b.head.map(h => `<th>${esc(pcN(h))}</th>`).join('')}</tr></thead>
+    <tbody>${b.rows.map(r => `<tr>${r.map((c, i) => `<td style="text-align:${b.cols[i].al || 'left'}">${esc(pcN(c))}</td>`).join('')}</tr>`).join('')}
+    ${b.foot.map(r => `<tr>${r.map(c => `<td colspan="${c.span || 1}" style="text-align:${c.al || 'left'}${c.b ? ';font-weight:700' : ''}">${esc(pcN(c.v))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  if (b.t === 'sign') return `<div class="pc-sign" style="${sb}">${b.lines.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div>`;
+  if (b.t === 'grid') return `<div class="pc-grid ${b.cells.length === 1 ? 'one' : ''}" style="padding-top:${b.sb || 12}pt">${b.cells.map(c => !c ? '<div></div>' : `<div class="c">${c.label ? `<p class="lb">${esc(pcN(c.label))}</p>` : ''}<p style="height:${c.label ? 12 : 4}mm"></p>${c.lines.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div>`).join('')}</div>`;
+  if (b.t === 'kv2') return `<div class="pc-kv2"><div>${b.left.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div><div>${b.right.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div></div>`;
+  return '';
+}
+/** จัดหน้า: วัดความสูงทีละบล็อกในกรอบกว้าง 16 ซม. แล้ววางลงหน้า A4 (สูงได้ 26.2 ซม.) · หน้า 2 ขึ้นไปมีเลขหน้ากึ่งกลางด้านบน */
+function pcPaginate(doc) {
+  let m = $('#pcMeasure'); if (!m) { m = document.createElement('div'); m.id = 'pcMeasure'; m.className = 'pc-page pc-measure'; document.body.appendChild(m); }
+  m.style.cssText = 'height:auto;padding:0;width:160mm';
+  m.innerHTML = doc.blocks.map(b => `<div class="pc-blk">${pcBlockHtml(b)}</div>`).join('');
+  const hs = $$('.pc-blk', m).map(x => x.getBoundingClientRect().height);
+  const H = (PC_PAGE.h - PC_PAGE.t - PC_PAGE.b) * PX_MM - 2, PNO = 10 * PX_MM, pages = [[]]; let used = 0;   // หน้า 2 ขึ้นไปเว้นที่ให้เลขหน้า 1 ซม. (อยู่ในขอบเขตที่พิมพ์ได้)
+  doc.blocks.forEach((b, i) => {
+    if (used + hs[i] > H && pages.at(-1).length) { pages.push([]); used = PNO; }
+    pages.at(-1).push(i); used += hs[i];
+  });
+  m.innerHTML = '';
+  return { pages: pages.map(ix => ix.map(i => doc.blocks[i])), over: hs.some(h => h > H) };
+}
+function pcPagesHtml(doc, guide) {
+  const { pages } = pcPaginate(doc);
+  return pages.map((bl, pi) => `<div class="pc-page" data-doc="${doc.no}">${guide ? '<div class="pc-guide" title="ขอบเขตที่พิมพ์ได้: ซ้าย 3 ขวา 2 บน 1.5 ล่าง 2 ซม."></div>' : ''}
+    <div class="pc-body">${pi ? `<div class="pc-pno">- ${esc(pcN(pi + 1))} -</div>` : ''}${bl.map(pcBlockHtml).join('')}</div></div>`);
+}
+
+/* ---------- หน้าโมดูล ---------- */
+async function renderProcurement(el, mod) {
+  pcEnsureCss();
+  Pc.mode = isLoggedIn() && hasPermission('procurement.save') ? 'db' : 'local';
+  el.innerHTML = pageHeader({ title: mod?.name || 'งานจัดซื้อจัดจ้าง (วงเงินไม่เกิน 5,000 บาท)', icon: 'shopping-cart', tone: 'blush',
+    subtitle: 'จัดทำเอกสารจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง 8 ฉบับ · ตัวอย่างหนังสือ A4 ตามหลักงานสารบรรณ (TH Sarabun New) · พิมพ์ / PDF / Word' })
+    + `<div id="pcRoot">${skeletonCards(1, 'h-96')}</div>`;
+  refreshIcons();
+  if (Pc.garuda === undefined) Pc.garuda = await fetch(PC_GARUDA, { method: 'HEAD', cache: 'no-store' }).then(r => r.ok && /image/.test(r.headers.get('content-type') || '')).catch(() => false);
+  await pcLoad();
+  const dr = pcDraftLoad();
+  if (dr?.f && dr.mode === Pc.mode) Object.assign(Pc, { f: { ...pcBlank(), ...dr.f }, id: dr.id || null, seq: dr.seq || null, doc: dr.doc || 1, num: dr.num || 'thai' });
+  else Object.assign(Pc, { f: pcBlank(), id: null, seq: null });
+  pcRenderShell(el);
+}
+async function pcLoad() {
+  if (Pc.mode === 'db') {
+    const r = await rpcSecure('sfh_proc_list', {}, { loaderText: 'กำลังโหลดข้อมูล...', error: 'โหลดข้อมูลไม่สำเร็จ' });
+    if (r.ok) Object.assign(Pc, { projects: r.data.projects || [], vendors: r.data.vendors || [], settings: r.data.settings || {} });
+    return r.ok;
+  }
+  const L = pcLocal(), cut = calAddDays(calToday(), -PC_KEEP_DAYS);
+  const projects = (L.projects || []).filter(p => String(p.updated_at || '').slice(0, 10) >= cut);
+  if (projects.length !== (L.projects || []).length) pcLocalSave({ ...L, projects });
+  Object.assign(Pc, { projects, vendors: L.vendors || [], settings: L.settings || {} });
+  return true;
+}
+function pcRenderShell(el) {
+  const root = $('#pcRoot', el);
+  root.innerHTML = `
+    <div class="card p-3 mb-3 flex flex-wrap items-center gap-2">
+      <div class="flex items-center gap-2 min-w-0 flex-1"><span class="w-9 h-9 rounded-xl grid place-items-center bg-blush-100 text-blush-500 shrink-0">${ic('file-text', 'w-5 h-5')}</span>
+        <div class="min-w-0"><div class="font-semibold text-slate-800 truncate" data-pc-title></div>
+          <div class="text-xs text-slate-500">${Pc.mode === 'db' ? `${ic('database', 'w-3 h-3 inline')} บันทึกในระบบของหน่วยงาน` : `${ic('hard-drive', 'w-3 h-3 inline')} บันทึกในเบราว์เซอร์นี้เท่านั้น`} · เก็บโครงการ 3 เดือน</div></div></div>
+      <div class="flex flex-wrap gap-2">
+        <button class="btn btn-ghost btn-sm" data-pc="new">${ic('file-plus', 'w-4 h-4')} ใหม่</button>
+        <button class="btn btn-ghost btn-sm" data-pc="list">${ic('folder-open', 'w-4 h-4')} โครงการ (<span data-pc-count>${Pc.projects.length}</span>)</button>
+        <button class="btn btn-primary btn-sm" data-pc="save">${ic('save', 'w-4 h-4')} บันทึก</button>
+        <span class="inline-flex rounded-xl border border-slate-200 overflow-hidden text-sm" title="รูปแบบตัวเลขในเอกสาร">${[['thai', '๑๒๓'], ['arabic', '123']].map(([k, l]) => `<button type="button" class="px-2.5 py-1 ${Pc.num === k ? 'bg-blush-100 text-blush-600 font-medium' : 'text-slate-500 hover:bg-slate-50'}" data-pc-num="${k}">${l}</button>`).join('')}</span>
+        <button class="btn btn-soft btn-sm" data-pc="print">${ic('printer', 'w-4 h-4')} พิมพ์</button>
+        <button class="btn btn-soft btn-sm" data-pc="pdf">${ic('file-down', 'w-4 h-4')} PDF</button>
+        <button class="btn btn-soft btn-sm" data-pc="word">${ic('file-type', 'w-4 h-4')} Word</button>
+      </div>
+    </div>
+    <div class="lg:hidden flex gap-1 mb-3 p-1 rounded-2xl bg-white/70 border border-slate-100">${[['form', 'กรอกข้อมูล'], ['preview', 'ตัวอย่างหนังสือ']].map(([k, l]) => `<button type="button" class="flex-1 rounded-xl px-3 py-2 text-sm" data-pc-pane="${k}">${l}</button>`).join('')}</div>
+    <div class="grid gap-4 grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] items-start">
+      <div id="pcForm" class="grid gap-3"></div>
+      <div id="pcPrev" class="card p-3 min-w-0 lg:sticky lg:top-3">
+        <div class="flex flex-wrap gap-1 mb-2" role="tablist">${PC_DOCS.map(d => `<button type="button" class="rounded-xl px-2.5 py-1.5 text-xs whitespace-nowrap" data-pc-doc="${d.no}" title="${esc(d.name)}">${d.no}. ${esc(d.short)}</button>`).join('')}
+          <button type="button" class="rounded-xl px-2.5 py-1.5 text-xs" data-pc-doc="0">ทั้งหมด</button></div>
+        <div class="text-xs text-slate-400 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1"><span data-pc-docname></span><span>${ic('square-dashed', 'w-3 h-3 inline')} เส้นประ = ขอบเขตที่พิมพ์ได้</span>${Pc.garuda ? '' : `<span class="text-cream-600">${ic('info', 'w-3 h-3 inline')} ยังไม่มีไฟล์ตราครุฑ (แสดงกรอบแทน)</span>`}<span data-pc-font></span></div>
+        <div id="pcPages" class="grid gap-3 bg-slate-100/70 rounded-2xl p-2 overflow-hidden lg:max-h-[calc(100vh-11rem)] lg:overflow-y-auto"></div>
+      </div>
+    </div>`;
+  refreshIcons();
+  pcRenderForm(el);
+  pcPane(el, 'form');
+  root.onclick = (e) => pcOnClick(e, el);
+  if (Pc.ro) Pc.ro.disconnect();
+  Pc.ro = new ResizeObserver(() => pcScale()); Pc.ro.observe($('#pcPages', el));
+  document.fonts?.load?.(`16pt PcSarabun`).finally?.(() => pcPreview(el));
+  pcPreview(el);
+}
+function pcPane(el, k) {
+  $$('[data-pc-pane]', el).forEach(b => { const on = b.dataset.pcPane === k; b.classList.toggle('bg-blush-100', on); b.classList.toggle('text-blush-600', on); b.classList.toggle('text-slate-600', !on); });
+  $('#pcForm', el).classList.toggle('max-lg:hidden', k !== 'form'); $('#pcPrev', el).classList.toggle('max-lg:hidden', k !== 'preview');
+  if (k === 'preview') pcPreview(el);
+}
+
+/* ---------- ฟอร์ม (ซ้าย) ---------- */
+const pcIn = (path, label, o = {}) => `<div class="${o.span ? 'sm:col-span-2' : ''}"><label class="label">${label}</label>${o.area
+  ? `<textarea class="input" rows="${o.rows || 2}" data-f="${path}" placeholder="${esc(o.ph || '')}">${esc(pcGet(path) ?? '')}</textarea>`
+  : `<input class="input" ${o.type ? `type="${o.type}"` : ''} ${o.list ? `list="${o.list}"` : ''} ${o.num ? 'inputmode="decimal"' : ''} data-f="${path}" value="${esc(pcGet(path) ?? '')}" placeholder="${esc(o.ph || '')}">`}${o.hint ? `<div class="text-[11px] text-slate-400 mt-1">${o.hint}</div>` : ''}</div>`;
+const pcGet = (path) => path.split('.').reduce((o, k) => o?.[k], Pc.f);
+const pcSet = (path, v) => { const ks = path.split('.'), last = ks.pop(); ks.reduce((o, k) => o[k], Pc.f)[last] = v; };
+const pcSec = (key, icon, title, body, open = true) => `<details class="card p-0 overflow-hidden group" ${open ? 'open' : ''} data-sec="${key}">
+  <summary class="flex items-center gap-2 px-4 py-3 cursor-pointer select-none list-none"><span class="text-blush-500">${ic(icon, 'w-4 h-4')}</span><span class="font-semibold text-slate-700 flex-1">${title}</span><span class="text-slate-400 transition group-open:rotate-90">${ic('chevron-right', 'w-4 h-4')}</span></summary>
+  <div class="px-4 pb-4 grid gap-3 sm:grid-cols-2">${body}</div></details>`;
+function pcPersonRow(path, label, o = {}) {
+  return `<div class="sm:col-span-2 grid gap-2 sm:grid-cols-2 rounded-2xl border border-slate-100 p-2.5 ${o.cls || ''}"><div class="sm:col-span-2 flex items-center gap-2 text-sm font-medium text-slate-600">${label}${o.extra || ''}</div>
+    <input class="input" data-f="${path}.name" value="${esc(pcGet(path + '.name') || '')}" placeholder="ชื่อ-สกุล" list="pcNames">
+    <input class="input" data-f="${path}.pos" value="${esc(pcGet(path + '.pos') || '')}" placeholder="ตำแหน่ง" list="pcPos">${o.acting ? `<input class="input sm:col-span-2" data-f="${path}.acting" value="${esc(pcGet(path + '.acting') || '')}" placeholder="บรรทัดเพิ่มเติม เช่น ปฏิบัติราชการแทนนายกเทศมนตรี... (ถ้ามี)">` : ''}</div>`;
+}
+function pcRenderForm(el) {
+  const f = Pc.f, k = pcK(f), tt = pcTotals(f), s = f.staff;
+  const names = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.name).concat(s.via.map(v => v.name)).filter(Boolean))];
+  const poss = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.pos).concat(s.via.map(v => v.pos)).filter(Boolean))];
+  $('#pcForm', el).innerHTML = `
+    <datalist id="pcNames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist><datalist id="pcPos">${poss.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    <datalist id="pcVendors">${Pc.vendors.map(v => `<option value="${esc(v.name)}">`).join('')}</datalist>
+    ${pcSec('proj', 'clipboard-list', 'ข้อมูลโครงการ', `
+      <div class="sm:col-span-2"><label class="label">ประเภท</label><div class="grid grid-cols-2 gap-2">${Object.entries(PC_KIND).map(([key, x]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-blush-300 has-[:checked]:bg-blush-50 has-[:checked]:text-blush-600 border-slate-200 text-slate-600">
+        <input type="radio" name="pc-kind" value="${key}" class="sr-only" data-f="kind" ${f.kind === key ? 'checked' : ''}>${ic(key === 'buy' ? 'shopping-bag' : 'hammer', 'w-4 h-4')} ${x.v}</label>`).join('')}</div></div>
+      ${pcIn('subject', `เรื่อง (${k.v}อะไร) *`, { span: true, ph: k.v === 'ซื้อ' ? 'เช่น วัสดุสำนักงาน' : 'เช่น ซ่อมแซมเครื่องปรับอากาศ', hint: `แสดงในเอกสารเป็น "${esc(pcTitle(f))}"` })}
+      ${pcIn('reason', 'เหตุผลความจำเป็น', { span: true, area: true, ph: 'เช่น เพื่อใช้ในการปฏิบัติงานของกองคลัง' })}
+      ${pcIn('source', 'แหล่งเงิน / งบประมาณ', { span: true, area: true, ph: 'เช่น จากงบประมาณรายจ่ายประจำปี 2570 แผนงานบริหารงานทั่วไป งานบริหารงานคลัง หมวดค่าวัสดุ ประเภทวัสดุสำนักงาน' })}
+      ${pcIn('budget', 'วงเงินงบประมาณ (บาท)', { num: true, ph: `ว่าง = ${pcMoney(tt.total)}` })}${pcIn('mprice', 'ราคากลาง (บาท)', { num: true, ph: `ว่าง = ${pcMoney(tt.total)}` })}
+      ${pcIn('days', 'กำหนดส่งมอบ (วัน)', { num: true })}${pcIn('fine', 'ค่าปรับ (ร้อยละต่อวัน)', { num: true })}
+      ${pcIn('place', 'สถานที่ส่งมอบ', { span: true, ph: 'ว่าง = ชื่อหน่วยงาน' })}
+      ${pcIn('dates.report', 'วันที่รายงานขอซื้อ/จ้าง', { type: 'date' })}${pcIn('dates.order', 'วันที่คำสั่ง/ประกาศ/ใบสั่ง', { type: 'date' })}
+      ${pcIn('dates.inspect', 'วันที่ตรวจรับ', { type: 'date' })}${pcIn('dates.pay', 'วันที่ขอเบิกเงิน', { type: 'date' })}
+      ${pcIn('nos.memo', 'เลขที่บันทึก (รายงานขอ/รายงานผล)', { ph: 'เช่น 123' })}${pcIn('nos.pay', 'เลขที่บันทึกขอเบิกเงิน')}
+      ${pcIn('nos.cmd1', 'คำสั่งผู้กำหนดร่าง ที่', { ph: 'เช่น 45' })}${pcIn('nos.cmd2', 'คำสั่งผู้ตรวจรับ ที่', { ph: 'เช่น 46' })}
+      ${pcIn('nos.po', `${k.order}เลขที่`, { ph: 'เช่น 12/2570' })}${pcIn('invoice', 'ใบส่งของ/ใบแจ้งหนี้ เลขที่')}`)}
+    ${pcSec('org', 'building-2', '1.1 หน่วยงาน', `
+      ${pcIn('org.unit', 'ส่วนราชการ (กอง/สำนัก)', { ph: 'เช่น กองคลัง' })}${pcIn('org.main', 'ชื่อหน่วยงาน (ผู้ออกคำสั่ง/ประกาศ)', { ph: 'เช่น เทศบาลเมือง...' })}
+      ${pcIn('org.prefix', 'ที่ (อักษรย่อ/เลขประจำ)', { ph: 'เช่น สท 53101/' })}${pcIn('org.phone', 'โทรศัพท์')}
+      ${pcIn('org.address', 'ที่อยู่', { span: true })}${pcIn('org.tax_id', 'เลขประจำตัวผู้เสียภาษี (หน่วยงาน)')}
+      <div class="sm:col-span-2 flex justify-end"><button class="btn btn-ghost btn-sm" data-pc="defaults">${ic('bookmark', 'w-4 h-4')} บันทึกหน่วยงาน+เจ้าหน้าที่เป็นค่าเริ่มต้น</button></div>`, false)}
+    ${pcSec('vendor', 'store', `1.2 ${k.vendor}/ร้าน`, `
+      ${pcIn('vendor.name', `ชื่อ${k.vendor} *`, { span: true, list: 'pcVendors', ph: 'พิมพ์เพื่อค้นหาร้านที่เคยบันทึก' })}
+      ${pcIn('vendor.tax_id', 'เลขประจำตัวผู้เสียภาษี')}${pcIn('vendor.phone', 'โทรศัพท์')}
+      ${pcIn('vendor.address', 'ที่อยู่', { span: true })}
+      <div class="sm:col-span-2 flex flex-wrap justify-end gap-2"><button class="btn btn-ghost btn-sm" data-pc="vendors">${ic('list', 'w-4 h-4')} ร้านที่บันทึกไว้ (${Pc.vendors.length})</button>
+        <button class="btn btn-soft btn-sm" data-pc="vsave">${ic('save', 'w-4 h-4')} บันทึกร้านนี้</button></div>`)}
+    ${pcSec('items', 'list-ordered', '1.3 รายการ', `<div class="sm:col-span-2 grid gap-2">
+      ${f.items.map((it, i) => `<div class="rounded-2xl border border-slate-100 p-2 grid grid-cols-12 gap-2 items-center">
+        <span class="col-span-1 text-xs text-slate-400 text-center">${i + 1}</span>
+        <input class="input col-span-11" data-it="${i}|name" value="${esc(it.name)}" placeholder="รายการ">
+        <input class="input col-span-3" inputmode="decimal" data-it="${i}|qty" value="${esc(it.qty)}" placeholder="จำนวน">
+        <input class="input col-span-3" data-it="${i}|unit" value="${esc(it.unit)}" placeholder="หน่วย">
+        <input class="input col-span-4" inputmode="decimal" data-it="${i}|price" value="${esc(it.price)}" placeholder="ราคา/หน่วย">
+        <button class="btn-icon col-span-2 justify-self-end hover:!text-blush-500" data-it-del="${i}" title="ลบรายการ" ${f.items.length < 2 ? 'disabled' : ''}>${ic('trash-2')}</button></div>`).join('')}
+      <div class="flex flex-wrap items-center gap-2"><button class="btn btn-ghost btn-sm" data-pc="additem">${ic('plus', 'w-4 h-4')} เพิ่มรายการ</button>
+        <select class="input !w-auto !py-1.5 ml-auto" data-f="vat"><option value="incl" ${f.vat === 'incl' ? 'selected' : ''}>ราคารวม VAT แล้ว</option><option value="add" ${f.vat === 'add' ? 'selected' : ''}>บวก VAT 7%</option><option value="none" ${f.vat === 'none' ? 'selected' : ''}>ไม่มี VAT</option></select></div>
+      <div class="rounded-2xl px-3 py-2 text-sm flex flex-wrap justify-between gap-2 ${tt.total > PC_LIMIT ? 'bg-blush-50 text-blush-600 border border-blush-200' : 'bg-mint-50 text-mint-700'}" data-pc-total>${pcTotalHtml(tt)}</div></div>`)}
+    ${pcSec('staff', 'users', '1.4 เจ้าหน้าที่ / ผู้อนุมัติ', `
+      ${pcPersonRow('staff.maker', 'เจ้าหน้าที่ผู้จัดทำ')}${pcPersonRow('staff.officer', 'เจ้าหน้าที่พัสดุ')}${pcPersonRow('staff.head', 'หัวหน้าเจ้าหน้าที่พัสดุ')}
+      ${s.via.map((v, i) => pcPersonRow(`staff.via.${i}`, `ผ่าน (ขั้นที่ ${i + 1})`, { cls: 'bg-lilac-50/40', extra: `<button class="btn-icon ml-auto hover:!text-blush-500" data-via-del="${i}" title="ลบขั้นนี้">${ic('x')}</button>` })).join('')}
+      <div class="sm:col-span-2"><button class="btn btn-ghost btn-sm" data-pc="addvia">${ic('plus', 'w-4 h-4')} เพิ่มผู้บริหารที่ต้องผ่าน</button></div>
+      ${pcPersonRow('staff.approver', 'ผู้อนุมัติ (ผู้สั่งการ)', { acting: true })}
+      ${pcPersonRow('staff.drafter', `ผู้จัดทำร่าง${k.scope}`)}${pcPersonRow('staff.inspector', 'ผู้ตรวจรับพัสดุ')}`)}`;
+  refreshIcons();
+  pcUpdateTitle(el);
+  const form = $('#pcForm', el);
+  form.oninput = (e) => pcOnInput(e, el);
+  form.onchange = (e) => pcOnInput(e, el, true);
+}
+const pcTotalHtml = (tt) => `<span>รวม ${pcMoney(tt.pre)}${tt.vat ? ` · VAT ${pcMoney(tt.vat)}` : ''}</span><b>ทั้งสิ้น ${pcMoney(tt.total)} บาท${tt.total > PC_LIMIT ? ' — เกินวงเงิน 5,000 บาท' : ''}</b>`;
+function pcUpdateTitle(el) {
+  const t = $('[data-pc-title]', el); if (!t) return;
+  t.textContent = `${Pc.seq ? `ลำดับที่ ${Pc.seq}/${pcFy(Pc.f)} · ` : Pc.id ? '' : 'โครงการใหม่ · '}${Pc.f.subject ? pcTitle(Pc.f) : '(ยังไม่ระบุเรื่อง)'}`;
+}
+function pcOnInput(e, el, isChange) {
+  const t = e.target;
+  if (t.dataset.f) {
+    pcSet(t.dataset.f, t.type === 'radio' ? t.value : t.value);
+    if (t.dataset.f === 'kind' || t.dataset.f === 'vat') { pcRenderForm(el); }
+    if (t.dataset.f === 'vendor.name' && isChange) { const v = Pc.vendors.find(x => x.name === t.value);
+      if (v) { Object.assign(Pc.f.vendor, { name: v.name, tax_id: v.tax_id || '', address: v.address || '', phone: v.phone || '' }); pcRenderForm(el); showToast('ใช้ข้อมูลร้านที่บันทึกไว้', 'info'); } }
+  } else if (t.dataset.it) { const [i, key] = t.dataset.it.split('|'); Pc.f.items[+i][key] = t.value; }
+  else return;
+  const box = $('[data-pc-total]', el); if (box) { const tt = pcTotals(Pc.f); box.innerHTML = pcTotalHtml(tt); box.className = box.className.replace(/bg-\S+|text-\S+|border(-\S+)?/g, '').trim() + (tt.total > PC_LIMIT ? ' bg-blush-50 text-blush-600 border border-blush-200' : ' bg-mint-50 text-mint-700'); }
+  pcUpdateTitle(el); pcDraftSave();
+  clearTimeout(Pc.timer); Pc.timer = setTimeout(() => pcPreview(el), 250);
+}
+
+/* ---------- ตัวอย่างหนังสือ (ขวา) ---------- */
+function pcPreview(el) {
+  const box = $('#pcPages', el); if (!box || !Pc.f) return;
+  const docs = pcDocs(Pc.f).filter(d => !Pc.doc || d.no === Pc.doc);
+  box.innerHTML = docs.flatMap(d => pcPagesHtml(d, true).map(h => `<div class="pc-pwrap mx-auto shadow-sm" style="position:relative">${h}</div>`)).join('');
+  $$('[data-pc-doc]', el).forEach(b => { const on = +b.dataset.pcDoc === Pc.doc; b.classList.toggle('bg-blush-100', on); b.classList.toggle('text-blush-600', on); b.classList.toggle('font-medium', on); b.classList.toggle('text-slate-500', !on); b.classList.toggle('hover:bg-slate-50', !on); });
+  const dn = $('[data-pc-docname]', el); if (dn) dn.textContent = Pc.doc ? `${Pc.doc}. ${PC_DOCS[Pc.doc - 1].name} · ${pcPaginate(pcDocs(Pc.f)[Pc.doc - 1]).pages.length} หน้า` : 'แสดงทั้งชุด 8 ฉบับ';
+  const fn = $('[data-pc-font]', el); if (fn) fn.innerHTML = pcFontOk() ? '' : `<span class="text-cream-600">${ic('type', 'w-3 h-3 inline')} เครื่องนี้ไม่มีฟอนต์ TH Sarabun New (ใช้ฟอนต์ใกล้เคียงแทน)</span>`;
+  pcScale(); refreshIcons();
+}
+function pcScale() {
+  const box = $('#pcPages'); if (!box) return;
+  const w = Math.max(200, box.clientWidth - 16), s = Math.min(1, w / (PC_PAGE.w * PX_MM));
+  $$('.pc-pwrap', box).forEach(x => { x.style.overflow = 'hidden'; x.style.width = `${PC_PAGE.w * PX_MM * s}px`; x.style.height = `${PC_PAGE.h * PX_MM * s}px`; const p = x.firstElementChild; p.style.transform = `scale(${s})`; p.style.transformOrigin = 'top left'; });
+}
+let PC_FONT_OK = null;
+function pcFontOk() {
+  if (PC_FONT_OK !== null) return PC_FONT_OK;
+  try { const c = document.createElement('canvas').getContext('2d'), t = 'กขคงจฉ ทดสอบ abc 123', w = (f) => { c.font = `40px ${f}`; return c.measureText(t).width; };
+    PC_FONT_OK = w("'TH Sarabun New', monospace") !== w('monospace') || w("PcSarabun, monospace") !== w('monospace'); } catch { PC_FONT_OK = true; }
+  return PC_FONT_OK;
+}
+
+/* ---------- ปุ่มต่าง ๆ ---------- */
+async function pcOnClick(e, el) {
+  const t = (s) => e.target.closest(s);
+  const dc = t('[data-pc-doc]'); if (dc) { Pc.doc = +dc.dataset.pcDoc; pcDraftSave(); pcPreview(el); return; }
+  const pn = t('[data-pc-pane]'); if (pn) { pcPane(el, pn.dataset.pcPane); return; }
+  const nm = t('[data-pc-num]'); if (nm) { Pc.num = nm.dataset.pcNum; pcDraftSave(); pcRenderShell(el); return; }
+  const di = t('[data-it-del]'); if (di) { Pc.f.items.splice(+di.dataset.itDel, 1); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
+  const dv = t('[data-via-del]'); if (dv) { e.preventDefault(); Pc.f.staff.via.splice(+dv.dataset.viaDel, 1); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
+  const a = t('[data-pc]'); if (!a) return;
+  const k = a.dataset.pc;
+  if (k === 'additem') { Pc.f.items.push({ name: '', qty: 1, unit: '', price: '' }); pcRenderForm(el); $$('[data-it$="|name"]', el).at(-1)?.focus(); }
+  if (k === 'addvia') { Pc.f.staff.via.push(pcPerson()); pcRenderForm(el); }
+  if (k === 'new') { if (!(await confirmModal({ title: 'เริ่มโครงการใหม่', danger: false, icon: 'file-plus', confirmText: 'เริ่มใหม่', message: 'ล้างข้อมูลในแบบฟอร์ม แล้วเริ่มโครงการใหม่ (ใช้ข้อมูลหน่วยงาน/เจ้าหน้าที่จากค่าเริ่มต้น)?<br><span class="text-xs text-slate-400">ข้อมูลที่ยังไม่ได้กดบันทึกจะหายไป</span>' }))) return;
+    Object.assign(Pc, { f: pcBlank(), id: null, seq: null, doc: 1 }); pcDraftSave(); pcRenderShell(el); }
+  if (k === 'save') await pcSave(el);
+  if (k === 'list') pcOpenList(el);
+  if (k === 'defaults') await pcSaveDefaults(el);
+  if (k === 'vsave') await pcVendorSave(el);
+  if (k === 'vendors') pcOpenVendors(el);
+  if (k === 'print' || k === 'pdf' || k === 'word') pcOutMenu(k);
+  if (['additem', 'addvia'].includes(k)) { pcPreview(el); pcDraftSave(); }
+}
+async function pcSave(el) {
+  const f = Pc.f, tt = pcTotals(f);
+  if (!f.subject.trim()) { showToast('กรุณาระบุเรื่องที่จะซื้อ/จ้าง', 'warning'); $('[data-f="subject"]', el)?.focus(); return; }
+  if (tt.total > PC_LIMIT) { showToast(`วงเงินรวม ${pcMoney(tt.total)} บาท เกิน 5,000 บาท`, 'warning'); return; }
+  const data = { ...f, fy: pcFy(f) };
+  if (Pc.mode === 'db') {
+    const r = await rpcSecure('sfh_proc_save', { p_id: Pc.id, p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกโครงการแล้ว' });
+    if (!r.ok) return;
+    Object.assign(Pc, { id: r.data.id, seq: r.data.seq }); await pcLoad();
+  } else {
+    const L = pcLocal(), list = L.projects || [], now = new Date().toISOString(), fy = data.fy;
+    let p = list.find(x => x.id === Pc.id);
+    if (!p) { p = { id: crypto.randomUUID?.() || String(Date.now()), seq: Math.max(0, ...list.filter(x => x.fiscal_year === fy).map(x => x.seq)) + 1, fiscal_year: fy, created_at: now }; list.unshift(p); }
+    Object.assign(p, { kind: f.kind, title: pcTitle(f), vendor_name: f.vendor.name, total: tt.total, data, updated_at: now, fiscal_year: fy });
+    if (!pcLocalSave({ ...L, projects: list })) return;
+    Object.assign(Pc, { id: p.id, seq: p.seq }); await pcLoad(); showToast('บันทึกโครงการในเบราว์เซอร์นี้แล้ว', 'success');
+  }
+  const c = $('[data-pc-count]', el); if (c) c.textContent = Pc.projects.length;
+  pcUpdateTitle(el); pcDraftSave();
+}
+async function pcSaveDefaults(el) {
+  const s = Pc.f.staff, data = { org: { ...Pc.f.org }, staff: { maker: s.maker, officer: s.officer, head: s.head, via: s.via, approver: s.approver, drafter: s.drafter, inspector: s.inspector } };
+  if (!(await confirmModal({ title: 'บันทึกค่าเริ่มต้น', danger: false, icon: 'bookmark', confirmText: 'บันทึก', message: `ใช้ข้อมูลหน่วยงานและรายชื่อเจ้าหน้าที่/ผู้อนุมัติชุดนี้ เป็นค่าเริ่มต้นของโครงการใหม่${Pc.mode === 'db' ? 'ของทุกคนในหน่วยงาน' : 'ในเบราว์เซอร์นี้'}?` }))) return;
+  if (Pc.mode === 'db') { const r = await rpcSecure('sfh_proc_settings_save', { p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกค่าเริ่มต้นแล้ว' }); if (r.ok) Pc.settings = data; }
+  else if (pcLocalSave({ ...pcLocal(), settings: data })) { Pc.settings = data; showToast('บันทึกค่าเริ่มต้นแล้ว', 'success'); }
+}
+async function pcVendorSave(el) {
+  const v = Pc.f.vendor; if (!v.name.trim()) { showToast('กรุณาระบุชื่อร้าน', 'warning'); return; }
+  if (Pc.mode === 'db') { const r = await rpcSecure('sfh_proc_vendor_save', { p_id: null, p_data: v }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกร้านค้าแล้ว' }); if (!r.ok) return; await pcLoad(); }
+  else { const L = pcLocal(), list = L.vendors || [], i = list.findIndex(x => x.name.trim().toLowerCase() === v.name.trim().toLowerCase()), row = { id: list[i]?.id || crypto.randomUUID?.() || String(Date.now()), ...v, name: v.name.trim() };
+    if (i >= 0) list[i] = row; else list.push(row); list.sort((a, b) => a.name.localeCompare(b.name, 'th'));
+    if (!pcLocalSave({ ...L, vendors: list })) return; await pcLoad(); showToast('บันทึกร้านค้าแล้ว', 'success'); }
+  pcRenderForm(el);
+}
+function pcOpenVendors(el) {
+  const m = openModal({ title: 'ร้านค้า/ผู้รับจ้างที่บันทึกไว้', icon: 'store', size: 'md',
+    body: Pc.vendors.length ? `<div class="grid gap-2">${Pc.vendors.map(v => `<div class="rounded-2xl border border-slate-100 p-3 flex items-start gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${esc(v.name)}</div>
+        <div class="text-xs text-slate-500">${esc([v.tax_id && 'เลขผู้เสียภาษี ' + v.tax_id, v.phone, v.address].filter(Boolean).join(' · ') || '-')}</div></div>
+        <button class="btn btn-soft btn-sm" data-vuse="${v.id}">ใช้</button><button class="btn-icon hover:!text-blush-500" data-vdel="${v.id}" title="ลบ">${ic('trash-2')}</button></div>`).join('')}</div>`
+      : emptyState('ยังไม่มีร้านค้าที่บันทึกไว้ · กรอกข้อมูลร้านแล้วกด "บันทึกร้านนี้"', 'store') });
+  m.el.addEventListener('click', async (e) => {
+    const u = e.target.closest('[data-vuse]'); if (u) { const v = Pc.vendors.find(x => x.id === u.dataset.vuse); Object.assign(Pc.f.vendor, { name: v.name, tax_id: v.tax_id || '', address: v.address || '', phone: v.phone || '' }); m.close(); pcRenderForm(el); pcPreview(el); pcDraftSave(); return; }
+    const d = e.target.closest('[data-vdel]'); if (!d) return; const v = Pc.vendors.find(x => x.id === d.dataset.vdel);
+    if (!(await confirmModal({ title: 'ลบร้านค้า', message: `ลบ <b>${esc(v.name)}</b> ออกจากรายชื่อร้านที่บันทึกไว้?` }))) return;
+    if (Pc.mode === 'db') { const r = await rpcSecure('sfh_proc_vendor_delete', { p_id: v.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบร้านค้าแล้ว' }); if (!r.ok) return; }
+    else { const L = pcLocal(); pcLocalSave({ ...L, vendors: (L.vendors || []).filter(x => x.id !== v.id) }); showToast('ลบร้านค้าแล้ว', 'success'); }
+    await pcLoad(); m.close(); pcRenderForm(el); pcOpenVendors(el);
+  });
+}
+function pcOpenList(el) {
+  const m = openModal({ title: 'โครงการที่บันทึกไว้', icon: 'folder-open', size: 'lg',
+    body: `<p class="text-xs text-slate-500 mb-3">${ic('info', 'w-3.5 h-3.5 inline')} เก็บไว้ 3 เดือนนับจากแก้ไขล่าสุด แล้วลบอัตโนมัติ${Pc.mode === 'db' ? ' · ทุกคนในหน่วยงานเห็นรายการเดียวกัน' : ' · บันทึกเฉพาะในเบราว์เซอร์นี้'}</p>
+      ${Pc.projects.length ? `<div class="grid gap-2">${Pc.projects.map(p => { const exp = calAddDays(String(p.updated_at).slice(0, 10), PC_KEEP_DAYS);
+        return `<div class="rounded-2xl border ${p.id === Pc.id ? 'border-blush-200 bg-blush-50/40' : 'border-slate-100'} p-3 flex flex-col sm:flex-row sm:items-center gap-2">
+        <div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${esc(p.title)} <span class="badge bg-slate-100 text-slate-500">${p.kind === 'hire' ? 'จ้าง' : 'ซื้อ'}</span></div>
+          <div class="text-xs text-slate-500">ลำดับที่ ${p.seq}/${p.fiscal_year} · ${esc(p.vendor_name || '-')} · ${pcMoney(p.total)} บาท · แก้ไขล่าสุด ${formatThaiDate(new Date(p.updated_at))}${p.updated_by_name ? ' โดย ' + esc(p.updated_by_name) : ''} · ลบอัตโนมัติ ${formatThaiDate(calDate(exp))}</div></div>
+        <div class="flex gap-1"><button class="btn btn-soft btn-sm" data-popen="${p.id}">${ic('pencil', 'w-4 h-4')} เปิด</button><button class="btn btn-ghost btn-sm" data-pcopy="${p.id}" title="คัดลอกเป็นโครงการใหม่">${ic('copy', 'w-4 h-4')}</button>
+          <button class="btn-icon hover:!text-blush-500" data-pdel="${p.id}" title="ลบ">${ic('trash-2')}</button></div></div>`; }).join('')}</div>`
+      : emptyState('ยังไม่มีโครงการที่บันทึกไว้', 'folder-open')}` });
+  m.el.addEventListener('click', async (e) => {
+    const o = e.target.closest('[data-popen],[data-pcopy]');
+    if (o) { const id = o.dataset.popen || o.dataset.pcopy, p = Pc.projects.find(x => x.id === id), copy = !!o.dataset.pcopy;
+      const f = { ...pcBlank(), ...JSON.parse(JSON.stringify(p.data || {})) }; delete f.fy;
+      if (copy) { const t = calToday(); f.dates = { report: t, order: t, inspect: t, pay: t }; f.nos = { memo: '', cmd1: '', cmd2: '', po: '', pay: '' }; }
+      Object.assign(Pc, { f, id: copy ? null : p.id, seq: copy ? null : p.seq, doc: 1 }); m.close(); pcDraftSave(); pcRenderShell(el);
+      showToast(copy ? 'คัดลอกเป็นโครงการใหม่แล้ว (ยังไม่ได้บันทึก)' : 'เปิดโครงการแล้ว', 'info'); return; }
+    const d = e.target.closest('[data-pdel]'); if (!d) return; const p = Pc.projects.find(x => x.id === d.dataset.pdel);
+    if (!(await confirmModal({ title: 'ลบโครงการ', message: `ลบโครงการ <b>${esc(p.title)}</b> (ลำดับที่ ${p.seq}/${p.fiscal_year})?` }))) return;
+    if (Pc.mode === 'db') { const r = await rpcSecure('sfh_proc_delete', { p_id: p.id }, { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ', success: 'ลบโครงการแล้ว' }); if (!r.ok) return; }
+    else { const L = pcLocal(); pcLocalSave({ ...L, projects: (L.projects || []).filter(x => x.id !== p.id) }); showToast('ลบโครงการแล้ว', 'success'); }
+    if (Pc.id === p.id) Object.assign(Pc, { id: null, seq: null });
+    await pcLoad(); m.close(); const c = $('[data-pc-count]', el); if (c) c.textContent = Pc.projects.length; pcUpdateTitle(el); pcOpenList(el);
+  });
+}
+
+/* ---------- พิมพ์ / PDF / Word ---------- */
+function pcOutMenu(mode) {
+  const label = { print: 'พิมพ์เอกสาร', pdf: 'ดาวน์โหลด PDF', word: 'ดาวน์โหลด Word (.docx)' }[mode];
+  const m = openModal({ title: label, icon: { print: 'printer', pdf: 'file-down', word: 'file-type' }[mode], size: 'sm',
+    body: `<div class="flex items-center justify-between mb-2"><span class="text-sm text-slate-600">เลือกเอกสาร</span><span class="flex gap-1"><button type="button" class="btn btn-ghost btn-sm" data-all>ทั้งชุด</button><button type="button" class="btn btn-ghost btn-sm" data-none>ล้าง</button></span></div>
+      <div class="grid gap-1">${PC_DOCS.map(d => `<label class="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 text-sm cursor-pointer"><input type="checkbox" class="rounded" value="${d.no}" ${!Pc.doc || Pc.doc === d.no ? 'checked' : ''}> ${d.no}. ${esc(d.name)}</label>`).join('')}</div>
+      ${mode === 'word' ? `<p class="text-xs text-slate-400 mt-2">${ic('info', 'w-3.5 h-3.5 inline')} ไฟล์ Word ใช้ฟอนต์ TH Sarabun New และขอบกระดาษตามที่กำหนด · เครื่องที่เปิดไฟล์ต้องมีฟอนต์ TH Sarabun New</p>` : ''}`,
+    footer: `<button type="button" class="btn btn-ghost" data-close>ยกเลิก</button><button type="button" class="btn btn-primary" data-go>${ic(mode === 'word' ? 'file-type' : mode === 'pdf' ? 'file-down' : 'printer')} ${label}</button>` });
+  m.el.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-all]')) $$('input[type=checkbox]', m.el).forEach(x => { x.checked = true; });
+    if (e.target.closest('[data-none]')) $$('input[type=checkbox]', m.el).forEach(x => { x.checked = false; });
+    if (!e.target.closest('[data-go]')) return;
+    const nos = $$('input[type=checkbox]:checked', m.el).map(x => +x.value); if (!nos.length) { showToast('กรุณาเลือกอย่างน้อย 1 ฉบับ', 'warning'); return; }
+    m.close(); const docs = pcDocs(Pc.f).filter(d => nos.includes(d.no));
+    const base = `จัดซื้อจัดจ้าง_${(Pc.f.subject || 'เอกสาร').trim().slice(0, 40)}${nos.length === 1 ? '_' + PC_DOCS[nos[0] - 1].short : ''}`;
+    if (mode === 'word') await pcDocx(docs, base + '.docx'); else await pcOutput(docs, mode, base + '.pdf');
+  });
+}
+async function pcOutput(docs, mode, filename) {
+  pcEnsureCss();
+  const root = rgPrintRoot(); root.innerHTML = docs.flatMap(d => pcPagesHtml(d, false)).join('');
+  if (mode === 'pdf') { await sfhPagesToPdf($$('.pc-page', root), filename, 'portrait', await pcFontCSS()); root.innerHTML = ''; return; }
+  let pg = $('#rg-page-size'); if (!pg) { pg = document.createElement('style'); pg.id = 'rg-page-size'; document.head.appendChild(pg); }
+  pg.textContent = '@media print{@page{size:A4 portrait;margin:0}}';
+  document.body.classList.add('pc-printing');
+  const done = () => { document.body.classList.remove('pc-printing'); root.innerHTML = ''; pg.textContent = ''; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 200);
+}
+/** ฝังไฟล์ฟอนต์ TH Sarabun New (ถ้ามีในเว็บ) ลงในภาพ PDF · ถ้าไม่มีใช้ฟอนต์ที่ติดตั้งในเครื่อง */
+let PC_FONT_CSS = null;
+async function pcFontCSS() {
+  if (PC_FONT_CSS !== null) return PC_FONT_CSS;
+  const toData = async (u) => { const r = await fetch(u); if (!r.ok || !/font|octet/.test(r.headers.get('content-type') || '')) throw 0; const b = await r.blob(); return new Promise((ok) => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.readAsDataURL(b); }); };
+  const face = async (name, w) => { for (const [ext, fmt] of [['woff2', 'woff2'], ['ttf', 'truetype']]) { try { return `@font-face{font-family:'PcSarabun';font-weight:${w};src:url(${await toData(`fonts/${name}.${ext}`)}) format('${fmt}')}`; } catch { /* ลองนามสกุลถัดไป */ } } throw 0; };
+  try { PC_FONT_CSS = (await face('THSarabunNew', 400)) + (await face('THSarabunNew-Bold', 700)); }
+  catch {
+    if (pcFontOk()) PC_FONT_CSS = '/* ใช้ฟอนต์ TH Sarabun New ที่ติดตั้งในเครื่อง */';
+    else try {   // ไม่มีฟอนต์ในเครื่อง → ฝัง Sarabun (Google Fonts) แทน
+      const css = await (await fetch('https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap')).text();
+      const blocks = (css.match(/\/\*\s*[\w-]+\s*\*\/\s*@font-face\s*{[^}]*}/g) || []).filter(b => /\/\*\s*(thai|latin)\s*\*\//.test(b)), out = [];
+      for (const b of blocks) { const u = b.match(/url\(([^)]+)\)/)?.[1]; if (u) out.push(b.replace(u, await toData(u).catch(() => u))); }
+      PC_FONT_CSS = out.join('\n') || '/* - */';
+    } catch { PC_FONT_CSS = '/* - */'; }
+  }
+  return PC_FONT_CSS;
+}
+/** สร้างไฟล์ Word (.docx) จากบล็อกชุดเดียวกับตัวอย่าง · ขอบ ซ้าย 3 ขวา 2 บน 1.5 ล่าง 2 ซม. · TH Sarabun New 16 pt */
+async function pcDocx(docs, filename) {
+  showLoader(true, 'กำลังสร้างไฟล์ Word...');
+  try {
+    await trvLoadScript('https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js', () => !!window.docx);
+    const D = window.docx, FONT = 'TH Sarabun New', tw = (mm) => Math.round(mm * 1440 / 25.4);
+    let gar = null;
+    if (Pc.garuda) { try { const buf = await (await fetch(PC_GARUDA)).arrayBuffer(); const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = PC_GARUDA; }); gar = { buf, ratio: img.naturalWidth / img.naturalHeight }; } catch { gar = null; } }
+    const run = (x, o = {}) => new D.TextRun({ text: pcZws(pcN(x)), bold: !!o.b, size: (o.sz || 16) * 2, font: { ascii: FONT, hAnsi: FONT, cs: FONT, eastAsia: FONT }, language: { value: 'th-TH', bidirectional: 'th-TH' } });
+    const AL = { left: D.AlignmentType.LEFT, center: D.AlignmentType.CENTER, right: D.AlignmentType.RIGHT };
+    const para = (children, o = {}) => new D.Paragraph({ children, alignment: AL[o.al || 'left'], spacing: { before: Math.round((o.sb || 0) * 20), after: 0 }, indent: { ...(o.ind ? { firstLine: tw(25) } : {}), ...(o.ml ? { left: tw(o.ml) } : {}) } });
+    const NB = { style: D.BorderStyle.NONE, size: 0, color: 'FFFFFF' }, NONE = { top: NB, bottom: NB, left: NB, right: NB, insideHorizontal: NB, insideVertical: NB };
+    const LN = { style: D.BorderStyle.SINGLE, size: 4, color: '000000' }, LINES = { top: LN, bottom: LN, left: LN, right: LN, insideHorizontal: LN, insideVertical: LN };
+    const cell = (children, o = {}) => new D.TableCell({ children, columnSpan: o.span || 1, width: o.w ? { size: o.w, type: D.WidthType.PERCENTAGE } : undefined, borders: o.borders, margins: { left: tw(1.5), right: tw(1.5) } });
+    const garImg = (hmm) => gar ? new D.ImageRun({ data: gar.buf, transformation: { width: Math.round(hmm * PX_MM * gar.ratio), height: Math.round(hmm * PX_MM) } }) : run('[ตราครุฑ]', { sz: 12 });
+    const signParas = (lines, sb) => lines.map((l, i) => para([run(l)], { al: 'center', ml: 65, sb: i ? 0 : sb }));
+    const toDocx = (b) => {
+      if (b.t === 'memo') return [
+        new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: NONE, rows: [new D.TableRow({ children: [
+          cell([para([garImg(15)])], { w: 20, borders: NONE }), cell([para([run('บันทึกข้อความ', { b: true, sz: 29 })], { al: 'center' })], { w: 60, borders: NONE }), cell([para([])], { w: 20, borders: NONE })] })] }),
+        para([run('ส่วนราชการ', { b: true, sz: 20 }), run('  ' + (b.unit || '.'.repeat(60)))]),
+        new D.Paragraph({ tabStops: [{ type: D.TabStopType.LEFT, position: tw(80) }], children: [run('ที่', { b: true, sz: 20 }), run('  ' + (b.no || '.'.repeat(24))), new D.TextRun({ text: '\t' }), run('วันที่', { b: true, sz: 20 }), run('  ' + b.date)] }),
+        para([run('เรื่อง', { b: true, sz: 20 }), run('  ' + b.subject)])];
+      if (b.t === 'garuda') return [para([garImg(30)], { al: 'center' })];
+      if (b.t === 'p') return [para((b.r || []).map(x => run(x.x, { b: x.b, sz: b.sz })), b)];
+      if (b.t === 'rule') return [para([run('-'.repeat(30))], { al: 'center' })];
+      if (b.t === 'sign') return signParas(b.lines, b.sb || 0);
+      if (b.t === 'table') {
+        const head = new D.TableRow({ tableHeader: true, children: b.head.map((h, i) => cell([para([run(h, { b: true, sz: 15 })], { al: 'center' })], { w: b.cols[i].w })) });
+        const rows = b.rows.map(r => new D.TableRow({ children: r.map((c, i) => cell([para([run(c, { sz: 15 })], { al: b.cols[i].al || 'left' })], { w: b.cols[i].w })) }));
+        const foot = b.foot.map(r => new D.TableRow({ children: r.map(c => cell([para([run(c.v, { sz: 15, b: c.b })], { al: c.al || 'left' })], { span: c.span })) }));
+        return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: LINES, rows: [head, ...rows, ...foot] })];
+      }
+      if (b.t === 'grid') {
+        if (b.cells.length === 1 && b.cells[0]) { const c = b.cells[0]; return [...(c.label ? [para([run(c.label)], { ml: 65, sb: b.sb || 12 })] : []), ...signParas(['', ...c.lines], c.label ? 0 : (b.sb || 12))]; }
+        const rows = []; for (let i = 0; i < b.cells.length; i += 2) rows.push(b.cells.slice(i, i + 2));
+        return [para([], { sb: b.sb || 12 }), new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: NONE, rows: rows.map(pair => new D.TableRow({ children: [0, 1].map(j => { const c = pair[j];
+          return cell(c ? [...(c.label ? [para([run(c.label)])] : []), para([]), ...(c.label ? [para([])] : []), ...c.lines.map(l => para([run(l)], { al: 'center' }))] : [para([])], { w: 50, borders: NONE }); }) })) })];
+      }
+      if (b.t === 'kv2') return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: { top: LN, bottom: LN, left: LN, right: LN, insideHorizontal: NB, insideVertical: NB },
+        rows: [new D.TableRow({ children: [cell(b.left.map(l => para([run(l)])), { w: 50 }), cell(b.right.map(l => para([run(l)])), { w: 50 })] })] })];
+      return [];
+    };
+    const doc = new D.Document({ styles: { default: { document: { run: { font: FONT, size: 32 } } } },
+      sections: docs.map(d => ({ properties: { page: { size: { width: tw(210), height: tw(297) }, margin: { top: tw(15), right: tw(20), bottom: tw(20), left: tw(30), header: tw(7), footer: tw(10) } } },
+        children: d.blocks.flatMap(toDocx) })) });
+    const blob = await D.Packer.toBlob(doc);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    showToast('ดาวน์โหลดไฟล์ Word แล้ว', 'success');
+  } catch (e) { console.error('[SFH] docx', e); showToast(e.message || 'สร้างไฟล์ Word ไม่สำเร็จ', 'error'); }
+  finally { showLoader(false); }
+}
+/* ===== END MODULE: procurement ===== */
+
 const MODULES = {
   announcements: { render: renderAnnouncements },
   calendar:      { render: renderCalendar },
@@ -8790,6 +9445,7 @@ const MODULES = {
   travel:        { render: renderTravel },
   register:      { render: renderRegister },
   payroll:       { render: renderPayroll },
+  procurement:   { render: renderProcurement },
 };
 
 
