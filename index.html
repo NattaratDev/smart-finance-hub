@@ -8904,7 +8904,7 @@ const PC_VAR_GROUPS = [
 ];
 const PC_WHO = { officer: 'เจ้าหน้าที่พัสดุ', maker: 'เจ้าหน้าที่ผู้จัดทำ', head: 'หัวหน้าเจ้าหน้าที่พัสดุ', approver: 'ผู้อนุมัติ', inspector: 'ผู้ตรวจรับพัสดุ', drafter: 'ผู้จัดทำร่าง' };
 const PC_BLOCKS = { sign: 'ลายมือชื่อ (เพิ่มได้หลายกล่อง)', p: 'ย่อหน้าข้อความ', memo: 'หัวบันทึกข้อความ (ครุฑ 1.5 ซม.)', garuda: 'ตราครุฑ 3 ซม. (คำสั่ง/ประกาศ)', rule: 'เส้นคั่น', items: 'ตารางรายการ + ยอดรวม', evaltable: 'ตารางผลการพิจารณา',
-  po_head: 'กล่องข้อมูลผู้ขาย/หน่วยงาน (ใบสั่ง)', po_sign: 'ลายมือชื่อผู้สั่ง/ผู้รับใบสั่ง', sign: 'ลายมือชื่อ', approvals: 'ความเห็น/อนุมัติ ตามลำดับขั้น' };
+  po_head: 'กล่องข้อมูลผู้ขาย/หน่วยงาน (ใบสั่ง)', po_sign: 'ลายมือชื่อผู้สั่ง/ผู้รับใบสั่ง' };
 function pcVars(f) {
   const k = pcK(f), tt = pcTotals(f), s = f.staff, d = f.dates, ph = pcPh;
   const budget = pcNum(f.budget) || tt.total, mprice = pcNum(f.mprice) || tt.total, due = d.order && +f.days ? calAddDays(d.order, +f.days) : '';
