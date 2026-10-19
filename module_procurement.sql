@@ -248,3 +248,73 @@ grant execute on function public.sfh_proc_vendor_save(text, uuid, jsonb) to anon
 grant execute on function public.sfh_proc_vendor_delete(text, uuid)     to anon, authenticated;
 grant execute on function public.sfh_proc_settings_save(text, jsonb)    to anon, authenticated;
 revoke execute on function public.sfh_proc_total(jsonb) from public, anon, authenticated;
+
+
+-- =====================================================================
+-- 5) Template เอกสาร (แก้ไขข้อความได้ · เก็บทุกฉบับแก้ไข) – เพิ่มเติม
+--    1 แถว = template ทั้งชุด 8 ฉบับ 1 ฉบับแก้ไข (version) ของหน่วยงาน
+--    โครงการจำเลข version ที่ใช้ไว้ใน data.tplv → เปิดย้อนหลังข้อความไม่เปลี่ยน
+--    แก้ได้เฉพาะผู้มีสิทธิ์ procurement.manage_templates (Org Admin / Super Admin)
+-- =====================================================================
+create table if not exists public.proc_templates (
+  id               uuid primary key default gen_random_uuid(),
+  org_id           uuid references public.organizations(id) on delete cascade,
+  version          int  not null,
+  data             jsonb not null,                    -- { docs: { "1": [บล็อก...], ..., "8": [...] } }
+  note             text,                              -- เหตุผล/หนังสืออ้างอิงของการแก้ไข
+  created_by_name  text,
+  created_at       timestamptz not null default now(),
+  unique (org_id, version)
+);
+
+create or replace function public.sfh_proc_list(p_token text)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_super boolean; v_n int;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'procurement.save');
+  v_super := public.sfh_is_super(v_user);
+  delete from public.proc_projects where org_id = v_user.org_id and updated_at < now() - interval '3 months';
+  get diagnostics v_n = row_count;
+  if v_n > 0 then
+    perform public.sfh_rent_audit(v_user, 'delete', 'proc_projects', null, jsonb_build_object('auto_expire', v_n, 'older_than', '3 months'));
+  end if;
+  return jsonb_build_object(
+    'settings',  coalesce((select data from public.proc_settings where org_id = v_user.org_id), '{}'::jsonb),
+    'vendors',   coalesce((select jsonb_agg(to_jsonb(v) order by v.name) from public.proc_vendors v where v_super or v.org_id = v_user.org_id), '[]'::jsonb),
+    'projects',  coalesce((select jsonb_agg(to_jsonb(p) order by p.updated_at desc) from public.proc_projects p where v_super or p.org_id = v_user.org_id), '[]'::jsonb),
+    'templates', coalesce((select jsonb_agg(jsonb_build_object('version', t.version, 'data', t.data, 'note', t.note, 'created_by_name', t.created_by_name, 'created_at', t.created_at) order by t.version desc)
+                             from public.proc_templates t where t.org_id is not distinct from v_user.org_id), '[]'::jsonb),
+    'can_edit_templates', public.sfh_has_perm(v_user.id, 'procurement.manage_templates'));
+end $$;
+
+drop function if exists public.sfh_proc_tpl_save(text, jsonb, text);
+create function public.sfh_proc_tpl_save(p_token text, p_data jsonb, p_note text)
+returns jsonb language plpgsql security definer set search_path = public, extensions as $$
+declare v_user public.users%rowtype; v_ver int; v_row public.proc_templates%rowtype;
+begin
+  v_user := public.sfh_payroll_auth(p_token, 'procurement.manage_templates');
+  if v_user.org_id is null then raise exception 'บัญชีนี้ไม่ได้สังกัดหน่วยงาน'; end if;
+  if coalesce(jsonb_typeof(p_data->'docs'), '') <> 'object' then raise exception 'รูปแบบ template ไม่ถูกต้อง'; end if;
+  if octet_length(p_data::text) > 300000 then raise exception 'template มีขนาดใหญ่เกินไป'; end if;
+  perform pg_advisory_xact_lock(hashtext('proc_tpl:' || v_user.org_id::text));
+  select coalesce(max(version), 0) + 1 into v_ver from public.proc_templates where org_id = v_user.org_id;
+  insert into public.proc_templates (org_id, version, data, note, created_by_name)
+  values (v_user.org_id, v_ver, p_data, nullif(btrim(coalesce(p_note, '')), ''), v_user.full_name)
+  returning * into v_row;
+  perform public.sfh_rent_audit(v_user, 'update', 'proc_templates', v_row.id::text, jsonb_build_object('version', v_ver, 'note', v_row.note));
+  return jsonb_build_object('version', v_row.version, 'data', v_row.data, 'note', v_row.note, 'created_by_name', v_row.created_by_name, 'created_at', v_row.created_at);
+end $$;
+
+insert into public.permissions (perm_key, module_key, action, name, description, org_admin_grantable, sort_order) values
+ ('procurement.manage_templates', 'procurement', 'manage_templates', 'แก้ไข Template เอกสารจัดซื้อจัดจ้างของหน่วยงาน', 'แก้ไขข้อความเอกสาร 8 ฉบับ · เก็บประวัติทุกฉบับแก้ไข', true, 62)
+on conflict (perm_key) do update
+  set module_key = excluded.module_key, action = excluded.action, name = excluded.name, description = excluded.description,
+      org_admin_grantable = excluded.org_admin_grantable, sort_order = excluded.sort_order;
+insert into public.role_permissions (role_id, permission_id)
+select r.id, p.id from public.roles r join public.permissions p on p.perm_key = 'procurement.manage_templates'
+ where r.role_key in ('org_admin','super_admin')
+on conflict (role_id, permission_id) do nothing;
+
+alter table public.proc_templates enable row level security;
+revoke all on public.proc_templates from anon, authenticated;
+grant execute on function public.sfh_proc_tpl_save(text, jsonb, text) to anon, authenticated;
