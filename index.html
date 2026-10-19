@@ -8821,7 +8821,7 @@ function pcBlank(s = Pc.settings) {
   return {
     kind: 'buy', subject: '', reason: '', source: '', budget: '', mprice: '', days: 7, place: '', fine: '0.10', invoice: '',
     dates: { report: '', order: '', inspect: '', pay: '' }, nos: { memo: '', result: '', cmd1: '', cmd2: '', po: '', pay: '' },
-    org, vendor: { name: '', tax_id: '', address: '', phone: '' }, items: [{ name: '', qty: 1, unit: '', price: '' }], vat: 'incl', tplv: Pc.tpls[0]?.version || 0, tplo: {},
+    org, vendor: { name: '', tax_id: '', address: '', phone: '' }, items: [{ name: '', qty: 1, unit: '', price: '' }], vat: 'incl', tplv: Pc.tpls[0]?.version || 0, tplo: {}, custom: {},
     staff: { maker: pcPerson(st.maker), officer: pcPerson(st.officer), head: pcPerson(st.head), via: (st.via || []).map(pcPerson), approver: { ...pcPerson(st.approver), acting: st.approver?.acting || '' },
       drafter: pcPerson(st.drafter), inspector: pcPerson(st.inspector) },
   };
@@ -8909,6 +8909,7 @@ function pcVars(f) {
   const k = pcK(f), tt = pcTotals(f), s = f.staff, d = f.dates, ph = pcPh;
   const budget = pcNum(f.budget) || tt.total, mprice = pcNum(f.mprice) || tt.total, due = d.order && +f.days ? calAddDays(d.order, +f.days) : '';
   return {
+    ...Object.fromEntries(pcTplNeeds(f).custom.map(n => [n, ph(f.custom?.[n], 24)])),   // ตัวแปรเพิ่มเติมตาม template (ข้อ 1.4) · ว่าง = เส้นจุด
     'ซื้อ/จ้าง': k.v, 'พัสดุ/งาน': k.obj, 'ผู้ขาย/ผู้รับจ้าง': k.vendor, 'ใบสั่งซื้อ/ใบสั่งจ้าง': k.order, 'คุณลักษณะ/ขอบเขตงาน': k.scope, 'ส่งมอบ': k.deliver, 'อาชีพ': k.occ,
     'ฐานค่าปรับ': k.v === 'ซื้อ' ? 'สิ่งของที่ยังไม่ได้รับมอบ' : 'งานจ้าง',
     'เรื่อง': pcTitle(f), 'ชื่อเรื่อง': (() => { const t = (f.subject || '').trim(); return t ? (t.startsWith(k.v) ? t.slice(k.v.length).trim() : t) : '.'.repeat(24); })(), 'เหตุผล': ph(f.reason, 60), 'แหล่งเงิน': ph(f.source, 40), 'จำนวนรายการ': String(f.items.filter(i => i.name).length || 1),
@@ -8929,6 +8930,14 @@ function pcVars(f) {
   };
 }
 const PC_VAR_RE = /\{([^{}\n]{1,40})\}/g;
+/** ตัวแปรที่ template ของโครงการนี้ใช้ (ทั้ง 8 ฉบับ) → จำนวนขั้น "ผ่าน" ที่ต้องกรอก + ตัวแปรที่ไม่มีในข้อมูลโครงการ (ให้กรอกเอง) */
+function pcTplNeeds(f) {
+  const known = new Set(PC_VAR_GROUPS.flatMap(g => g[1].map(x => x[0]))), used = [];
+  const scan = (o) => Object.values(o || {}).forEach(v => { if (typeof v === 'string') v.replace(PC_VAR_RE, (m, n) => { used.push(n.trim()); return m; }); else if (v && typeof v === 'object') scan(v); });
+  PC_DOCS.forEach(d => (pcTplFor(f, d.no) || []).forEach(scan));
+  const via = Math.min(5, Math.max(0, ...used.map(n => +(n.match(/^(?:ตำแหน่ง)?ผ่าน([1-5])$/) || [])[1] || 0)));
+  return { via, custom: [...new Set(used.filter(n => !known.has(n)))] };
+}
 const pcFill = (text, V) => String(text ?? '').replace(PC_VAR_RE, (m, n) => (n in V ? V[n] : m));
 const pcUnknownVars = (blocks) => { const known = new Set(PC_VAR_GROUPS.flatMap(g => g[1].map(x => x[0]))), out = new Set();
   const scan = (o) => ['text', 'unit', 'no', 'date', 'subject', 'top', 'last', 'name', 'pos', 'label'].forEach(k => String(o[k] ?? '').replace(PC_VAR_RE, (m, n) => { if (!known.has(n)) out.add(m); return m; }));
@@ -9235,7 +9244,9 @@ function pcPersonRow(path, label, o = {}) {
     <input class="input" data-f="${path}.pos" value="${esc(pcGet(path + '.pos') || '')}" placeholder="ตำแหน่ง" list="pcPos">${o.acting ? `<input class="input sm:col-span-2" data-f="${path}.acting" value="${esc(pcGet(path + '.acting') || '')}" placeholder="บรรทัดเพิ่มเติม เช่น ปฏิบัติราชการแทนนายกเทศมนตรี... (ถ้ามี)">` : ''}</div>`;
 }
 function pcRenderForm(el) {
-  const f = Pc.f, k = pcK(f), tt = pcTotals(f), s = f.staff;
+  const f = Pc.f, k = pcK(f), tt = pcTotals(f), s = f.staff, need = pcTplNeeds(f);
+  while (s.via.length < need.via) s.via.push(pcPerson());   // แสดงช่อง "ผ่าน" ครบตามที่ template ใช้
+  f.custom = f.custom || {};
   const names = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.name).concat(s.via.map(v => v.name)).filter(Boolean))];
   const poss = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.pos).concat(s.via.map(v => v.pos)).filter(Boolean))];
   $('#pcForm', el).innerHTML = `
@@ -9281,10 +9292,14 @@ function pcRenderForm(el) {
       <div class="rounded-2xl px-3 py-2 text-sm flex flex-wrap justify-between gap-2 ${tt.total > PC_LIMIT ? 'bg-blush-50 text-blush-600 border border-blush-200' : 'bg-mint-50 text-mint-700'}" data-pc-total>${pcTotalHtml(tt)}</div></div>`)}
     ${pcSec('staff', 'users', '1.4 เจ้าหน้าที่ / ผู้อนุมัติ', `
       ${pcPersonRow('staff.maker', 'เจ้าหน้าที่ผู้จัดทำ')}${pcPersonRow('staff.officer', 'เจ้าหน้าที่พัสดุ')}${pcPersonRow('staff.head', 'หัวหน้าเจ้าหน้าที่พัสดุ')}
-      ${s.via.map((v, i) => pcPersonRow(`staff.via.${i}`, `ผ่าน (ขั้นที่ ${i + 1})`, { cls: 'bg-lilac-50/40', extra: `<button class="btn-icon ml-auto hover:!text-blush-500" data-via-del="${i}" title="ลบขั้นนี้">${ic('x')}</button>` })).join('')}
-      <div class="sm:col-span-2"><button class="btn btn-ghost btn-sm" data-pc="addvia">${ic('plus', 'w-4 h-4')} เพิ่มผู้บริหารที่ต้องผ่าน</button></div>
+      ${s.via.map((v, i) => pcPersonRow(`staff.via.${i}`, `ผ่าน (ขั้นที่ ${i + 1})${i < need.via ? ' <span class="text-[11px] font-normal text-slate-400">· ตาม Template (เว้นว่างได้ถ้าไม่ผ่าน)</span>' : ''}`, { cls: 'bg-lilac-50/40',
+        extra: i < need.via ? '' : `<button class="btn-icon ml-auto hover:!text-blush-500" data-via-del="${i}" title="ลบขั้นนี้">${ic('x')}</button>` })).join('')}
+      ${s.via.length < 5 ? `<div class="sm:col-span-2"><button class="btn btn-ghost btn-sm" data-pc="addvia">${ic('plus', 'w-4 h-4')} เพิ่มผู้บริหารที่ต้องผ่าน</button></div>` : ''}
       ${pcPersonRow('staff.approver', 'ผู้อนุมัติ (ผู้สั่งการ)', { acting: true })}
-      ${pcPersonRow('staff.drafter', `ผู้จัดทำร่าง${k.scope}`)}${pcPersonRow('staff.inspector', 'ผู้ตรวจรับพัสดุ')}`)}`;
+      ${pcPersonRow('staff.drafter', `ผู้จัดทำร่าง${k.scope}`)}${pcPersonRow('staff.inspector', 'ผู้ตรวจรับพัสดุ')}
+      ${need.custom.length ? `<div class="sm:col-span-2 grid gap-2 sm:grid-cols-2 rounded-2xl border border-cream-200 bg-cream-50/40 p-2.5">
+        <div class="sm:col-span-2 text-sm font-medium text-slate-600">${ic('pencil-line', 'w-4 h-4 inline')} ข้อความเพิ่มเติมตาม Template <span class="text-[11px] font-normal text-slate-400">· ตัวแปรที่ Template ใช้แต่ไม่มีในแบบฟอร์ม</span></div>
+        ${need.custom.map(n => `<label class="grid gap-1"><span class="text-xs text-slate-500">{${esc(n)}}</span><input class="input" data-cv="${esc(n)}" value="${esc(f.custom[n] || '')}" placeholder="${esc(n)}"></label>`).join('')}</div>` : ''}`)}`;
   refreshIcons();
   pcUpdateTitle(el);
   const form = $('#pcForm', el);
@@ -9304,6 +9319,7 @@ function pcOnInput(e, el, isChange) {
     if (t.dataset.f === 'vendor.name' && isChange) { const v = Pc.vendors.find(x => x.name === t.value);
       if (v) { Object.assign(Pc.f.vendor, { name: v.name, tax_id: v.tax_id || '', address: v.address || '', phone: v.phone || '' }); pcRenderForm(el); showToast('ใช้ข้อมูลร้านที่บันทึกไว้', 'info'); } }
   } else if (t.dataset.it) { const [i, key] = t.dataset.it.split('|'); Pc.f.items[+i][key] = t.value; }
+  else if (t.dataset.cv) { (Pc.f.custom = Pc.f.custom || {})[t.dataset.cv] = t.value; }
   else return;
   const box = $('[data-pc-total]', el); if (box) { const tt = pcTotals(Pc.f); box.innerHTML = pcTotalHtml(tt); box.className = box.className.replace(/bg-\S+|text-\S+|border(-\S+)?/g, '').trim() + (tt.total > PC_LIMIT ? ' bg-blush-50 text-blush-600 border border-blush-200' : ' bg-mint-50 text-mint-700'); }
   pcUpdateTitle(el); pcDraftSave();
@@ -9358,7 +9374,7 @@ async function pcOnClick(e, el) {
   if (k === 'vendors') pcOpenVendors(el);
   if (k === 'print' || k === 'pdf' || k === 'word') pcOutMenu(k);
   if (k === 'tpl') pcTplMenu(el);
-  if (k === 'uselatest') { const lt = pcTplLatest(); if (!lt) return; Pc.f.tplv = lt.version; pcDraftSave(); pcPreview(el); showToast(`ใช้ Template ฉบับที่ ${lt.version} แล้ว${Pc.id ? ' · กด "บันทึก" เพื่อเก็บกับโครงการ' : ''}`, 'success'); }
+  if (k === 'uselatest') { const lt = pcTplLatest(); if (!lt) return; Pc.f.tplv = lt.version; pcRenderForm(el); pcDraftSave(); pcPreview(el); showToast(`ใช้ Template ฉบับที่ ${lt.version} แล้ว${Pc.id ? ' · กด "บันทึก" เพื่อเก็บกับโครงการ' : ''}`, 'success'); }
   if (['additem', 'addvia'].includes(k)) { pcPreview(el); pcDraftSave(); }
 }
 async function pcSave(el) {
@@ -9458,7 +9474,7 @@ function pcTplMenu(el) {
     if (k === 'project' || k === 'org' || k === 'local') pcTplOpen(el, k);
     if (k === 'uselatest') { Pc.f.tplv = latest.version; pcDraftSave(); pcPreview(el); showToast(`ใช้ Template ฉบับที่ ${latest.version} แล้ว (กดบันทึกโครงการเพื่อเก็บ)`, 'info'); }
     if (k === 'clearover') { if (!(await confirmModal({ title: 'เลิกใช้ข้อความเฉพาะโครงการ', message: `ข้อความที่แก้เฉพาะโครงการนี้ (ฉบับที่ ${over.join(', ')}) จะหายไป และกลับไปใช้ข้อความตาม template?` }))) return;
-      Pc.f.tplo = {}; pcDraftSave(); pcPreview(el); showToast('กลับไปใช้ข้อความตาม template แล้ว', 'info'); }
+      Pc.f.tplo = {}; pcDraftSave(); pcRenderForm(el); pcPreview(el); showToast('กลับไปใช้ข้อความตาม template แล้ว', 'info'); }
     if (k === 'history') pcTplHistory(el);
   });
 }
@@ -9573,7 +9589,7 @@ async function pcTplSave(el) {
   const T = Pc.tpl, changed = PC_DOCS.filter(d => JSON.stringify(T.docs[d.no]) !== JSON.stringify(T.orig[d.no])).map(d => d.no);
   if (!changed.length && T.mode !== 'project') { showToast('ยังไม่มีการแก้ไข', 'info'); return; }
   const unk = pcUnknownVars(PC_DOCS.flatMap(d => T.docs[d.no]));
-  if (unk.length && !(await confirmModal({ title: 'มีตัวแปรที่ไม่รู้จัก', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ', message: `ตัวแปร ${unk.map(esc).join(' ')} ไม่มีในระบบ จะแสดงตามที่พิมพ์ในเอกสาร · บันทึกต่อหรือไม่?` }))) return;
+  if (unk.length && !(await confirmModal({ title: 'มีตัวแปรที่ไม่รู้จัก', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ', message: `ตัวแปร ${unk.map(esc).join(' ')} ไม่มีในระบบ · จะมีช่องให้กรอกในข้อ 1.4 "ข้อความเพิ่มเติมตาม Template" ของแต่ละโครงการ (ถ้าไม่กรอก จะแสดงเป็นเส้นจุด) · บันทึกต่อหรือไม่?` }))) return;
   if (T.mode === 'project') {
     const over = {}; PC_DOCS.forEach(d => { const base = (Pc.f.tplv ? pcTplVersion(Pc.f.tplv) || pcTplLatest() : null)?.data?.docs?.[d.no] || PC_TPL_DEFAULT[d.no];
       if (JSON.stringify(T.docs[d.no]) !== JSON.stringify(pcTplNormalize(pcClone(base)))) over[d.no] = T.docs[d.no]; });   // เทียบหลังแปลงรูปแบบ → ฉบับที่ไม่ได้แก้ไม่ถูกเก็บเป็นข้อความเฉพาะโครงการ
