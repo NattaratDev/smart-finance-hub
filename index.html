@@ -5808,43 +5808,54 @@ function rentOpenRates(src, el) {
 }
 
 /* ---------- พิมพ์ / PDF / Excel ---------- */
+/* ---------- ตัวเลือก "ผู้ที่จะพิมพ์" (ทุกคน / เลือกรายคน) ใช้ร่วมกันในเมนูพิมพ์ของทะเบียนต่าง ๆ ----------
+ * people: [{ id, full_name, position_title, unit_name }] · pre: id ที่เลือกไว้ล่วงหน้า (ถ้ามี → เปิดโหมดเลือกรายคน) */
+function rgPickerHtml(people, pre = [], tone = 'brand') {
+  const pick = new Set(pre);
+  return `<div class="rounded-2xl border border-${tone}-100 bg-${tone}-50/40 p-3">
+    <div class="font-medium text-slate-700 mb-2">${ic('users', 'w-4 h-4 inline')} ผู้ที่จะพิมพ์</div>
+    <div class="grid grid-cols-2 gap-2">${[['all', `ทุกคน (${people.length} คน)`], ['pick', 'เลือกรายคน']].map(([k, l]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-${tone}-300 has-[:checked]:bg-white has-[:checked]:text-${tone}-700 border-slate-200 text-slate-600">
+      <input type="radio" name="who" value="${k}" class="sr-only" ${(k === 'pick') === !!pick.size ? 'checked' : ''}>${l}</label>`).join('')}</div>
+    <div data-pickbox class="${pick.size ? '' : 'hidden'} mt-3">
+      <div class="flex gap-2 mb-2"><div class="relative flex-1"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">${ic('search', 'w-4 h-4')}</span>
+        <input type="search" class="input !py-1.5" style="padding-left:2.25rem" placeholder="ค้นหาชื่อ ตำแหน่ง สังกัด..." data-pq></div>
+        <button type="button" class="btn btn-ghost btn-sm" data-pall>เลือกทั้งหมด</button><button type="button" class="btn btn-ghost btn-sm" data-pnone>ล้าง</button></div>
+      <div class="max-h-56 overflow-y-auto rounded-2xl border border-slate-100 bg-white divide-y divide-slate-50" data-plist>${people.map(p => `<label class="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50" data-prow="${esc((p.full_name + ' ' + (p.position_title || '') + ' ' + (p.unit_name || '')).toLowerCase())}">
+        <input type="checkbox" class="rounded" value="${p.id}" ${pick.has(p.id) ? 'checked' : ''}><span class="flex-1 min-w-0"><span class="text-slate-700">${esc(p.full_name)}</span> <span class="text-xs text-slate-400">${esc(p.position_title || p.unit_name || '')}</span></span></label>`).join('') || '<div class="px-3 py-3 text-sm text-slate-400">ไม่มีรายชื่อ</div>'}</div>
+      <div class="text-xs text-slate-500 mt-1.5" data-pcount></div>
+    </div></div>`;
+}
+/** ผูกการทำงานของตัวเลือกในหน้าต่าง · คืน selected(): null = ทุกคน, Set(id) = เลือกรายคน, false = ยังไม่ได้เลือก (แจ้งเตือนแล้ว) */
+function rgPickerBind(root, people) {
+  const picking = () => $('input[name="who"]:checked', root).value === 'pick';
+  const checked = () => $$('[data-plist] input:checked', root).map(x => x.value);
+  const sync = () => { $('[data-pickbox]', root).classList.toggle('hidden', !picking()); $('[data-pcount]', root).textContent = `เลือกแล้ว ${checked().length} จาก ${people.length} คน`; };
+  root.addEventListener('change', sync);
+  root.addEventListener('input', (e) => { if (!e.target.matches('[data-pq]')) return; const q = e.target.value.trim().toLowerCase(); $$('[data-prow]', root).forEach(r => r.classList.toggle('hidden', !!q && !r.dataset.prow.includes(q))); });
+  root.addEventListener('click', (e) => {
+    if (e.target.closest('[data-pall]')) { $$('[data-prow]:not(.hidden) input', root).forEach(x => { x.checked = true; }); sync(); }
+    if (e.target.closest('[data-pnone]')) { $$('[data-plist] input', root).forEach(x => { x.checked = false; }); sync(); }
+  });
+  sync();
+  return { selected: () => { if (!picking()) return null; const ids = new Set(checked()); if (!ids.size) { showToast('กรุณาเลือกอย่างน้อย 1 คน', 'warning'); return false; } return ids; } };
+}
+
 function rentPrintMenu(mode) {
   const months = rentMonths(Rg.fy), today = calToday(), people = rentPeopleInFy();
   const def = months.filter(mo => rentMonthFirst(mo.y, mo.m) <= today).at(-1) || months[0];
-  const btn = (k, label) => `<button type="button" class="btn btn-primary btn-sm shrink-0" data-k="${k}">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${label || (mode === 'pdf' ? 'PDF' : 'พิมพ์')}</button>`;
-  const pick = new Set(Rg.person ? [Rg.person] : []);
+  const btn = (k) => `<button type="button" class="btn btn-primary btn-sm shrink-0" data-k="${k}">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${mode === 'pdf' ? 'PDF' : 'พิมพ์'}</button>`;
   const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'md',
-    body: `<div class="grid gap-3">
-      <div class="rounded-2xl border border-brand-100 bg-brand-50/40 p-3">
-        <div class="font-medium text-slate-700 mb-2">${ic('users', 'w-4 h-4 inline')} ผู้ที่จะพิมพ์</div>
-        <div class="grid grid-cols-2 gap-2">${[['all', `ทุกคน (${people.length} คน)`], ['pick', 'เลือกรายคน']].map(([k, l]) => `<label class="flex items-center justify-center gap-2 rounded-2xl border px-3 py-2 text-sm cursor-pointer has-[:checked]:border-brand-300 has-[:checked]:bg-white has-[:checked]:text-brand-700 border-slate-200 text-slate-600">
-          <input type="radio" name="who" value="${k}" class="sr-only" ${(k === 'pick') === !!Rg.person ? 'checked' : ''}>${l}</label>`).join('')}</div>
-        <div data-pickbox class="${Rg.person ? '' : 'hidden'} mt-3">
-          <div class="flex gap-2 mb-2"><div class="relative flex-1"><span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">${ic('search', 'w-4 h-4')}</span>
-            <input type="search" class="input !py-1.5" style="padding-left:2.25rem" placeholder="ค้นหาชื่อ ตำแหน่ง สังกัด..." data-pq></div>
-            <button type="button" class="btn btn-ghost btn-sm" data-pall>เลือกทั้งหมด</button><button type="button" class="btn btn-ghost btn-sm" data-pnone>ล้าง</button></div>
-          <div class="max-h-56 overflow-y-auto rounded-2xl border border-slate-100 bg-white divide-y divide-slate-50" data-plist>${people.map(p => `<label class="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-slate-50" data-prow="${esc((p.full_name + ' ' + (p.position_title || '') + ' ' + (p.unit_name || '')).toLowerCase())}">
-            <input type="checkbox" class="rounded" value="${p.id}" ${pick.has(p.id) ? 'checked' : ''}><span class="flex-1 min-w-0"><span class="text-slate-700">${esc(p.full_name)}</span> <span class="text-xs text-slate-400">${esc(p.position_title || p.unit_name || '')}</span></span></label>`).join('')}</div>
-          <div class="text-xs text-slate-500 mt-1.5" data-pcount></div>
-        </div>
-      </div>
+    body: `<div class="grid gap-3">${rgPickerHtml(people, Rg.person ? [Rg.person] : [])}
       <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวม</div><div class="text-xs text-slate-400">A4 แนวนอน · ผู้ที่เลือก × 12 เดือน</div></div>${btn('summary')}</div>
       <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล</div><div class="text-xs text-slate-400">A4 แนวตั้ง · คนละ 1 หน้า</div></div>${btn('person')}</div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">A4 แนวตั้ง · รายชื่อผู้เบิกในเดือนที่เลือก พร้อมยอดรวม</div>
         <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-month>${months.map(mo => `<option value="${mo.y}|${mo.m}" ${mo.key === def.key ? 'selected' : ''}>${TH_MONTHS[mo.m - 1]} ${mo.y + 543}</option>`).join('')}</select>${btn('month')}</div>
         <label class="inline-flex items-center gap-2 text-xs text-slate-600 mt-2"><input type="checkbox" class="rounded" data-unrec checked> แสดงผู้มีสิทธิ์ที่ยังไม่บันทึกการเบิกด้วย</label></div></div>` });
-  const picking = () => $('input[name="who"]:checked', m.el).value === 'pick';
-  const checked = () => $$('[data-plist] input:checked', m.el).map(x => x.value);
-  const sync = () => { $('[data-pickbox]', m.el).classList.toggle('hidden', !picking()); $('[data-pcount]', m.el).textContent = `เลือกแล้ว ${checked().length} จาก ${people.length} คน`; };
-  m.el.addEventListener('change', sync);
-  m.el.addEventListener('input', (e) => { if (!e.target.matches('[data-pq]')) return; const q = e.target.value.trim().toLowerCase(); $$('[data-prow]', m.el).forEach(r => r.classList.toggle('hidden', !!q && !r.dataset.prow.includes(q))); });
-  sync();
+  const picker = rgPickerBind(m.el, people);
   m.el.addEventListener('click', (e) => {
-    if (e.target.closest('[data-pall]')) { $$('[data-prow]:not(.hidden) input', m.el).forEach(x => { x.checked = true; }); sync(); return; }
-    if (e.target.closest('[data-pnone]')) { $$('[data-plist] input', m.el).forEach(x => { x.checked = false; }); sync(); return; }
     const b = e.target.closest('[data-k]'); if (!b) return;
-    let entIds = null;
-    if (picking()) { const ids = new Set(checked()); if (!ids.size) { showToast('กรุณาเลือกอย่างน้อย 1 คน', 'warning'); return; } entIds = Rg.ents.filter(x => ids.has(x.person_id)).map(x => x.id); }
+    const ids = picker.selected(); if (ids === false) return;
+    const entIds = ids ? Rg.ents.filter(x => ids.has(x.person_id)).map(x => x.id) : null;
     const opts = b.dataset.k === 'month' ? (([y, mo]) => ({ y, m: mo, unrecorded: $('[data-unrec]', m.el).checked }))($('[data-month]', m.el).value.split('|').map(Number)) : {};
     m.close(); rentPrint(b.dataset.k, entIds, mode, opts);
   });
@@ -6485,20 +6496,24 @@ function eduOpenRates(src, el) {
 /* ---------- พิมพ์ / PDF / Excel ---------- */
 function eduPrintMenu(mode) {
   const today = calToday(), fyNow = thaiFiscalYear(new Date()), ym = today.slice(0, 7);
-  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'sm',
-    body: `<div class="grid gap-2">
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-mint-200 hover:bg-mint-50/50" data-k="summary"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวม ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวนอน · บุตรทุกคน × ภาคเรียน</div></button>
-      <button type="button" class="text-left rounded-2xl border border-slate-100 p-3 hover:border-mint-200 hover:bg-mint-50/50" data-k="person"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวตั้ง · ผู้มีสิทธิ์คนละ 1 หน้า</div></button>
+  const seen = new Set(), people = eduRows().map(r => r.p).filter(p => p.id && !seen.has(p.id) && seen.add(p.id));
+  const btn = (k) => `<button type="button" class="btn btn-primary btn-sm shrink-0" data-k="${k}">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')} ${mode === 'pdf' ? 'PDF' : 'พิมพ์'}</button>`;
+  const m = openModal({ title: mode === 'pdf' ? 'ดาวน์โหลด PDF' : 'พิมพ์ทะเบียน', icon: mode === 'pdf' ? 'file-down' : 'printer', size: 'md',
+    body: `<div class="grid gap-3">${rgPickerHtml(people, [], 'mint')}
+      <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('table', 'w-4 h-4 inline')} ทะเบียนรวม ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวนอน · บุตรของผู้ที่เลือก × ภาคเรียน</div></div>${btn('summary')}</div>
+      <div class="rounded-2xl border border-slate-100 p-3 flex items-center gap-3"><div class="flex-1 min-w-0"><div class="font-medium text-slate-700">${ic('user-round', 'w-4 h-4 inline')} ทะเบียนรายบุคคล ปีการศึกษา ${Ed.ay}</div><div class="text-xs text-slate-400">A4 แนวตั้ง · ผู้มีสิทธิ์คนละ 1 หน้า</div></div>${btn('person')}</div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-days', 'w-4 h-4 inline')} รายงานประจำเดือน</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา</div>
-        <div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month value="${ym}"><button type="button" class="btn btn-primary btn-sm" data-k="month">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div>
+        <div class="flex gap-2"><input type="month" class="input !py-1.5 flex-1" data-month value="${ym}">${btn('month')}</div></div>
       <div class="rounded-2xl border border-slate-100 p-3"><div class="font-medium text-slate-700">${ic('calendar-range', 'w-4 h-4 inline')} สรุปปีงบประมาณ</div><div class="text-xs text-slate-400 mb-2">ตามวันที่วางฎีกา (1 ต.ค. – 30 ก.ย.) แยกรายเดือน</div>
-        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>
-          <button type="button" class="btn btn-primary btn-sm" data-k="fy">${ic(mode === 'pdf' ? 'file-down' : 'printer', 'w-4 h-4')}</button></div></div></div>` });
+        <div class="flex gap-2"><select class="input !py-1.5 flex-1" data-fy>${[fyNow + 1, fyNow, fyNow - 1, fyNow - 2].map(y => `<option value="${y}" ${y === fyNow ? 'selected' : ''}>ปีงบประมาณ ${y}</option>`).join('')}</select>${btn('fy')}</div></div></div>` });
+  const picker = rgPickerBind(m.el, people);
   m.el.addEventListener('click', (e) => {
     const b = e.target.closest('[data-k]'); if (!b) return;
+    const ids = picker.selected(); if (ids === false) return;
     const k = b.dataset.k, opts = {};
     if (k === 'month') { const [y, mo] = $('[data-month]', m.el).value.split('-').map(Number); if (!y) { showToast('กรุณาเลือกเดือน', 'warning'); return; } Object.assign(opts, { y, m: mo }); }
     if (k === 'fy') opts.fy = +$('[data-fy]', m.el).value;
+    if (ids) opts.personIds = ids;
     m.close(); eduPrint(k, mode, opts);
   });
 }
@@ -6519,12 +6534,13 @@ async function rgOutput(root, orientation, mode, filename) {
 }
 const RG_SIGN = rgSign();
 async function eduPrint(kind, mode, opts = {}) {
+  const { personIds: pick, ...logOpts } = opts, inPick = (pid) => !pick || pick.has(pid);
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
   const foot = (pi, n) => `<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>หน้า ${pi + 1}/${n}</span></div>`;
   const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out.length ? out : [[]]; };
   let orientation = 'portrait', count = 0, filename = '';
   if (kind === 'summary') {
-    const rows = eduRows().filter(r => eduClaimsOf(r.c.id).length); count = rows.length; orientation = 'landscape';
+    const rows = eduRows().filter(r => eduClaimsOf(r.c.id).length && inPick(r.p.id)); count = rows.length; orientation = 'landscape';
     const pages = chunk(rows, 15);
     root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>ทะเบียนคุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ปีการศึกษา ${Ed.ay}</h1><div class="sub">${org}</div>
       <table><thead><tr><th style="width:7mm">ที่</th><th style="width:40mm">ผู้มีสิทธิ์</th><th style="width:38mm">บุตร</th><th>สถานศึกษา / ประเภท-ระดับ</th><th style="width:18mm">ภาค 1</th><th style="width:18mm">ภาค 2</th><th style="width:18mm">รายปี</th><th style="width:18mm">รวม</th><th style="width:30mm">เลขที่ฎีกา</th></tr></thead><tbody>
@@ -6536,7 +6552,7 @@ async function eduPrint(kind, mode, opts = {}) {
           <td class="n">${rentMoney(rows.reduce((a, { c }) => a + eduTotal(c.id), 0))}</td><td></td></tr>` : ''}</tbody></table>${pi === pages.length - 1 ? RG_SIGN : ''}${foot(pi, pages.length)}</div>`).join('');
     filename = `ทะเบียนค่าเล่าเรียนบุตร_รวม_ปีการศึกษา${Ed.ay}.pdf`;
   } else if (kind === 'person') {
-    const people = [...new Set(Ed.claims.map(x => eduChild(x.child_id)?.person_id))].map(eduPerson).filter(Boolean).sort((a, b) => a.full_name.localeCompare(b.full_name, 'th')); count = people.length;
+    const people = [...new Set(Ed.claims.map(x => eduChild(x.child_id)?.person_id))].filter(inPick).map(eduPerson).filter(Boolean).sort((a, b) => a.full_name.localeCompare(b.full_name, 'th')); count = people.length;
     root.innerHTML = people.map((p, pi) => { const sp = eduSpouse(p.id), xs = Ed.claims.filter(x => eduChild(x.child_id)?.person_id === p.id).sort((a, b) => eduChild(a.child_id).full_name.localeCompare(eduChild(b.child_id).full_name, 'th') || a.semester.localeCompare(b.semester));
       const tot = xs.reduce((a, x) => a + (+x.amount_claim), 0);
       return `<div class="rg-page port"><h1>ทะเบียนคุมการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร</h1><div class="sub">ปีการศึกษา ${Ed.ay} · ${org}</div>
@@ -6548,12 +6564,12 @@ async function eduPrint(kind, mode, opts = {}) {
             <td class="n" style="font-weight:500">${rentMoney(x.amount_claim)}</td><td>${esc(x.doc_no || '')}</td><td>${x.doc_date ? formatThaiDate(calDate(x.doc_date)) : ''}</td><td style="text-align:center">${RENT_STATUS[x.status].label}</td></tr>`; }).join('')}
           <tr class="tot"><td colspan="4" style="text-align:center">รวม</td><td class="n">${rentMoney(tot)}</td><td colspan="3">(${esc(bahtText(tot))})</td></tr></tbody></table>
         ${RG_SIGN}<div class="foot"><span>พิมพ์เมื่อ ${printed}</span><span>${esc(p.full_name)}</span></div></div>`; }).join('');
-    filename = `ทะเบียนค่าเล่าเรียนบุตร_รายบุคคล_ปีการศึกษา${Ed.ay}.pdf`;
+    filename = `ทะเบียนค่าเล่าเรียนบุตร_${people.length === 1 && pick ? people[0].full_name : 'รายบุคคล'}_ปีการศึกษา${Ed.ay}.pdf`;
   } else {
     const from = kind === 'month' ? rentMonthFirst(opts.y, opts.m) : rentMonthFirst(opts.fy - 544, 10), to = kind === 'month' ? rentMonthLast(opts.y, opts.m) : rentMonthLast(opts.fy - 543, 9);
     const r = await rpcSecure('sfh_edu_report', { p_from: from, p_to: to }, { loaderText: 'กำลังโหลดรายงาน...', error: 'โหลดรายงานไม่สำเร็จ' });
     if (!r.ok) return;
-    const rows = r.data || []; count = rows.length;
+    const rows = (r.data || []).filter(x => inPick(x.person_id)); count = rows.length;
     const title = kind === 'month' ? `รายงานการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ประจำเดือน${TH_MONTHS[opts.m - 1]} ${opts.y + 543}` : `สรุปการเบิกเงินสวัสดิการเกี่ยวกับการศึกษาบุตร ปีงบประมาณ ${opts.fy}`;
     const items = [];
     if (kind === 'fy') { let curM = ''; rows.forEach(x => { const mk = x.doc_date.slice(0, 7); if (mk !== curM) { if (curM) items.push({ sub: curM }); curM = mk; } items.push(x); }); if (curM) items.push({ sub: curM }); }
@@ -6572,7 +6588,7 @@ async function eduPrint(kind, mode, opts = {}) {
     filename = kind === 'month' ? `ทะเบียนค่าเล่าเรียนบุตร_ประจำเดือน${TH_MONTHS[opts.m - 1]}${opts.y + 543}.pdf` : `ทะเบียนค่าเล่าเรียนบุตร_สรุปปีงบประมาณ${opts.fy}.pdf`;
   }
   if (!count) { root.innerHTML = ''; showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
-  rpcSecure('sfh_edu_log', { p_kind: `${mode}_${kind}`, p_details: { academic_year: Ed.ay, count, ...opts } }, { loader: false });
+  rpcSecure('sfh_edu_log', { p_kind: `${mode}_${kind}`, p_details: { academic_year: Ed.ay, count, ...logOpts, ...(pick ? { selected: pick.size } : {}) } }, { loader: false });
   await rgOutput(root, orientation, mode, filename);
 }
 async function eduExportExcel() {
