@@ -9146,6 +9146,7 @@ async function renderProcurement(el, mod) {
   await pcLoad();
   const dr = pcDraftLoad();
   if (dr?.f && dr.mode === Pc.mode) Object.assign(Pc, { f: { ...pcBlank(), ...dr.f }, id: dr.id || null, seq: dr.seq || null, doc: dr.doc || 1, num: dr.num || 'thai' });
+  if (Pc.f && !Pc.id) Pc.f.tplv = pcTplLatest()?.version || 0;   // ร่างที่ยังไม่บันทึกใช้ Template ล่าสุดเสมอ
   else Object.assign(Pc, { f: pcBlank(), id: null, seq: null });
   pcRenderShell(el);
 }
@@ -9186,6 +9187,7 @@ function pcRenderShell(el) {
         <div class="flex flex-wrap gap-1 mb-2" role="tablist">${PC_DOCS.map(d => `<button type="button" class="rounded-xl px-2.5 py-1.5 text-xs whitespace-nowrap" data-pc-doc="${d.no}" title="${esc(d.name)}">${d.no}. ${esc(d.short)}</button>`).join('')}
           <button type="button" class="rounded-xl px-2.5 py-1.5 text-xs" data-pc-doc="0">ทั้งหมด</button></div>
         <div class="text-xs text-slate-400 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1"><span data-pc-docname></span><span data-pc-tplinfo></span><span>${ic('square-dashed', 'w-3 h-3 inline')} เส้นประ = ขอบเขตที่พิมพ์ได้</span>${Pc.garuda ? '' : `<span class="text-cream-600">${ic('info', 'w-3 h-3 inline')} ยังไม่มีไฟล์ตราครุฑ (แสดงกรอบแทน)</span>`}<span data-pc-font></span></div>
+        <div data-pc-tplbar class="hidden mb-2 rounded-2xl border border-cream-200 bg-cream-50 px-3 py-2 text-sm text-cream-700 flex flex-wrap items-center gap-2"></div>
         <div id="pcPages" class="grid gap-3 bg-slate-100/70 rounded-2xl p-2 overflow-hidden lg:max-h-[calc(100vh-11rem)] lg:overflow-y-auto"></div>
       </div>
     </div>`;
@@ -9301,6 +9303,8 @@ function pcPreview(el) {
   box.innerHTML = docs.flatMap(d => pcPagesHtml(d, true).map(h => `<div class="pc-pwrap mx-auto shadow-sm" style="position:relative">${h}</div>`)).join('');
   $$('[data-pc-doc]', el).forEach(b => { const on = +b.dataset.pcDoc === Pc.doc; b.classList.toggle('bg-blush-100', on); b.classList.toggle('text-blush-600', on); b.classList.toggle('font-medium', on); b.classList.toggle('text-slate-500', !on); b.classList.toggle('hover:bg-slate-50', !on); });
   const dn = $('[data-pc-docname]', el); if (dn) dn.textContent = Pc.doc ? `${Pc.doc}. ${PC_DOCS[Pc.doc - 1].name} · ${pcPaginate(all[Pc.doc - 1]).pages.length} หน้า` : 'แสดงทั้งชุด 8 ฉบับ';
+  const bar = $('[data-pc-tplbar]', el), lt = pcTplLatest(), old = !Pc.tpl && lt && (Pc.f.tplv || 0) !== lt.version;
+  if (bar) { bar.classList.toggle('hidden', !old); bar.innerHTML = old ? `${ic('alert-triangle', 'w-4 h-4')} <span class="flex-1 min-w-0">โครงการนี้ใช้${Pc.f.tplv ? ` Template ฉบับที่ ${Pc.f.tplv}` : 'แบบมาตรฐานของระบบ'} · มี Template ฉบับล่าสุด (ฉบับที่ ${lt.version})${Object.keys(Pc.f.tplo || {}).length ? ' · ข้อความที่แก้เฉพาะโครงการยังคงอยู่' : ''}</span><button type="button" class="btn btn-primary btn-sm" data-pc="uselatest">${ic('refresh-cw', 'w-4 h-4')} ใช้ฉบับล่าสุด</button>` : ''; }
   const ti = $('[data-pc-tplinfo]', el); if (ti) { const v = Pc.f.tplv ? (pcTplVersion(Pc.f.tplv) ? Pc.f.tplv : pcTplLatest()?.version) : 0, ov = Object.keys(Pc.f.tplo || {});
     ti.innerHTML = Pc.tpl ? `<span class="text-lilac-600">${ic('pencil-line', 'w-3 h-3 inline')} กำลังแก้${PC_TPL_MODE[Pc.tpl.mode]} (ยังไม่บันทึก)</span>` : `${ic('file-cog', 'w-3 h-3 inline')} ${v ? 'Template ฉบับที่ ' + v : 'แบบมาตรฐาน'}${v && pcTplLatest() && v !== pcTplLatest().version ? ` <span class="text-cream-600">(มีฉบับ ${pcTplLatest().version})</span>` : ''}${ov.length ? ` · <span class="text-cream-600">แก้เฉพาะโครงการ: ${ov.join(', ')}</span>` : ''}`; }
   const fn = $('[data-pc-font]', el); if (fn) fn.innerHTML = pcFontOk() ? '' : `<span class="text-cream-600">${ic('type', 'w-3 h-3 inline')} เครื่องนี้ไม่มีฟอนต์ TH Sarabun New (ใช้ฟอนต์ใกล้เคียงแทน)</span>`;
@@ -9340,6 +9344,7 @@ async function pcOnClick(e, el) {
   if (k === 'vendors') pcOpenVendors(el);
   if (k === 'print' || k === 'pdf' || k === 'word') pcOutMenu(k);
   if (k === 'tpl') pcTplMenu(el);
+  if (k === 'uselatest') { const lt = pcTplLatest(); if (!lt) return; Pc.f.tplv = lt.version; pcDraftSave(); pcPreview(el); showToast(`ใช้ Template ฉบับที่ ${lt.version} แล้ว${Pc.id ? ' · กด "บันทึก" เพื่อเก็บกับโครงการ' : ''}`, 'success'); }
   if (['additem', 'addvia'].includes(k)) { pcPreview(el); pcDraftSave(); }
 }
 async function pcSave(el) {
