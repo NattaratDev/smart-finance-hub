@@ -9019,10 +9019,13 @@ function pcResolve(tpl, f, V) {
       rows: [['1', V['เรื่อง'], V['ร้าน'], pcMoney(tt.total), pcMoney(tt.total)]], foot: [] });
     else if (b.t === 'po_head') out.push({ t: 'kv2', left: [`${k.vendor}  ${V['ร้าน']}`, `ที่อยู่  ${V['ที่อยู่ร้าน']}`, `โทรศัพท์  ${V['โทรร้าน']}`, `เลขประจำตัวผู้เสียภาษี  ${V['เลขผู้เสียภาษีร้าน']}`],
       right: [`${k.order}เลขที่  ${V['เลขที่ใบสั่ง']}`, `วันที่  ${V['วันที่สั่ง']}`, `ส่วนราชการ  ${pcPh([f.org.unit, f.org.main].filter(Boolean).join(' '), 24)}`, `ที่อยู่  ${V['ที่อยู่หน่วยงาน']}`, `โทรศัพท์  ${pcPh(f.org.phone, 14)}`] });
-    else if (b.t === 'po_sign') out.push({ t: 'grid', sb: +b.sb || 14, cells: [{ label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้สั่ง${k.v}`, ...pcSignLines(s.approver, [s.approver.acting])] },
+    else if (b.t === 'po_sign') out.push({ t: 'grid', eq: true, sb: +b.sb || 14, cells: [{ label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้สั่ง${k.v}`, ...pcSignLines(s.approver, [s.approver.acting])] },
       { label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้รับ${k.order}`, `(${f.vendor.name ? f.vendor.name : '.'.repeat(36)})`, k.vendor, 'วันที่ ' + '.'.repeat(30)] }] });
     else if (b.t === 'sign') { const p = person(b.who || 'officer'); out.push({ t: 'sign', sb: +b.sb || 0, lines: [...(b.top ? [pcFill(b.top, V)] : []), ...pcSignLines(p, b.who === 'approver' ? [s.approver.acting] : [])] }); }
-    else if (b.t === 'approvals') { const g = b.only ? { t: 'grid', cells: [{ label: `- ${b.last || 'อนุมัติ'}`, lines: pcSignLines(s.approver, [s.approver.acting]) }] } : pcApprovals(f, b.last || 'อนุมัติ'); if (b.sb) g.sb = +b.sb; out.push(g); }
+    else if (b.t === 'approvals') {   // แยกทีละแถว (2 ช่อง) → แบ่งหน้าได้ทีละแถว ไม่ยกทั้งก้อนไปหน้าถัดไป
+      const cells = b.only ? [{ label: `- ${b.last || 'อนุมัติ'}`, lines: pcSignLines(s.approver, [s.approver.acting]) }] : pcApprovals(f, b.last || 'อนุมัติ').cells;
+      for (let i = 0; i < cells.length; i += 2) out.push({ t: 'grid', cells: cells.slice(i, i + 2), sb: i ? 14 : (+b.sb || 12) });
+    }
   });
   return out;
 }
@@ -9050,8 +9053,8 @@ const PC_CSS = `
 .pc-tbl{width:100%;border-collapse:collapse;margin-top:1mm}.pc-tbl th,.pc-tbl td{border:.6pt solid #000;padding:0 1.5mm;vertical-align:top;font-size:15pt;line-height:1.2}
 .pc-tbl th{font-weight:700;text-align:center}
 .pc-sign{margin-left:65mm;width:95mm;text-align:center}.pc-sign p{margin:0}
-.pc-grid{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;row-gap:5mm}.pc-grid .c{text-align:center}.pc-grid .c p{margin:0}.pc-grid .lb{text-align:left}
-.pc-grid.one{grid-template-columns:1fr}.pc-grid.one .c{margin-left:65mm;width:95mm}
+.pc-grid{display:grid;grid-template-columns:65mm 95mm;row-gap:5mm}.pc-grid .c{text-align:center}.pc-grid .c p{margin:0}.pc-grid .lb{text-align:left}.pc-grid.eq{grid-template-columns:1fr 1fr;column-gap:6mm}
+.pc-grid.one .c{grid-column:2}
 .pc-kv2{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;border:.6pt solid #000;padding:1.5mm 2mm;margin-top:2mm}.pc-kv2 p{margin:0}
 .pc-measure{position:fixed;left:-10000px;top:0;width:160mm;visibility:hidden}.pc-blk{display:flow-root}
 @media print{body.pc-printing{background:#fff!important}body.pc-printing>*:not(#rgPrintRoot){display:none!important}body.pc-printing #rgPrintRoot{position:static!important;left:auto!important}
@@ -9077,7 +9080,7 @@ function pcBlockHtml(b) {
     <tbody>${b.rows.map(r => `<tr>${r.map((c, i) => `<td style="text-align:${b.cols[i].al || 'left'}">${esc(pcN(c))}</td>`).join('')}</tr>`).join('')}
     ${b.foot.map(r => `<tr>${r.map(c => `<td colspan="${c.span || 1}" style="text-align:${c.al || 'left'}${c.b ? ';font-weight:700' : ''}">${esc(pcN(c.v))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   if (b.t === 'sign') return `<div class="pc-sign" style="${sb}">${b.lines.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div>`;
-  if (b.t === 'grid') return `<div class="pc-grid ${b.cells.length === 1 ? 'one' : ''}" style="padding-top:${b.sb || 12}pt">${b.cells.map(c => !c ? '<div></div>' : `<div class="c">${c.label ? `<p class="lb">${esc(pcN(c.label))}</p>` : ''}<p style="height:${c.label ? 12 : 4}mm"></p>${c.lines.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div>`).join('')}</div>`;
+  if (b.t === 'grid') return `<div class="pc-grid ${b.cells.length === 1 ? 'one' : ''} ${b.eq ? 'eq' : ''}" style="padding-top:${b.sb || 12}pt">${b.cells.map(c => !c ? '<div></div>' : `<div class="c">${c.label ? `<p class="lb">${esc(pcN(c.label))}</p>` : ''}<p style="height:${c.label ? 12 : 4}mm"></p>${c.lines.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div>`).join('')}</div>`;
   if (b.t === 'kv2') return `<div class="pc-kv2"><div>${b.left.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div><div>${b.right.map(l => `<p>${esc(pcN(l))}</p>`).join('')}</div></div>`;
   return '';
 }
@@ -9620,7 +9623,7 @@ async function pcDocx(docs, filename) {
         if (b.cells.length === 1 && b.cells[0]) { const c = b.cells[0]; return [...(c.label ? [para([run(c.label)], { ml: 65, sb: b.sb || 12 })] : []), ...signParas(['', ...c.lines], c.label ? 0 : (b.sb || 12))]; }
         const rows = []; for (let i = 0; i < b.cells.length; i += 2) rows.push(b.cells.slice(i, i + 2));
         return [para([], { sb: b.sb || 12 }), new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: NONE, rows: rows.map(pair => new D.TableRow({ children: [0, 1].map(j => { const c = pair[j];
-          return cell(c ? [...(c.label ? [para([run(c.label)])] : []), para([]), ...(c.label ? [para([])] : []), ...c.lines.map(l => para([run(l)], { al: 'center' }))] : [para([])], { w: 50, borders: NONE }); }) })) })];
+          return cell(c ? [...(c.label ? [para([run(c.label)])] : []), para([]), ...(c.label ? [para([])] : []), ...c.lines.map(l => para([run(l)], { al: 'center' }))] : [para([])], { w: b.eq ? 50 : j ? 59.375 : 40.625, borders: NONE }); }) })) })];
       }
       if (b.t === 'kv2') return [new D.Table({ width: { size: 100, type: D.WidthType.PERCENTAGE }, borders: { top: LN, bottom: LN, left: LN, right: LN, insideHorizontal: NB, insideVertical: NB },
         rows: [new D.TableRow({ children: [cell(b.left.map(l => para([run(l)])), { w: 50 }), cell(b.right.map(l => para([run(l)])), { w: 50 })] })] })];
