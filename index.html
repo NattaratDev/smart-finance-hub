@@ -9075,7 +9075,9 @@ function pcResolve(tpl, f, V) {
 /** ช่องลายมือชื่อ 1 คน: ความเห็น / (บรรทัดลงชื่อ) / (ชื่อ) / ตำแหน่ง · กล่องรูปแบบเดิมที่ยังมี who ใช้ข้อมูลข้อ 1.4 · ซ่อนถ้าว่าง → null */
 function pcSignCell(b, f, V, person) {
   const s = f.staff, p0 = b.who && !b.name && !b.pos ? person(b.who) : null;
-  const nm = p0 ? p0.name : pcFill(b.name, V), ps = p0 ? [p0.pos, b.who === 'approver' ? s.approver.acting : ''].filter(Boolean).join('\n') : pcFill(b.pos, V);
+  // ตำแหน่งว่าง + ชื่อเป็นตัวแปรบุคคลในข้อ 1.4 → ใช้ตำแหน่ง (และบรรทัดเพิ่มเติมของผู้อนุมัติ) จากข้อ 1.4
+  const autoPos = !p0 && !String(b.pos || '').trim() ? PC_SIGN_PRESETS.find(x => x[2] === String(b.name || '').trim())?.[3] : null;
+  const nm = p0 ? p0.name : pcFill(b.name, V), ps = p0 ? [p0.pos, b.who === 'approver' ? s.approver.acting : ''].filter(Boolean).join('\n') : pcFill(autoPos ?? b.pos, V);
   if (b.opt && pcBlankTxt(nm) && pcBlankTxt(ps)) return null;
   return { label: b.label ? pcFill(b.label, V) : '', gap: b.top ? 4 : 12, lines: [...(b.top ? [pcFill(b.top, V)] : []), ...pcSignerLines(nm, ps)] };
 }
@@ -9480,6 +9482,10 @@ function pcTplMenu(el) {
 }
 const PC_WHO_VARS = { officer: ['{เจ้าหน้าที่พัสดุ}', '{ตำแหน่งเจ้าหน้าที่พัสดุ}'], maker: ['{ผู้จัดทำ}', '{ตำแหน่งผู้จัดทำ}'], head: ['{หัวหน้าเจ้าหน้าที่พัสดุ}', '{ตำแหน่งหัวหน้าเจ้าหน้าที่พัสดุ}'],
   approver: ['{ชื่อผู้อนุมัติ}', '{ผู้อนุมัติ}\n{บรรทัดเพิ่มเติมผู้อนุมัติ}'], inspector: ['{ผู้ตรวจรับ}', '{ตำแหน่งผู้ตรวจรับ}'], drafter: ['{ผู้กำหนดร่าง}', '{ตำแหน่งผู้กำหนดร่าง}'] };
+/** ผู้ลงนามจากข้อ 1.4 สำหรับกล่องลายมือชื่อ: [ป้าย, key, ตัวแปรชื่อ, ตัวแปรตำแหน่ง] */
+const PC_SIGN_PRESETS = [['ผู้อนุมัติ (ผู้สั่งการ)', 'approver', ...PC_WHO_VARS.approver], ['เจ้าหน้าที่พัสดุ', 'officer', ...PC_WHO_VARS.officer], ['เจ้าหน้าที่ผู้จัดทำ', 'maker', ...PC_WHO_VARS.maker],
+  ['หัวหน้าเจ้าหน้าที่พัสดุ', 'head', ...PC_WHO_VARS.head], ...[1, 2, 3, 4, 5].map(n => [`ผ่าน (ขั้นที่ ${n})`, `via${n}`, `{ผ่าน${n}}`, `{ตำแหน่งผ่าน${n}}`]),
+  ['ผู้ตรวจรับพัสดุ', 'inspector', ...PC_WHO_VARS.inspector], ['ผู้จัดทำร่าง', 'drafter', ...PC_WHO_VARS.drafter]];
 /** แปลงบล็อกลงนามรูปแบบเดิม → กล่องลายมือชื่อ (ชื่อ/ตำแหน่งเป็นข้อความที่แก้ได้) */
 function pcTplNormalize(blocks) {
   return (blocks || []).flatMap(b => {
@@ -9520,6 +9526,7 @@ function pcTplBlockHtml(b, i, n) {
       <label class="inline-flex items-center gap-1" title="ไม่แสดงเมื่อชื่อและตำแหน่งว่าง เช่น ไม่มีผู้บริหารขั้นนี้"><input type="checkbox" class="rounded" data-bf="${i}|opt" ${b.opt ? 'checked' : ''}> ซ่อนถ้าว่าง</label>${pcTplSb(i, b.sb)}</div>
     ${txt('label', b.label, 'ความเห็นเหนือช่องลงนาม เช่น - เห็นชอบ / - อนุมัติ (ว่างได้)')}
     ${txt('top', b.top, 'บรรทัดลงชื่อ (ถ้ามี) เช่น ลงชื่อ ........ ผู้ตรวจรับพัสดุ')}
+    <select class="input !py-1.5 text-sm" data-bwho="${i}"><option value="">ใช้ข้อมูลผู้ลงนามจากข้อ 1.4 (ใส่ตัวแปรชื่อ/ตำแหน่งให้) …</option>${PC_SIGN_PRESETS.map(([l, k, n, p]) => `<option value="${k}" ${b.name === n && (b.pos === p || !b.pos) ? 'selected' : ''}>${l}</option>`).join('')}</select>
     ${txt('name', b.name, 'ชื่อ-สกุล (พิมพ์เอง หรือตัวแปร · ว่าง = เส้นจุด)')}
     <textarea class="input !py-1.5 text-sm" rows="2" data-bf="${i}|pos" data-tx placeholder="ตำแหน่ง (พิมพ์เอง · ขึ้นบรรทัดใหม่ได้)">${esc(b.pos || '')}</textarea>
     <div class="text-[11px] text-slate-400">"ซ้าย" ที่ตามด้วย "ขวา" จะอยู่แถวเดียวกัน · กล่องขวาทุกกล่องอยู่แนวเดียวกัน</div></div>`;
@@ -9553,6 +9560,8 @@ function pcTplRender(el) {
   const box = $('#pcForm', el);
   box.oninput = (e) => {
     if (e.target.matches('[data-tnote]')) { T.note = e.target.value; return; }
+    if (e.target.matches('[data-bwho]')) { const pr = PC_SIGN_PRESETS.find(x => x[1] === e.target.value); if (!pr) return;
+      Object.assign(T.docs[no][+e.target.dataset.bwho], { name: pr[2], pos: pr[3] }); pcTplRender(el); pcPreview(el); return; }
     const bf = e.target.dataset.bf; if (!bf) return; const [i, key] = bf.split('|'), b = T.docs[no][+i];
     const val = e.target.type === 'checkbox' ? e.target.checked : e.target.value, ks = key.split('.'), last = ks.pop();
     ks.reduce((o, k) => o[k], b)[last] = val;
