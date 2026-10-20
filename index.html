@@ -9779,11 +9779,15 @@ async function init() {
   route();
 }
 // ตรวจสถานะบัญชีซ้ำเมื่อกลับมาที่แท็บ (ทุก 5 นาที) – บัญชีที่ถูกปิดจะออกจากระบบอัตโนมัติ
+// วาดหน้าใหม่เฉพาะเมื่อสิทธิ์/เมนูเปลี่ยน → งานที่ค้างบนจอ (ฟอร์ม หน้าต่าง) ไม่หายเมื่อสลับแท็บกลับมา
+const navSignature = () => JSON.stringify([[...(State.perms || [])].sort(), (State.menus || []).map(m => `${m.menu_key}:${m.module?.status || ''}`)]);
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState !== 'visible' || !isLoggedIn() || Date.now() - State.lastSessionCheck < 5 * 60 * 1000) return;
+  const before = navSignature();
   const ok = await verifySession({ silent: true });
-  await reloadNavigation();
-  if (!ok) navigate('home'); else route();
+  if (!ok) { await reloadNavigation(); navigate('home'); return; }
+  await loadMenus();
+  if (navSignature() !== before) { renderChrome(); route(); }
 });
 window.addEventListener('DOMContentLoaded', init);
 </script>
