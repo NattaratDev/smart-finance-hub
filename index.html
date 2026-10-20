@@ -9116,7 +9116,7 @@ const PC_CSS = `
 .pc-kv2{display:grid;grid-template-columns:1fr 1fr;column-gap:6mm;margin-top:2mm}.pc-kv2 p{margin:0}
 .pc-measure{position:fixed;left:-10000px;top:0;width:160mm;visibility:hidden}.pc-blk{display:flow-root}
 @media print{body.pc-printing{background:#fff!important}body.pc-printing>*:not(#rgPrintRoot){display:none!important}body.pc-printing #rgPrintRoot{position:static!important;left:auto!important}
-  body.pc-printing .pc-page{page-break-after:always;break-after:page}body.pc-printing .pc-guide{display:none!important}}`;
+  body.pc-printing .pc-page{height:296.6mm;page-break-after:always;break-after:page}body.pc-printing .pc-page:last-child{page-break-after:auto;break-after:auto}body.pc-printing .pc-guide{display:none!important}}`;
 function pcEnsureCss() {
   if ($('#pc-style')) return;
   const st = document.createElement('style'); st.id = 'pc-style'; st.textContent = PC_CSS; document.head.appendChild(st);
@@ -9656,6 +9656,7 @@ function pcOutMenu(mode) {
 }
 async function pcOutput(docs, mode, filename) {
   pcEnsureCss();
+  try { await document.fonts.ready; } catch { /* เบราว์เซอร์เก่า */ }   // แบ่งหน้าหลังฟอนต์โหลดครบ → ไม่ตัดเนื้อหาหน้าถัดไปทิ้ง
   const root = rgPrintRoot(); root.innerHTML = docs.flatMap(d => pcPagesHtml(d, false)).join('');
   if (mode === 'pdf') { await sfhPagesToPdf($$('.pc-page', root), filename, 'portrait', await pcFontCSS()); root.innerHTML = ''; return; }
   let pg = $('#rg-page-size'); if (!pg) { pg = document.createElement('style'); pg.id = 'rg-page-size'; document.head.appendChild(pg); }
