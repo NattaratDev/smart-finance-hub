@@ -8784,7 +8784,7 @@ function pmDelete(el, s) {
    Router เรียก MODULES[module_key].render(section, moduleInfo, menu)
    เพิ่มโมดูลใหม่: เพิ่ม key + render ที่นี่ และเพิ่มแถวในตาราง modules / menus / permissions */
 /* ===== MODULE: procurement (งานจัดซื้อจัดจ้าง วงเงินไม่เกิน 5,000 บาท) =====
- * ซ้าย = กรอกข้อมูล · ขวา = ตัวอย่างหนังสือ A4 8 ฉบับ (ขอบ ซ้าย 3 ขวา 2 บน 1.5 ล่าง 2 ซม. · TH Sarabun New 16 pt)
+ * ซ้าย = กรอกข้อมูล · ขวา = ตัวอย่างหนังสือ A4 9 ฉบับ (ขอบ ซ้าย 3 ขวา 2 บน 1.5 ล่าง 2 ซม. · TH Sarabun New 16 pt)
  * บุคคลทั่วไป: เก็บข้อมูลในเบราว์เซอร์ (localStorage) · เจ้าหน้าที่: RPC sfh_proc_* (module_procurement.sql)
  * โครงการเก็บ 3 เดือนนับจากแก้ไขล่าสุด · ร้านค้าเก็บจนกว่าจะลบ
  * เอกสารทุกฉบับสร้างจาก "บล็อก" ชุดเดียว → ตัวอย่างบนจอ / พิมพ์ / PDF / Word ตรงกัน */
@@ -8801,6 +8801,7 @@ const PC_DOCS = [
   { no: 3, name: 'คำสั่งแต่งตั้งผู้ตรวจรับพัสดุ', short: 'คำสั่งผู้ตรวจรับ' }, { no: 4, name: 'รายงานผลการพิจารณา', short: 'รายงานผล' },
   { no: 5, name: 'ประกาศผู้ชนะการเสนอราคา', short: 'ประกาศผู้ชนะ' }, { no: 6, name: 'ใบสั่งซื้อ/สั่งจ้าง', short: 'ใบสั่ง' },
   { no: 7, name: 'ใบตรวจรับพัสดุ', short: 'ใบตรวจรับ' }, { no: 8, name: 'บันทึกขออนุมัติเบิกจ่ายเงิน', short: 'ส่งเบิกเงิน' },
+  { no: 9, name: 'ใบเบิกพัสดุ', short: 'ใบเบิกพัสดุ' },
 ];
 const Pc = { mode: 'local', projects: [], vendors: [], settings: {}, tpls: [], canTpl: false, tpl: null, f: null, id: null, seq: null, doc: 1, num: 'thai', garuda: undefined, timer: null, ro: null };
 const PX_MM = 96 / 25.4;
@@ -8820,10 +8821,10 @@ function pcBlank(s = Pc.settings) {
   const st = s.staff || {};
   return {
     kind: 'buy', subject: '', reason: '', source: '', budget: '', mprice: '', days: 7, place: '', fine: '0.10', invoice: '',
-    dates: { report: '', order: '', inspect: '', pay: '' }, nos: { memo: '', result: '', cmd1: '', cmd2: '', po: '', pay: '' },
+    dates: { report: '', order: '', inspect: '', pay: '', req: '' }, nos: { memo: '', result: '', cmd1: '', cmd2: '', po: '', pay: '', req: '' },
     org, vendor: { name: '', tax_id: '', address: '', phone: '' }, items: [{ name: '', qty: 1, unit: '', price: '' }], vat: 'incl', tplv: Pc.tpls[0]?.version || 0, tplo: {}, custom: {},
     staff: { maker: pcPerson(st.maker), officer: pcPerson(st.officer), head: pcPerson(st.head), via: (st.via || []).map(pcPerson), approver: { ...pcPerson(st.approver), acting: st.approver?.acting || '' },
-      drafter: pcPerson(st.drafter), inspector: pcPerson(st.inspector) },
+      drafter: pcPerson(st.drafter), inspector: pcPerson(st.inspector), requester: pcPerson(st.requester) },
   };
 }
 const pcNum = (v) => { const n = Number(String(v ?? '').replace(/,/g, '')); return isFinite(n) ? n : 0; };
@@ -8898,13 +8899,13 @@ const PC_VAR_GROUPS = [
   ['จำนวนเงิน', [['ยอดรวม', '1,234.00'], ['ยอดรวมตัวอักษร', 'หนึ่งพัน...บาทถ้วน'], ['ยอดก่อนภาษี', ''], ['ภาษีมูลค่าเพิ่ม', ''], ['วงเงิน', 'วงเงินงบประมาณ'], ['ราคากลาง', ''], ['ราคากลางตัวอักษร', ''], ['หมายเหตุVAT', '" ซึ่งรวมภาษีมูลค่าเพิ่มแล้ว" (ถ้ามี VAT)'], ['หมายเหตุVATประกาศ', 'ข้อความรวมภาษี/ค่าใช้จ่ายทั้งปวง (ถ้ามี VAT)']]],
   ['หน่วยงาน', [['ส่วนราชการ', 'เช่น กองคลัง'], ['หน่วยงาน', 'เช่น เทศบาลเมือง...'], ['ที่หนังสือ', 'อักษรย่อ/เลขประจำ เช่น สท 53101/'], ['โทรศัพท์', '"โทร. ..." (ว่างถ้าไม่มี)'], ['ที่อยู่หน่วยงาน', '']]],
   ['ผู้ขาย/ร้าน', [['ร้าน', 'ชื่อผู้ขาย/ผู้รับจ้าง'], ['ที่อยู่ร้าน', ''], ['โทรร้าน', ''], ['เลขผู้เสียภาษีร้าน', '']]],
-  ['วันที่ / เลขที่', [['วันที่รายงาน', ''], ['วันที่สั่ง', 'คำสั่ง/ประกาศ/ใบสั่ง'], ['วันที่ตรวจรับ', ''], ['วันที่ขอเบิก', ''], ['ปีคำสั่ง', 'พ.ศ. ของวันที่สั่ง'], ['เลขที่รายงานขอ', ''], ['เลขที่รายงานผล', ''], ['เลขที่ขอเบิก', ''], ['เลขที่คำสั่งผู้กำหนดร่าง', ''], ['เลขที่คำสั่งผู้ตรวจรับ', ''], ['เลขที่ใบสั่ง', '']]],
-  ['บุคคล', [['ชื่อผู้อนุมัติ', ''], ['ตำแหน่งผู้อนุมัติ', 'ตำแหน่งผู้อนุมัติ (ข้อ 1.4)'], ['ผู้อนุมัติ', 'ตำแหน่งผู้อนุมัติ เช่นเดียวกัน (ใช้หลัง "เรียน")'], ['เจ้าหน้าที่พัสดุ', ''], ['ตำแหน่งเจ้าหน้าที่พัสดุ', ''], ['หัวหน้าเจ้าหน้าที่พัสดุ', ''], ['ตำแหน่งหัวหน้าเจ้าหน้าที่พัสดุ', ''], ['ผู้จัดทำ', ''], ['ตำแหน่งผู้จัดทำ', ''], ['บรรทัดเพิ่มเติมผู้อนุมัติ', 'เช่น ปฏิบัติราชการแทน... (ข้อ 1.4)'], ['ผู้กำหนดร่าง', ''], ['ตำแหน่งผู้กำหนดร่าง', ''], ['ผู้ตรวจรับ', ''], ['ตำแหน่งผู้ตรวจรับ', '']]],
+  ['วันที่ / เลขที่', [['วันที่รายงาน', ''], ['วันที่สั่ง', 'คำสั่ง/ประกาศ/ใบสั่ง'], ['วันที่ตรวจรับ', ''], ['วันที่ขอเบิก', ''], ['ปีคำสั่ง', 'พ.ศ. ของวันที่สั่ง'], ['เลขที่รายงานขอ', ''], ['เลขที่รายงานผล', ''], ['เลขที่ขอเบิก', ''], ['เลขที่คำสั่งผู้กำหนดร่าง', ''], ['เลขที่คำสั่งผู้ตรวจรับ', ''], ['เลขที่ใบสั่ง', ''], ['เลขที่ใบเบิก', 'ใบเบิกพัสดุ'], ['วันที่เบิกพัสดุ', 'ว่าง = วันที่ตรวจรับ']]],
+  ['บุคคล', [['ชื่อผู้อนุมัติ', ''], ['ตำแหน่งผู้อนุมัติ', 'ตำแหน่งผู้อนุมัติ (ข้อ 1.4)'], ['ผู้อนุมัติ', 'ตำแหน่งผู้อนุมัติ เช่นเดียวกัน (ใช้หลัง "เรียน")'], ['เจ้าหน้าที่พัสดุ', ''], ['ตำแหน่งเจ้าหน้าที่พัสดุ', ''], ['หัวหน้าเจ้าหน้าที่พัสดุ', ''], ['ตำแหน่งหัวหน้าเจ้าหน้าที่พัสดุ', ''], ['ผู้จัดทำ', ''], ['ตำแหน่งผู้จัดทำ', ''], ['บรรทัดเพิ่มเติมผู้อนุมัติ', 'เช่น ปฏิบัติราชการแทน... (ข้อ 1.4)'], ['ผู้กำหนดร่าง', ''], ['ตำแหน่งผู้กำหนดร่าง', ''], ['ผู้ตรวจรับ', ''], ['ตำแหน่งผู้ตรวจรับ', ''], ['ผู้เบิก', 'ผู้เบิกพัสดุ (ข้อ 1.4)'], ['ตำแหน่งผู้เบิก', '']]],
   ['ผู้บริหารที่ผ่าน (ข้อ 1.4 ตามลำดับขั้น)', [1, 2, 3, 4, 5].flatMap(n => [[`ผ่าน${n}`, `ชื่อผู้บริหารที่ผ่าน ขั้นที่ ${n} (ว่างถ้าไม่มี)`], [`ตำแหน่งผ่าน${n}`, '']])],
 ];
 const PC_WHO = { officer: 'เจ้าหน้าที่พัสดุ', maker: 'เจ้าหน้าที่ผู้จัดทำ', head: 'หัวหน้าเจ้าหน้าที่พัสดุ', approver: 'ผู้อนุมัติ', inspector: 'ผู้ตรวจรับพัสดุ', drafter: 'ผู้จัดทำร่าง' };
 const PC_BLOCKS = { sign: 'ลายมือชื่อ (เพิ่มได้หลายกล่อง)', p: 'ย่อหน้าข้อความ', memo: 'หัวบันทึกข้อความ (ครุฑ 1.5 ซม.)', garuda: 'ตราครุฑ 3 ซม. (คำสั่ง/ประกาศ)', rule: 'เส้นคั่น', items: 'ตารางรายการ + ยอดรวม', evaltable: 'ตารางผลการพิจารณา',
-  po_head: 'กล่องข้อมูลผู้ขาย/หน่วยงาน (ใบสั่ง)', po_sign: 'ลายมือชื่อผู้สั่ง/ผู้รับใบสั่ง' };
+  po_head: 'กล่องข้อมูลผู้ขาย/หน่วยงาน (ใบสั่ง)', po_sign: 'ลายมือชื่อผู้สั่ง/ผู้รับใบสั่ง', reqtable: 'ตารางรายการขอเบิกพัสดุ' };
 function pcVars(f) {
   const k = pcK(f), tt = pcTotals(f), s = f.staff, d = f.dates, ph = pcPh;
   const budget = pcNum(f.budget) || tt.total, mprice = pcNum(f.mprice) || tt.total, due = d.order && +f.days ? calAddDays(d.order, +f.days) : '';
@@ -8921,7 +8922,8 @@ function pcVars(f) {
     'ร้าน': ph(f.vendor.name, 30), 'ที่อยู่ร้าน': ph(f.vendor.address, 30), 'โทรร้าน': ph(f.vendor.phone, 14), 'เลขผู้เสียภาษีร้าน': ph(f.vendor.tax_id, 14),
     'วันที่รายงาน': pcDate(d.report), 'วันที่สั่ง': pcDate(d.order), 'วันที่ตรวจรับ': pcDate(d.inspect), 'วันที่ขอเบิก': pcDate(d.pay), 'ปีคำสั่ง': String(pcBE(d.order)),
     'เลขที่รายงานขอ': ph(f.nos.memo, 8), 'เลขที่รายงานผล': ph(f.nos.result, 8), 'เลขที่ขอเบิก': ph(f.nos.pay, 8), 'เลขที่คำสั่งผู้กำหนดร่าง': ph(f.nos.cmd1, 6),
-    'เลขที่คำสั่งผู้ตรวจรับ': ph(f.nos.cmd2, 6), 'เลขที่ใบสั่ง': ph(f.nos.po, 10),
+    'เลขที่คำสั่งผู้ตรวจรับ': ph(f.nos.cmd2, 6), 'เลขที่ใบสั่ง': ph(f.nos.po, 10), 'เลขที่ใบเบิก': ph(f.nos.req, 10), 'วันที่เบิกพัสดุ': pcDate(d.req || d.inspect),
+    'ผู้เบิก': pcWho(s.requester), 'ตำแหน่งผู้เบิก': ph(s.requester?.pos, 20),
     'ผู้อนุมัติ': ph(s.approver.pos, 30), 'ตำแหน่งผู้อนุมัติ': ph(s.approver.pos, 30), 'ชื่อผู้อนุมัติ': pcWho(s.approver), 'เจ้าหน้าที่พัสดุ': pcWho(s.officer), 'ตำแหน่งเจ้าหน้าที่พัสดุ': ph(s.officer.pos, 20),
     'หัวหน้าเจ้าหน้าที่พัสดุ': pcWho(s.head), 'ผู้จัดทำ': pcWho(s.maker), 'ผู้กำหนดร่าง': pcWho(s.drafter), 'ตำแหน่งผู้กำหนดร่าง': ph(s.drafter.pos, 20),
     'ผู้ตรวจรับ': pcWho(s.inspector), 'ตำแหน่งผู้ตรวจรับ': ph(s.inspector.pos, 20),
@@ -8930,7 +8932,7 @@ function pcVars(f) {
   };
 }
 const PC_VAR_RE = /\{([^{}\n]{1,40})\}/g;
-/** ตัวแปรที่ template ของโครงการนี้ใช้ (ทั้ง 8 ฉบับ) → จำนวนขั้น "ผ่าน" ที่ต้องกรอก + ตัวแปรที่ไม่มีในข้อมูลโครงการ (ให้กรอกเอง) */
+/** ตัวแปรที่ template ของโครงการนี้ใช้ (ทั้ง 9 ฉบับ) → จำนวนขั้น "ผ่าน" ที่ต้องกรอก + ตัวแปรที่ไม่มีในข้อมูลโครงการ (ให้กรอกเอง) */
 function pcTplNeeds(f) {
   const known = new Set(PC_VAR_GROUPS.flatMap(g => g[1].map(x => x[0]))), used = [];
   const scan = (o) => Object.values(o || {}).forEach(v => { if (typeof v === 'string') v.replace(PC_VAR_RE, (m, n) => { used.push(n.trim()); return m; }); else if (v && typeof v === 'object') scan(v); });
@@ -9027,6 +9029,15 @@ const PC_TPL_DEFAULT = {
     { t: 'sign', col: 'L', label: '- เห็นควรอนุมัติ', name: '{ผ่าน2}', pos: '{ตำแหน่งผ่าน2}', opt: true },
     { t: 'sign', col: 'R', label: '- เห็นควรอนุมัติ', name: '{ผ่าน3}', pos: '{ตำแหน่งผ่าน3}', opt: true },
     { t: 'sign', col: 'R', label: '- อนุมัติ', name: '{ชื่อผู้อนุมัติ}', pos: '{ผู้อนุมัติ}\n{บรรทัดเพิ่มเติมผู้อนุมัติ}' }],
+  9: [pcTc('ใบเบิกพัสดุ', { sz: 20 }),
+    { t: 'p', text: 'เลขที่ {เลขที่ใบเบิก}', al: 'right', sb: 6 }, { t: 'p', text: 'วันที่ {วันที่เบิกพัสดุ}', al: 'right' },
+    pcTp('เรียน  หัวหน้าเจ้าหน้าที่', { ind: false, sb: 6 }),
+    pcTp('ข้าพเจ้า {ผู้เบิก} ตำแหน่ง {ตำแหน่งผู้เบิก} ขอเบิกพัสดุตามรายการข้างล่างนี้ เพื่อใช้ในราชการ ตาม{ใบสั่งซื้อ/ใบสั่งจ้าง}เลขที่ {เลขที่ใบสั่ง} ลงวันที่ {วันที่สั่ง}', { sb: 6 }),
+    { t: 'reqtable' },
+    { t: 'sign', col: 'R', top: 'ลงชื่อ .................................... ผู้เบิก', name: '{ผู้เบิก}', pos: '{ตำแหน่งผู้เบิก}', sb: 20 },
+    { t: 'sign', col: 'L', label: '- อนุมัติให้จ่ายได้', top: 'ลงชื่อ .................................... ผู้สั่งจ่าย', name: '{หัวหน้าเจ้าหน้าที่พัสดุ}', pos: '{ตำแหน่งหัวหน้าเจ้าหน้าที่พัสดุ}', sb: 14 },
+    { t: 'sign', col: 'R', label: '- ได้จ่ายพัสดุตามรายการข้างต้นแล้ว', top: 'ลงชื่อ .................................... ผู้จ่ายพัสดุ', name: '{เจ้าหน้าที่พัสดุ}', pos: '{ตำแหน่งเจ้าหน้าที่พัสดุ}\nวันที่ ..............................' },
+    { t: 'sign', col: 'R', label: '- ได้รับพัสดุตามรายการข้างต้นถูกต้องครบถ้วนแล้ว', top: 'ลงชื่อ .................................... ผู้รับพัสดุ', name: '', pos: 'ตำแหน่ง ..............................\nวันที่ ..............................', sb: 14 }],
 };
 const pcClone = (x) => JSON.parse(JSON.stringify(x));
 const pcTplLatest = () => Pc.tpls[0] || null;
@@ -9048,6 +9059,11 @@ function pcResolve(tpl, f, V) {
     else if (b.t === 'memo') out.push({ t: 'memo', unit: pcFill(b.unit, V).replace(/\s+$/, ''), no: pcFill(b.no, V), date: pcFill(b.date, V), subject: pcFill(b.subject, V) });
     else if (b.t === 'garuda' || b.t === 'rule') out.push({ t: b.t });
     else if (b.t === 'items') out.push(pcItemsTable(f));
+    else if (b.t === 'reqtable') { const its = f.items.filter(i => i.name || pcNum(i.price)), list = its.length ? its : [{ name: '', qty: '', unit: '' }];
+      out.push({ t: 'table', cols: [{ w: 8, al: 'center' }, { w: 44 }, { w: 10, al: 'center' }, { w: 13, al: 'center' }, { w: 13, al: 'center' }, { w: 12 }],
+        head: ['ลำดับ', 'รายการ', 'หน่วย', 'จำนวนที่ขอเบิก', 'จำนวนที่จ่าย', 'หมายเหตุ'],
+        rows: list.map((i, n) => [String(n + 1), pcPh(i.name, 30), i.unit || '', i.qty === '' ? '' : String(pcNum(i.qty)), i.qty === '' ? '' : String(pcNum(i.qty)), '']),
+        foot: [[{ v: `รวม ${its.length || 0} รายการ`, span: 6, al: 'right' }]] }); }
     else if (b.t === 'evaltable') out.push({ t: 'table', cols: [{ w: 8, al: 'center' }, { w: 34 }, { w: 26 }, { w: 16, al: 'right' }, { w: 16, al: 'right' }], head: ['ลำดับ', 'รายการพิจารณา', 'ผู้เสนอราคา', 'ราคาที่เสนอ', 'ราคาที่ตกลง'],
       rows: [['1', V['เรื่อง'], V['ร้าน'], pcMoney(tt.total), pcMoney(tt.total)]], foot: [[{ v: 'รวม', span: 4, al: 'right' }, { v: pcMoney(tt.total), al: 'right' }]] });
     else if (b.t === 'po_head') out.push({ t: 'kv2', left: [`${k.vendor}  ${V['ร้าน']}`, `ที่อยู่  ${V['ที่อยู่ร้าน']}`, `โทรศัพท์  ${V['โทรร้าน']}`, `เลขประจำตัวผู้เสียภาษี  ${V['เลขผู้เสียภาษีร้าน']}`],
@@ -9087,7 +9103,7 @@ function pcSignCell(b, f, V, person) {
 const pcBlankTxt = (x) => /^[.\s]*$/.test(x || '');
 /** บรรทัดลายมือชื่อ: (ชื่อ) + ตำแหน่ง (หลายบรรทัดได้) · ชื่อว่าง → เส้นจุดให้เขียนเอง */
 const pcSignerLines = (name, pos) => [`(${pcBlankTxt(name) ? '.'.repeat(36) : String(name).trim()})`, ...String(pos || '').split('\n').map(x => x.trim()).filter(Boolean)];
-/** เอกสาร 8 ฉบับของโครงการ · draft = template ที่กำลังแก้ (แสดงตัวอย่างระหว่างแก้) */
+/** เอกสาร 9 ฉบับของโครงการ · draft = template ที่กำลังแก้ (แสดงตัวอย่างระหว่างแก้) */
 function pcDocs(f, draft) {
   const V = pcVars(f);
   return PC_DOCS.map(d => ({ no: d.no, blocks: pcResolve(draft?.[d.no] || pcTplFor(f, d.no), f, V) }));
@@ -9167,7 +9183,7 @@ async function renderProcurement(el, mod) {
   pcEnsureCss();
   Pc.mode = isLoggedIn() && hasPermission('procurement.save') ? 'db' : 'local';
   el.innerHTML = pageHeader({ title: mod?.name || 'งานจัดซื้อจัดจ้าง (วงเงินไม่เกิน 5,000 บาท)', icon: 'shopping-cart', tone: 'blush',
-    subtitle: 'จัดทำเอกสารจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง 8 ฉบับ · ตัวอย่างหนังสือ A4 ตามหลักงานสารบรรณ (TH Sarabun New) · พิมพ์ / PDF / Word' })
+    subtitle: 'จัดทำเอกสารจัดซื้อจัดจ้างวิธีเฉพาะเจาะจง 9 ฉบับ · ตัวอย่างหนังสือ A4 ตามหลักงานสารบรรณ (TH Sarabun New) · พิมพ์ / PDF / Word' })
     + `<div id="pcRoot">${skeletonCards(1, 'h-96')}</div>`;
   refreshIcons();
   if (Pc.garuda === undefined) Pc.garuda = await fetch(PC_GARUDA, { method: 'HEAD', cache: 'no-store' }).then(r => r.ok && /image/.test(r.headers.get('content-type') || '')).catch(() => false);
@@ -9250,10 +9266,11 @@ function pcPersonRow(path, label, o = {}) {
 }
 function pcRenderForm(el) {
   const f = Pc.f, k = pcK(f), tt = pcTotals(f), s = f.staff, need = pcTplNeeds(f);
+  s.requester = s.requester || pcPerson();   // โครงการเก่าก่อนมีใบเบิกพัสดุ
   while (s.via.length < need.via) s.via.push(pcPerson());   // แสดงช่อง "ผ่าน" ครบตามที่ template ใช้
   f.custom = f.custom || {};
-  const names = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.name).concat(s.via.map(v => v.name)).filter(Boolean))];
-  const poss = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector'].map(x => s[x]?.pos).concat(s.via.map(v => v.pos)).filter(Boolean))];
+  const names = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector', 'requester'].map(x => s[x]?.name).concat(s.via.map(v => v.name)).filter(Boolean))];
+  const poss = [...new Set(['maker', 'officer', 'head', 'approver', 'drafter', 'inspector', 'requester'].map(x => s[x]?.pos).concat(s.via.map(v => v.pos)).filter(Boolean))];
   $('#pcForm', el).innerHTML = `
     <datalist id="pcNames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist><datalist id="pcPos">${poss.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
     <datalist id="pcVendors">${Pc.vendors.map(v => `<option value="${esc(v.name)}">`).join('')}</datalist>
@@ -9268,9 +9285,10 @@ function pcRenderForm(el) {
       ${pcIn('place', 'สถานที่ส่งมอบ', { span: true, ph: 'ว่าง = ชื่อหน่วยงาน' })}
       ${pcIn('dates.report', 'วันที่รายงานขอซื้อ/จ้าง', { type: 'date' })}${pcIn('dates.order', 'วันที่คำสั่ง/ประกาศ/ใบสั่ง', { type: 'date' })}
       ${pcIn('dates.inspect', 'วันที่ตรวจรับ', { type: 'date' })}${pcIn('dates.pay', 'วันที่ขอเบิกเงิน', { type: 'date' })}
+      ${pcIn('dates.req', 'วันที่ใบเบิกพัสดุ', { type: 'date', hint: 'ว่าง = ใช้วันที่ตรวจรับ' })}
       <div class="sm:col-span-2 -mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">${ic('info', 'w-3 h-3')} ไม่ระบุวันที่ → เอกสารแสดงเป็นเส้นจุดให้อัตโนมัติ</div>
       ${pcIn('nos.memo', 'เลขที่บันทึกรายงานขอซื้อ/จ้าง', { ph: 'เช่น 123' })}${pcIn('nos.result', 'เลขที่บันทึกรายงานผลการพิจารณา', { ph: 'เช่น 124' })}
-      ${pcIn('nos.pay', 'เลขที่บันทึกขอเบิกเงิน')}
+      ${pcIn('nos.pay', 'เลขที่บันทึกขอเบิกเงิน')}${pcIn('nos.req', 'ใบเบิกพัสดุ เลขที่')}
       ${pcIn('nos.cmd1', 'คำสั่งผู้กำหนดร่าง ที่', { ph: 'เช่น 45/2569', hint: 'รูปแบบ เลขที่/ปี พ.ศ. (กรอกแค่เลขที่ได้ ระบบต่อปีของวันที่สั่งให้)' })}${pcIn('nos.cmd2', 'คำสั่งผู้ตรวจรับ ที่', { ph: 'เช่น 46/2569', hint: 'รูปแบบ เลขที่/ปี พ.ศ.' })}
       ${pcIn('nos.po', `${k.order}เลขที่`, { ph: 'เช่น 12/2570' })}${pcIn('invoice', 'ใบส่งของ/ใบแจ้งหนี้ เลขที่')}`)}
     ${pcSec('org', 'building-2', '1.1 หน่วยงาน', `
@@ -9302,6 +9320,7 @@ function pcRenderForm(el) {
       ${s.via.length < 5 ? `<div class="sm:col-span-2"><button class="btn btn-ghost btn-sm" data-pc="addvia">${ic('plus', 'w-4 h-4')} เพิ่มผู้บริหารที่ต้องผ่าน</button></div>` : ''}
       ${pcPersonRow('staff.approver', 'ผู้อนุมัติ (ผู้สั่งการ)', { acting: true })}
       ${pcPersonRow('staff.drafter', `ผู้จัดทำร่าง${k.scope}`)}${pcPersonRow('staff.inspector', 'ผู้ตรวจรับพัสดุ')}
+      ${pcPersonRow('staff.requester', 'ผู้เบิกพัสดุ (ใบเบิกพัสดุ · หัวหน้าหน่วยงานที่ใช้พัสดุ)')}
       ${need.custom.length ? `<div class="sm:col-span-2 grid gap-2 sm:grid-cols-2 rounded-2xl border border-cream-200 bg-cream-50/40 p-2.5">
         <div class="sm:col-span-2 text-sm font-medium text-slate-600">${ic('pencil-line', 'w-4 h-4 inline')} ข้อความเพิ่มเติมตาม Template <span class="text-[11px] font-normal text-slate-400">· ตัวแปรที่ Template ใช้แต่ไม่มีในแบบฟอร์ม</span></div>
         ${need.custom.map(n => `<label class="grid gap-1"><span class="text-xs text-slate-500">{${esc(n)}}</span><input class="input" data-cv="${esc(n)}" value="${esc(f.custom[n] || '')}" placeholder="${esc(n)}"></label>`).join('')}</div>` : ''}`)}`;
@@ -9337,7 +9356,7 @@ function pcPreview(el) {
   const all = pcDocs(Pc.f, Pc.tpl?.docs), docs = all.filter(d => !Pc.doc || d.no === Pc.doc);
   box.innerHTML = docs.flatMap(d => pcPagesHtml(d, true).map(h => `<div class="pc-pwrap mx-auto shadow-sm" style="position:relative">${h}</div>`)).join('');
   $$('[data-pc-doc]', el).forEach(b => { const on = +b.dataset.pcDoc === Pc.doc; b.classList.toggle('bg-blush-100', on); b.classList.toggle('text-blush-600', on); b.classList.toggle('font-medium', on); b.classList.toggle('text-slate-500', !on); b.classList.toggle('hover:bg-slate-50', !on); });
-  const dn = $('[data-pc-docname]', el); if (dn) dn.textContent = Pc.doc ? `${Pc.doc}. ${PC_DOCS[Pc.doc - 1].name} · ${pcPaginate(all[Pc.doc - 1]).pages.length} หน้า` : 'แสดงทั้งชุด 8 ฉบับ';
+  const dn = $('[data-pc-docname]', el); if (dn) dn.textContent = Pc.doc ? `${Pc.doc}. ${PC_DOCS[Pc.doc - 1].name} · ${pcPaginate(all[Pc.doc - 1]).pages.length} หน้า` : `แสดงทั้งชุด ${PC_DOCS.length} ฉบับ`;
   const bar = $('[data-pc-tplbar]', el), lt = pcTplLatest(), old = !Pc.tpl && lt && (Pc.f.tplv || 0) !== lt.version;
   if (bar) { bar.classList.toggle('hidden', !old); bar.innerHTML = old ? `${ic('alert-triangle', 'w-4 h-4')} <span class="flex-1 min-w-0">โครงการนี้ใช้${Pc.f.tplv ? ` Template ฉบับที่ ${Pc.f.tplv}` : 'แบบมาตรฐานของระบบ'} · มี Template ฉบับล่าสุด (ฉบับที่ ${lt.version})${Object.keys(Pc.f.tplo || {}).length ? ' · ข้อความที่แก้เฉพาะโครงการยังคงอยู่' : ''}</span><button type="button" class="btn btn-primary btn-sm" data-pc="uselatest">${ic('refresh-cw', 'w-4 h-4')} ใช้ฉบับล่าสุด</button>` : ''; }
   const ti = $('[data-pc-tplinfo]', el); if (ti) { const v = Pc.f.tplv ? (pcTplVersion(Pc.f.tplv) ? Pc.f.tplv : pcTplLatest()?.version) : 0, ov = Object.keys(Pc.f.tplo || {});
@@ -9403,7 +9422,7 @@ async function pcSave(el) {
   pcUpdateTitle(el); pcDraftSave();
 }
 async function pcSaveDefaults(el) {
-  const s = Pc.f.staff, data = { org: { ...Pc.f.org }, staff: { maker: s.maker, officer: s.officer, head: s.head, via: s.via, approver: s.approver, drafter: s.drafter, inspector: s.inspector } };
+  const s = Pc.f.staff, data = { org: { ...Pc.f.org }, staff: { maker: s.maker, officer: s.officer, head: s.head, via: s.via, approver: s.approver, drafter: s.drafter, inspector: s.inspector, requester: s.requester } };
   if (!(await confirmModal({ title: 'บันทึกค่าเริ่มต้น', danger: false, icon: 'bookmark', confirmText: 'บันทึก', message: `ใช้ข้อมูลหน่วยงานและรายชื่อเจ้าหน้าที่/ผู้อนุมัติชุดนี้ เป็นค่าเริ่มต้นของโครงการใหม่${Pc.mode === 'db' ? 'ของทุกคนในหน่วยงาน' : 'ในเบราว์เซอร์นี้'}?` }))) return;
   if (Pc.mode === 'db') { const r = await rpcSecure('sfh_proc_settings_save', { p_data: data }, { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ', success: 'บันทึกค่าเริ่มต้นแล้ว' }); if (r.ok) Pc.settings = data; }
   else if (pcLocalSave({ ...pcLocal(), settings: data })) { Pc.settings = data; showToast('บันทึกค่าเริ่มต้นแล้ว', 'success'); }
@@ -9484,11 +9503,11 @@ function pcTplMenu(el) {
   });
 }
 const PC_WHO_VARS = { officer: ['{เจ้าหน้าที่พัสดุ}', '{ตำแหน่งเจ้าหน้าที่พัสดุ}'], maker: ['{ผู้จัดทำ}', '{ตำแหน่งผู้จัดทำ}'], head: ['{หัวหน้าเจ้าหน้าที่พัสดุ}', '{ตำแหน่งหัวหน้าเจ้าหน้าที่พัสดุ}'],
-  approver: ['{ชื่อผู้อนุมัติ}', '{ผู้อนุมัติ}\n{บรรทัดเพิ่มเติมผู้อนุมัติ}'], inspector: ['{ผู้ตรวจรับ}', '{ตำแหน่งผู้ตรวจรับ}'], drafter: ['{ผู้กำหนดร่าง}', '{ตำแหน่งผู้กำหนดร่าง}'] };
+  approver: ['{ชื่อผู้อนุมัติ}', '{ผู้อนุมัติ}\n{บรรทัดเพิ่มเติมผู้อนุมัติ}'], inspector: ['{ผู้ตรวจรับ}', '{ตำแหน่งผู้ตรวจรับ}'], drafter: ['{ผู้กำหนดร่าง}', '{ตำแหน่งผู้กำหนดร่าง}'], requester: ['{ผู้เบิก}', '{ตำแหน่งผู้เบิก}'] };
 /** ผู้ลงนามจากข้อ 1.4 สำหรับกล่องลายมือชื่อ: [ป้าย, key, ตัวแปรชื่อ, ตัวแปรตำแหน่ง] */
 const PC_SIGN_PRESETS = [['ผู้อนุมัติ (ผู้สั่งการ)', 'approver', ...PC_WHO_VARS.approver], ['เจ้าหน้าที่พัสดุ', 'officer', ...PC_WHO_VARS.officer], ['เจ้าหน้าที่ผู้จัดทำ', 'maker', ...PC_WHO_VARS.maker],
   ['หัวหน้าเจ้าหน้าที่พัสดุ', 'head', ...PC_WHO_VARS.head], ...[1, 2, 3, 4, 5].map(n => [`ผ่าน (ขั้นที่ ${n})`, `via${n}`, `{ผ่าน${n}}`, `{ตำแหน่งผ่าน${n}}`]),
-  ['ผู้ตรวจรับพัสดุ', 'inspector', ...PC_WHO_VARS.inspector], ['ผู้จัดทำร่าง', 'drafter', ...PC_WHO_VARS.drafter]];
+  ['ผู้ตรวจรับพัสดุ', 'inspector', ...PC_WHO_VARS.inspector], ['ผู้จัดทำร่าง', 'drafter', ...PC_WHO_VARS.drafter], ['ผู้เบิกพัสดุ', 'requester', ...PC_WHO_VARS.requester]];
 /** แปลงบล็อกลงนามรูปแบบเดิม → กล่องลายมือชื่อ (ชื่อ/ตำแหน่งเป็นข้อความที่แก้ได้) */
 function pcTplNormalize(blocks) {
   return (blocks || []).flatMap(b => {
