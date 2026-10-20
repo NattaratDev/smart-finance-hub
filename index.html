@@ -9052,8 +9052,8 @@ function pcResolve(tpl, f, V) {
       rows: [['1', V['เรื่อง'], V['ร้าน'], pcMoney(tt.total), pcMoney(tt.total)]], foot: [[{ v: 'รวม', span: 4, al: 'right' }, { v: pcMoney(tt.total), al: 'right' }]] });
     else if (b.t === 'po_head') out.push({ t: 'kv2', left: [`${k.vendor}  ${V['ร้าน']}`, `ที่อยู่  ${V['ที่อยู่ร้าน']}`, `โทรศัพท์  ${V['โทรร้าน']}`, `เลขประจำตัวผู้เสียภาษี  ${V['เลขผู้เสียภาษีร้าน']}`],
       right: [`${k.order}เลขที่  ${V['เลขที่ใบสั่ง']}`, `วันที่  ${V['วันที่สั่ง']}`, `ส่วนราชการ  ${pcPh([f.org.unit, f.org.main].filter(Boolean).join(' '), 24)}`, `ที่อยู่  ${V['ที่อยู่หน่วยงาน']}`, `โทรศัพท์  ${pcPh(f.org.phone, 14)}`] });
-    else if (b.t === 'po_sign') out.push({ t: 'grid', eq: true, sb: +b.sb || 14, cells: [{ label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้สั่ง${k.v}`, ...pcSignLines(s.approver, [s.approver.acting])] },
-      { label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้รับ${k.order}`, `(${f.vendor.name ? f.vendor.name : '.'.repeat(36)})`, k.vendor, 'วันที่ ' + '.'.repeat(30)] }] });
+    else if (b.t === 'po_sign') out.push({ t: 'grid', eq: true, sb: +b.sb || 14, cells: [{ label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้สั่ง${k.v}`, ...pcSignLines(s.approver, [s.approver.acting]), `วันที่ ${V['วันที่สั่ง']}`] },
+      { label: '', lines: ['ลงชื่อ ' + '.'.repeat(36) + ` ผู้รับ${k.order}`, `(${'.'.repeat(36)})`, k.vendor, 'วันที่ ' + '.'.repeat(30)] }] });   // ผู้รับใบสั่ง: เว้นว่างให้ลงชื่อเอง
     else if (b.t === 'sign') {   // กล่องลายมือชื่อที่อยู่ติดกัน: ซ้ายตามด้วยขวา = แถวเดียวกัน · ซ่อนถ้าว่าง
       const run = []; let j = idx; while (tpl[j]?.t === 'sign') run.push(tpl[j++]); skip = j - 1;
       const cells = run.map(x => ({ x, c: pcSignCell(x, f, V, person) })).filter(r => r.c);
