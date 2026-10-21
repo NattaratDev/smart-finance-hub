@@ -86,6 +86,8 @@
   body.mode-guest { --sbw: 15rem; }
   #sidebar { width: var(--sbw); }
   @media (min-width: 1024px) { #shell { padding-left: var(--sbw); } }
+  /* แถบรวมยอดลอยด้านล่าง (ค่าใช้จ่ายไปราชการ): จอที่มีแถบเมนูซ้าย ให้เริ่มหลังแถบเมนู และชิดล่าง (ไม่มีเมนูล่างแบบมือถือ) */
+  @media (min-width: 1024px) { .trv-mini { left: calc(var(--sbw) + 2rem) !important; right: 2rem !important; bottom: 1rem !important; } }
   .no-sidebar #sidebar, .auth-page #sidebar { display: none !important; }
   .no-sidebar #shell, .auth-page #shell { padding-left: 0 !important; }
   .no-sidebar #bottomNav, .auth-page #bottomNav, .auth-page #topbar, .auth-page #footer { display: none !important; }
@@ -4590,7 +4592,7 @@ function trvRenderCalc(body) {
     <div class="xl:col-span-2 xl:sticky xl:top-20"><div id="trvResult"></div></div>
   </div>
   <div class="xl:hidden h-16"></div>
-  <button type="button" data-trv-goto class="xl:hidden fixed inset-x-3 z-30 flex items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-brand-400 to-mint-400 text-white px-4 py-3 shadow-lg"
+  <button type="button" data-trv-goto class="trv-mini xl:hidden fixed inset-x-3 z-30 flex items-center justify-between gap-3 rounded-2xl bg-gradient-to-r from-brand-400 to-mint-400 text-white px-4 py-3 shadow-lg"
     style="bottom:calc(84px + env(safe-area-inset-bottom))"><span class="text-sm">รวมทั้งสิ้น</span><span class="font-semibold text-lg tabular-nums" id="trvMiniTotal"></span><span class="text-xs flex items-center gap-1">ดูผล ${ic('chevron-down', 'w-4 h-4')}</span></button>`;
   trvRenderResult(body);
 
