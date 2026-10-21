@@ -3535,7 +3535,7 @@ const CAL_ASSIGNERS = ['นายกเทศมนตรี', 'รองนา�
 const CAL_DOW = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
 const Cal = {
   tab: 'calendar', view: 'month', month: null, sel: null, types: new Set(Object.keys(CAL_TYPES)), person: '', mine: false,
-  data: { event: [], task: [], acting: [], absence: [] }, activity: [], users: null, docs: null,
+  data: { event: [], task: [], acting: [], absence: [] }, users: null, docs: null,
 };
 
 /* ---------- วันที่ (ใช้สตริง YYYY-MM-DD ตามเวลาเครื่อง) ---------- */
@@ -3627,10 +3627,9 @@ async function calLoad({ loader = true } = {}) {
     s => s.from('v_public_cal_tasks').select('*').order('due_date', { ascending: true, nullsFirst: false }).limit(5000),
     s => s.from('v_public_cal_acting').select('*').order('start_date', { ascending: false }).limit(5000),
     s => s.from('v_public_cal_absences').select('*').order('start_date', { ascending: false }).limit(5000),
-    s => s.from('v_public_cal_activity').select('*').order('created_at', { ascending: false }).limit(60),
   ], { loader, loaderText: 'กำลังโหลดปฏิทิน...', error: 'โหลดปฏิทินไม่สำเร็จ' });
   if (!r.ok) return false;
-  [Cal.data.event, Cal.data.task, Cal.data.acting, Cal.data.absence, Cal.activity] = r.data;
+  [Cal.data.event, Cal.data.task, Cal.data.acting, Cal.data.absence] = r.data;
   return true;
 }
 /** ผู้ใช้ในหน่วยงาน (ใช้เป็นรายการแนะนำชื่อ/ตำแหน่ง) */
@@ -3692,7 +3691,7 @@ function calItemCard(it) {
 async function renderCalendar(el, mod) {
   const now = new Date();
   Object.assign(Cal, { month: new Date(now.getFullYear(), now.getMonth(), 1), sel: calToday(), types: new Set(Object.keys(CAL_TYPES)), person: '', mine: false, users: null, docs: null });
-  if (['calendar', 'task', 'acting', 'absence', 'activity'].includes(pageState('tab'))) Cal.tab = pageState('tab');
+  if (['calendar', 'task', 'acting', 'absence'].includes(pageState('tab'))) Cal.tab = pageState('tab');
   if (['month', 'list'].includes(pageState('view'))) Cal.view = pageState('view');
   if (/^\d{4}-\d{2}$/.test(pageState('m') || '')) { const [yy, mm] = pageState('m').split('-').map(Number); Cal.month = new Date(yy, mm - 1, 1); if (calKey(Cal.month).slice(0, 7) !== Cal.sel.slice(0, 7)) Cal.sel = calKey(Cal.month); }
   el.innerHTML = pageHeader({
@@ -3700,7 +3699,7 @@ async function renderCalendar(el, mod) {
     subtitle: 'กิจกรรม งานที่ผู้บริหารมอบหมาย การรักษาราชการแทน และผู้ไม่อยู่ปฏิบัติงาน – ทุกคนติดตามความเคลื่อนไหวได้',
     actions: calCanCreate() ? `<button class="btn btn-primary" data-cal-add="">${ic('plus')} เพิ่มรายการ</button>` : '',
   }) + `<div class="flex gap-1 mb-5 p-1 rounded-2xl bg-white/70 border border-slate-100 w-full lg:w-auto lg:inline-flex overflow-x-auto" role="tablist">
-      ${[['calendar', 'calendar-days', 'ปฏิทิน'], ['task', 'clipboard-check', 'งานมอบหมาย'], ['acting', 'user-cog', 'รักษาราชการแทน'], ['absence', 'user-minus', 'ไม่อยู่ปฏิบัติงาน'], ['activity', 'activity', 'ความเคลื่อนไหว']]
+      ${[['calendar', 'calendar-days', 'ปฏิทิน'], ['task', 'clipboard-check', 'งานมอบหมาย'], ['acting', 'user-cog', 'รักษาราชการแทน'], ['absence', 'user-minus', 'ไม่อยู่ปฏิบัติงาน']]
         .map(([k, icon, label]) => `<button type="button" class="shrink-0 lg:flex-none inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm whitespace-nowrap transition" data-cal-tab="${k}" role="tab">${ic(icon, 'w-4 h-4')} <span>${label}</span><span data-cal-count="${k}"></span></button>`).join('')}
     </div>
     <div id="calBody">${skeletonCards(1, 'h-96')}</div>`;
@@ -3774,8 +3773,7 @@ function calRender(el) {
   if (Cal.tab === 'calendar') calRenderCalendar(body);
   else if (Cal.tab === 'task') calRenderTasks(body);
   else if (Cal.tab === 'acting') calRenderActing(body);
-  else if (Cal.tab === 'absence') calRenderAbsence(body);
-  else calRenderActivity(body);
+  else calRenderAbsence(body);
   refreshIcons();
 }
 
@@ -3957,13 +3955,6 @@ function calRenderAbsence(body) {
     const ra = a.end_date < today ? 1 : 0, rb = b.end_date < today ? 1 : 0;
     return ra - rb || (ra ? b.start_date.localeCompare(a.start_date) : a.start_date.localeCompare(b.start_date));
   }));
-}
-
-/* ---------- แท็บ: ความเคลื่อนไหว ---------- */
-function calRenderActivity(body) {
-  body.innerHTML = `<div class="card p-5"><h4 class="font-medium text-slate-700 mb-1">ความเคลื่อนไหวล่าสุด</h4>
-    <p class="text-xs text-slate-400 mb-2">การบันทึก แก้ไข และอัปเดตสถานะงาน 60 รายการล่าสุด</p>
-    <ul class="divide-y divide-slate-100">${Cal.activity.length ? Cal.activity.map(calActivityHtml).join('') : emptyState('ยังไม่มีความเคลื่อนไหว', 'activity')}</ul></div>`;
 }
 
 /* ---------- รายละเอียด ---------- */
@@ -4287,10 +4278,9 @@ async function calHomeWidget(box) {
     s => s.from('v_public_cal_absences').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('person_name'),
     s => s.from('v_public_cal_events').select('*').lte('start_date', in7).gte('end_date', today).order('start_date').order('start_time', { nullsFirst: true }).limit(8),
     s => s.from('v_public_cal_tasks').select('*').in('status', ['pending', 'in_progress']).order('due_date', { ascending: true, nullsFirst: false }).limit(200),
-    s => s.from('v_public_cal_activity').select('*').order('created_at', { ascending: false }).limit(5),
   ], { loader: false, silent: true });
   if (!r.ok) { box.innerHTML = ''; return; }
-  const [acting, absent, events, tasks, acts] = r.data;
+  const [acting, absent, events, tasks] = r.data;
   const pool = { acting, absence: absent, event: events, task: tasks };
   const overdue = tasks.filter(t => calTaskOverdue(t, today));
   const soon = tasks.filter(t => t.due_date && t.due_date >= today && t.due_date <= in3);
@@ -4320,16 +4310,13 @@ async function calHomeWidget(box) {
         ${block('user-minus', '#D95C8A', 'ไม่อยู่ปฏิบัติงาน (วันนี้ / 7 วันข้างหน้า)', absent.length || null, absent.length ? absent.map(a => li(`<span class="min-w-0 flex-1 text-sm"><span class="text-slate-700">${esc(a.person_name)}</span>
           <span class="badge bg-white text-blush-500 ml-1">${CAL_ABSENCE[a.kind]?.label || ''}${a.period !== 'full' ? ' · ' + CAL_PERIOD[a.period] : ''}</span>${whenBadge(a)}</span>`, `absence|${a.id}`)).join('') : empty('ทุกคนปฏิบัติงานตามปกติ'))}
       </div>
-      <div class="grid lg:grid-cols-3 gap-3">
+      <div class="grid md:grid-cols-2 gap-3">
         ${block('calendar-check', '#3B8FD4', 'กิจกรรม 7 วันข้างหน้า', events.length || null, events.length ? events.map(e => { const d = calDate(e.start_date < today ? today : e.start_date); return li(`<span class="w-10 shrink-0 text-center rounded-xl bg-white py-1"><span class="block text-[10px] text-slate-400">${TH_MONTHS_SHORT[d.getMonth()]}</span><span class="block text-base font-semibold text-brand-600 leading-none">${d.getDate()}</span></span>
           <span class="min-w-0 flex-1"><span class="block text-sm text-slate-700 line-clamp-2">${esc(e.title)}</span><span class="block text-xs text-slate-400 truncate">${esc([calEventTime(e), e.location].filter(Boolean).join(' · '))}</span></span>`, `event|${e.id}`); }).join('') : empty('ไม่มีกิจกรรมในสัปดาห์นี้'))}
         ${block('clipboard-check', '#E08A1E', 'งานมอบหมายที่ต้องติดตาม', tasks.length || null, `${mine.length ? `<li class="px-2 pb-1"><span class="badge bg-brand-100 text-brand-600">${ic('user-check', 'w-3 h-3')} งานของฉัน ${mine.length} งาน</span></li>` : ''}
           ${overdue.length ? `<li class="px-2 pb-1"><span class="badge bg-blush-100 text-blush-500">${ic('alarm-clock', 'w-3 h-3')} เลยกำหนด ${overdue.length} งาน</span></li>` : ''}
           ${showTasks.length ? showTasks.map(t => li(`<span class="min-w-0 flex-1"><span class="block text-sm text-slate-700 line-clamp-2">${esc(t.title)}</span>
             <span class="block text-xs ${calTaskOverdue(t, today) ? 'text-blush-500' : 'text-slate-400'} truncate">${t.due_date ? 'ส่ง ' + formatThaiDate(calDate(t.due_date)) : 'ไม่กำหนดวันส่ง'} · ${esc(calAssigneeNames(t))}</span></span>`, `task|${t.id}`)).join('') : empty('ไม่มีงานค้าง')}`)}
-        ${block('activity', '#3AA57C', 'ความเคลื่อนไหวล่าสุด', null, acts.length ? acts.map(a => `<li class="px-2 py-1.5 text-sm"><span class="text-slate-700"><b class="font-medium">${esc(a.by_name || 'ระบบ')}</b>
-          ${{ create: 'บันทึก', update: 'แก้ไข', delete: 'ลบ', status: 'อัปเดตสถานะ', comment: 'บันทึกความคืบหน้า' }[a.action] || ''} ${esc(a.title)}</span>${a.action === 'status' && a.to_status ? ` ${calStatusBadge(a.to_status)}` : ''}
-          <span class="block text-xs text-slate-400">${timeAgo(a.created_at)}</span></li>`).join('') : empty('ยังไม่มีความเคลื่อนไหว'))}
       </div>
     </div></section>`;
   refreshIcons();
