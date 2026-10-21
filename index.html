@@ -1489,7 +1489,6 @@ async function renderHome(el) {
    ===================================================================== */
 function renderLogin(el) {
   const s = State.settings;
-  const demo = [['superadmin', 'admin1234', 'Super Admin'], ['orgadmin', 'org1234', 'Organization Admin'], ['staff1', 'staff1234', 'เจ้าหน้าที่ (ทะเบียนคุม+สลิป)'], ['staff2', 'staff1234', 'เจ้าหน้าที่ (ทะเบียนคุม)']];
   el.innerHTML = `<div class="min-h-[calc(100vh-4rem)] grid place-items-center py-4">
     <div class="w-full max-w-md">
       <button class="btn btn-ghost mb-4" data-nav="home">${ic('arrow-left')} กลับหน้าแรก</button>
@@ -1505,18 +1504,13 @@ function renderLogin(el) {
           <form id="loginForm" class="space-y-4" autocomplete="on" novalidate>
             <div><label class="label" for="lgUser">ชื่อผู้ใช้</label>
               <div class="relative"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('user-round')}</span>
-              <input id="lgUser" name="username" class="input" style="padding-left:2.5rem" placeholder="เช่น staff1" autocomplete="username" autocapitalize="none" required></div></div>
+              <input id="lgUser" name="username" class="input" style="padding-left:2.5rem" placeholder="ชื่อผู้ใช้" autocomplete="username" autocapitalize="none" required></div></div>
             <div><label class="label" for="lgPass">รหัสผ่าน</label>
               <div class="relative"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${ic('lock-keyhole')}</span>
               <input id="lgPass" name="password" type="password" class="input" style="padding-left:2.5rem;padding-right:2.75rem" placeholder="••••••••" autocomplete="current-password" required>
               <button type="button" id="togglePwd" class="absolute right-1.5 top-1/2 -translate-y-1/2 btn-icon" aria-label="แสดง/ซ่อนรหัสผ่าน">${ic('eye', 'w-[18px] h-[18px]')}</button></div></div>
             <button class="btn btn-primary w-full !py-3 !text-base" type="submit">${ic('log-in', 'w-5 h-5')} เข้าสู่ระบบ</button>
           </form>
-          <details class="mt-5 rounded-2xl bg-cream-50 border border-cream-200 px-4 py-3">
-            <summary class="text-sm text-cream-600 font-medium flex items-center gap-2">${ic('graduation-cap')} บัญชีทดสอบ (สำหรับการสอน)</summary>
-            <div class="grid gap-2 mt-3">${demo.map(([u, p, r]) => `<button type="button" class="flex items-center justify-between gap-2 rounded-xl bg-white px-3 py-2 text-sm hover:bg-brand-50 transition" data-fill="${u}|${p}">
-              <span class="font-medium text-slate-700">${u}</span><span class="text-xs text-slate-400 truncate">${r}</span></button>`).join('')}</div>
-          </details>
         </div>
       </div>
     </div></div>`;
@@ -1529,10 +1523,7 @@ function renderLogin(el) {
     e.currentTarget.innerHTML = ic(show ? 'eye-off' : 'eye', 'w-[18px] h-[18px]');
     refreshIcons();
   };
-  el.onclick = (e) => {
-    const f = e.target.closest('[data-fill]');
-    if (f) { const [u, p] = f.dataset.fill.split('|'); form.username.value = u; pass.value = p; errBox.classList.add('hidden'); }
-  };
+  el.onclick = null;
   form.onsubmit = async (e) => {
     e.preventDefault();
     const username = form.username.value.trim(), password = pass.value;
