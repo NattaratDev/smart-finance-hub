@@ -1614,14 +1614,58 @@ function newsListItem(a) {
 }
 async function renderDashboard(el) {
   if (!requirePermission('dashboard.view')) return;
-  el.innerHTML = greetingBanner() + `<div id="dashCal"></div><div id="dashBody"><div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${skeletonCards(4)}</div></div>`;
+  el.innerHTML = greetingBanner() + `<div id="dashIns"></div><div id="dashCal"></div><div id="dashBody"><div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${skeletonCards(4)}</div></div>`;
   refreshIcons();
+  dashInsAlerts($('#dashIns', el));   // แจ้งเตือนกรมธรรม์/ภาษีรถ (โหลดแยก ไม่รอ)
   calHomeWidget($('#dashCal', el));   // ความเคลื่อนไหวกองคลัง (โหลดแยก ไม่รอ)
   const body = $('#dashBody', el);
   if (isSuperAdmin()) await dashSuper(body);
   else if (isOrgAdmin()) await dashOrg(body);
   else await dashStaff(body);
   el.onclick = (e) => { const n = e.target.closest('[data-news]'); if (n && el._news) openNewsDetail(el._news.find(a => a.id === n.dataset.news)); };
+  refreshIcons();
+}
+/** แดชบอร์ด: แจ้งเตือนกรมธรรม์/ภาษีรถใกล้หมดอายุ (เฉพาะผู้มีสิทธิ์ทะเบียนคุมครุภัณฑ์)
+ *  ใช้เกณฑ์เดียวกับแท็บ "ใกล้หมดอายุ": กรมธรรม์หมด/จะหมดใน INS_SOON_DAYS วันและยังไม่ต่ออายุ · ภาษีรถขาดต่อ/สิ้นอายุใน INS_TAX_SOON_DAYS วัน */
+async function dashInsAlerts(box) {
+  if (!box || !hasPermission('register.manage_insurance')) return;
+  const r = await db(s => s.rpc('sfh_ins_list', tk()), { loader: false, silent: true });
+  if (!r.ok || !r.data) return;
+  Object.assign(Is, { assets: r.data.assets || [], policies: r.data.policies || [], claims: r.data.claims || [], taxes: r.data.taxes || [], fuel: r.data.fuel || [] });
+  const pol = insAlertRows(), tax = insTaxAlertRows();
+  const link = '#/register?v=insurance&tab=alerts';
+  if (!pol.length && !tax.length) {
+    box.innerHTML = Is.assets.length ? `<div class="card p-3 mb-5 flex items-center gap-2 text-sm text-mint-600">${ic('shield-check', 'w-4 h-4')} กรมธรรม์และภาษีรถทุกคันเป็นปัจจุบัน ไม่มีรายการใกล้หมดอายุ</div>` : '';
+    refreshIcons(); return;
+  }
+  const n = (rows, ...st) => rows.filter(x => st.includes(x.s)).length;
+  const polDays = (p, st) => p ? (st === 'soon' ? ` (อีก ${insDaysLeft(p)} วัน)` : st === 'expired' ? ` (${-insDaysLeft(p)} วันแล้ว)` : '') : '';
+  const taxDays = (t, st) => t ? (st === 'soon' ? ` (อีก ${calDaysBetween(calToday(), t.due_date)} วัน)` : ` (${-calDaysBetween(calToday(), t.due_date)} วันแล้ว)`) : '';
+  const item = (icon, cls, title, sub, badge) => `<li><a href="${link}" class="flex items-center gap-3 rounded-xl px-2 py-2 hover:bg-white/80 transition">
+      <span class="w-9 h-9 rounded-xl grid place-items-center ${cls} shrink-0">${ic(icon, 'w-4 h-4')}</span>
+      <span class="min-w-0 flex-1"><span class="block text-sm text-slate-700 truncate">${esc(title)}</span><span class="block text-xs text-slate-400 truncate">${sub}</span></span>
+      <span class="shrink-0 hidden sm:inline">${badge}</span></a></li>`;
+  const more = (rows) => rows.length > 5 ? `<li class="px-2 pt-1 text-xs text-slate-400">และอีก ${rows.length - 5} รายการ</li>` : '';
+  const chip = (cnt, cls, label) => cnt ? `<span class="badge ${cls}">${label} ${cnt}</span>` : '';
+  box.innerHTML = `<section class="card p-4 md:p-5 mb-5 border-cream-200" style="background:linear-gradient(135deg,#FFF8E6,#fff)">
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+      <div><h3 class="section-title">${ic('alarm-clock', 'w-5 h-5 text-cream-500')} แจ้งเตือนกรมธรรม์และภาษีรถ</h3>
+        <div class="flex flex-wrap gap-1.5 mt-1">${chip(n(pol, 'expired'), 'bg-blush-100 text-blush-500', 'กรมธรรม์หมดอายุ')}${chip(n(pol, 'soon'), 'bg-cream-100 text-cream-600', 'กรมธรรม์ใกล้หมด')}
+          ${chip(n(pol, 'upcoming', 'none'), 'bg-slate-100 text-slate-500', 'ไม่มีความคุ้มครองวันนี้')}${chip(n(tax, 'expired'), 'bg-blush-100 text-blush-500', 'ภาษีขาดต่อ')}
+          ${chip(n(tax, 'soon'), 'bg-cream-100 text-cream-600', 'ภาษีใกล้ครบกำหนด')}${chip(n(tax, 'none'), 'bg-slate-100 text-slate-500', 'ยังไม่มีข้อมูลภาษี')}</div></div>
+      <a href="${link}" class="btn btn-soft btn-sm">ดูทั้งหมด / ต่ออายุ ${ic('arrow-right', 'w-4 h-4')}</a>
+    </div>
+    <div class="grid md:grid-cols-2 gap-3">
+      <div class="rounded-2xl bg-white/70 p-2"><h4 class="text-sm font-medium text-slate-600 px-2 pb-1">${ic('shield-alert', 'w-4 h-4 inline text-cream-500')} กรมธรรม์ (หมด/จะหมดใน ${INS_SOON_DAYS} วัน)</h4>
+        <ul>${pol.length ? pol.slice(0, 5).map(({ a, p, s }) => item(INS_TYPE[a.asset_type]?.icon || 'box', INS_STATE[s]?.cls || 'bg-slate-100 text-slate-500', insAssetLabel(a),
+          p ? `${esc(INS_POLICY_SHORT[p.policy_type] || '')} · สิ้นสุด ${formatThaiDate(calDate(p.end_date))}` : 'ยังไม่มีกรมธรรม์',
+          s === 'none' ? '<span class="badge bg-slate-100 text-slate-500">ไม่มีกรมธรรม์</span>' : insStateBadge(s, polDays(p, s)))).join('') + more(pol)
+          : '<li class="px-2 py-3 text-sm text-slate-400">ไม่มีกรมธรรม์ที่ต้องดำเนินการ</li>'}</ul></div>
+      <div class="rounded-2xl bg-white/70 p-2"><h4 class="text-sm font-medium text-slate-600 px-2 pb-1">${ic('receipt', 'w-4 h-4 inline text-cream-500')} ภาษีรถประจำปี (ขาดต่อ/สิ้นอายุใน ${INS_TAX_SOON_DAYS} วัน)</h4>
+        <ul>${tax.length ? tax.slice(0, 5).map(({ a, t, s }) => item('car', INS_TAX_STATE[s].cls, insAssetLabel(a),
+          t ? `ภาษีสิ้นอายุ ${formatThaiDate(calDate(t.due_date))}` : 'ยังไม่มีข้อมูลภาษีในระบบ', insTaxBadge(s, taxDays(t, s)))).join('') + more(tax)
+          : '<li class="px-2 py-3 text-sm text-slate-400">ไม่มีรถที่ต้องต่อภาษี</li>'}</ul></div>
+    </div></section>`;
   refreshIcons();
 }
 async function dashSuper(body) {
