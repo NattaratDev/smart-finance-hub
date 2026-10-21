@@ -4797,6 +4797,17 @@ function trvRenderResult(body) {
 }
 
 /* ---------- พิมพ์สรุป (A4) ---------- */
+/** รายละเอียดการคำนวณ: รวมผู้เดินทางที่เบิกเท่ากันทุกรายการ (และวิธีคิดเหมือนกัน) เป็นชุดเดียว · เบิกไม่เท่า = แยกชุด (ลำดับตามคนแรกของชุด) */
+function trvDetailGroups(rows, cols) {
+  const groups = new Map();
+  rows.forEach(x => {
+    const lines = [...x.lines.allowance.map(l => 'เบี้ยเลี้ยง: ' + l), ...x.lines.lodging.map(l => 'ที่พัก: ' + l), ...x.lines.vehicle.map(l => 'พาหนะ: ' + l), ...(x.reg ? [`ค่าลงทะเบียน: ${trvMoney(x.reg)} บาท`] : []), ...x.lines.other.map(l => 'อื่น ๆ: ' + l)];
+    const key = JSON.stringify([x.group.name, cols.map(([k]) => +x[k] || 0), lines]);
+    if (!groups.has(key)) groups.set(key, { items: [], lines });
+    groups.get(key).items.push(x);
+  });
+  return [...groups.values()];
+}
 /** สร้างหน้าสรุป A4 ใน #trvPrintRoot (ใช้ทั้งพิมพ์และดาวน์โหลด PDF) */
 function trvBuildSummary() {
   const t = Trv.trip, r = trvCompute(t); if (!r) return null;
@@ -4812,8 +4823,8 @@ function trvBuildSummary() {
       .trv-page .info{display:grid;grid-template-columns:auto 1fr;gap:.6mm 4mm;margin-bottom:3mm}.trv-page .info b{font-weight:500;color:#374151}
       .trv-page .tot td{font-weight:600;background:#f8fafc}.trv-page ul{margin:.5mm 0 0;padding-left:5mm;color:#374151}
       .trv-page .foot{margin-top:4mm;font-size:10.5px;color:#6b7280;border-top:.5px solid #d1d5db;padding-top:1.5mm}
-      @media print{body.trv-printing{background:#fff!important;padding:0!important}body.trv-printing>*:not(#trvPrintRoot){display:none!important}
-        body.trv-printing #trvPrintRoot{position:static;left:auto}@page{size:A4 portrait;margin:0}}`;
+      @media print{body.trv-printing{background:#fff!important;padding:0!important;min-height:0!important}body.trv-printing>*:not(#trvPrintRoot){display:none!important}
+        body.trv-printing #trvPrintRoot{position:static;left:auto}body.trv-printing .trv-page{width:auto;min-height:0;padding:0}@page{size:A4 portrait;margin:14mm 14mm 12mm}}`;
     document.head.appendChild(st);
   }
   let root = $('#trvPrintRoot');
@@ -4834,8 +4845,8 @@ function trvBuildSummary() {
     </tbody></table>
     <div style="text-align:right;margin-bottom:3mm">(${esc(bahtText(r.totals.total))})</div>
     <div style="font-weight:600;margin-bottom:1mm">รายละเอียดการคำนวณ</div>
-    ${r.rows.map((x, i) => `<div style="margin-bottom:2mm;break-inside:avoid"><div><b style="font-weight:500">${i + 1}. ${esc(x.name)}</b> (${esc(x.group.name)})</div>
-      <ul>${[...x.lines.allowance.map(l => 'เบี้ยเลี้ยง: ' + l), ...x.lines.lodging.map(l => 'ที่พัก: ' + l), ...x.lines.vehicle.map(l => 'พาหนะ: ' + l), ...(x.reg ? [`ค่าลงทะเบียน: ${trvMoney(x.reg)} บาท`] : []), ...x.lines.other.map(l => 'อื่น ๆ: ' + l)].map(l => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('')}
+    ${trvDetailGroups(r.rows, cols).map((g, i) => `<div style="margin-bottom:2mm;break-inside:avoid"><div><b style="font-weight:500">${i + 1}. ${g.items.map(x => esc(x.name)).join(', ')}</b> (${esc(g.items[0].group.name)})${g.items.length > 1 ? ` <span style="color:#4b5563">· ${g.items.length} คน คนละ ${trvMoney(g.items[0].total)} บาท รวม ${trvMoney(g.items[0].total * g.items.length)} บาท</span>` : ''}</div>
+      <ul>${g.lines.map(l => `<li>${esc(l)}</li>`).join('')}</ul></div>`).join('')}
     <div class="foot">อ้างอิง: ${esc(r.set.reference || r.set.name)} · พิมพ์เมื่อ ${formatThaiDate(new Date(), { time: true })} · เอกสารนี้เป็นการประมาณการ ไม่ใช่แบบฟอร์มเบิกจ่าย</div>
   </div>`;
   return root;
@@ -4885,15 +4896,24 @@ async function trvDownloadPdf() {
     if (document.fonts?.ready) await document.fonts.ready;
     const page = $('.trv-page', root);
     root.style.cssText = 'position:fixed;left:0;top:0;z-index:-1;';   // ต้องอยู่ในจอขณะแปลงเป็นภาพ
+    const M = { t: 14, r: 14, b: 12, l: 14 }, W = 210 - M.l - M.r, CH = 297 - M.t - M.b;   // ขอบกระดาษทุกหน้า (มม.)
+    page.style.cssText = `width:${W}mm;min-height:0;padding:0`;   // จับภาพเฉพาะเนื้อหา แล้วใส่ขอบเองทุกหน้า
+    const top0 = page.getBoundingClientRect().top, pxW = page.getBoundingClientRect().width, mmPx = W / pxW;
+    // จุดตัดหน้าที่ปลอดภัย: ระหว่างบล็อก/แถวตาราง/บรรทัดรายการ (ไม่ตัดกลางตัวอักษร)
+    const cuts = [...new Set($$('.trv-page > *, .trv-page tr, .trv-page li, .trv-page > div > div', root).map(e => Math.round(e.getBoundingClientRect().top - top0)))].filter(y => y > 0).sort((a, b) => a - b);
     const fontEmbedCSS = await trvFontCSS();
     const canvas = await window.htmlToImage.toCanvas(page, { pixelRatio: 2, backgroundColor: '#ffffff', ...(fontEmbedCSS ? { fontEmbedCSS } : {}) });
     const pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
-    const W = 210, H = 297, imgH = canvas.height * W / canvas.width;
-    const img = canvas.toDataURL('image/jpeg', 0.92);
-    // เนื้อหายาวเกิน 1 หน้า → เลื่อนภาพขึ้นทีละหน้า
-    for (let y = 0, i = 0; y < imgH - 0.5; y += H, i++) {
+    const scale = canvas.width / pxW, totalPx = canvas.height / scale, limitPx = CH / mmPx;
+    for (let start = 0, i = 0; start < totalPx - 1; i++) {
+      let end = start + limitPx;
+      if (end < totalPx) { const c = cuts.filter(y => y > start + 20 && y <= end).pop(); if (c) end = c; } else end = totalPx;
+      const part = document.createElement('canvas'); part.width = canvas.width; part.height = Math.ceil((end - start) * scale);
+      const ctx = part.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, part.width, part.height);
+      ctx.drawImage(canvas, 0, Math.floor(start * scale), canvas.width, part.height, 0, 0, canvas.width, part.height);
       if (i) pdf.addPage();
-      pdf.addImage(img, 'JPEG', 0, -y, W, imgH);
+      pdf.addImage(part.toDataURL('image/jpeg', 0.92), 'JPEG', M.l, M.t, W, (end - start) * mmPx);
+      start = end;
     }
     const t = Trv.trip, d = trvParse(t.dep);
     pdf.save(`สรุปค่าใช้จ่าย${t.mode === 'training' ? 'ไปฝึกอบรม' : 'ไปราชการ'}_${d ? calKey(d) : calToday()}.pdf`);
@@ -4902,7 +4922,7 @@ async function trvDownloadPdf() {
     console.error('[SFH] pdf', e);
     showToast(e.message || 'สร้างไฟล์ PDF ไม่สำเร็จ', 'error');
   } finally {
-    root.style.cssText = ''; root.innerHTML = '';
+    root.style.cssText = ''; root.innerHTML = '';   // หน้าใหม่ทุกครั้งที่สร้าง → ไม่ต้องคืนค่า style ของ .trv-page
     showLoader(false);
   }
 }
