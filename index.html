@@ -688,19 +688,35 @@ async function compressImage(file, { maxSide = 1200, quality = 0.7 } = {}) {
     previewUrl: URL.createObjectURL(blob),
   };
 }
+/** เรียก Edge Function "sfh-storage" (ตรวจ session token + สิทธิ์ฝั่งเซิร์ฟเวอร์) – หน้าเว็บไม่มีสิทธิ์เขียน Storage ตรง */
+async function storageFn(body) {
+  const { data, error } = await sb.functions.invoke('sfh-storage', { body: { ...body, token: State.session?.token || null } });
+  if (error) {
+    let msg = error.message || 'Storage error';
+    try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return data;
+}
+/** ขอลิงก์อัปโหลดครั้งเดียว แล้วอัปโหลดไฟล์ → { path, url } (โยน Error ถ้าไม่สำเร็จ) */
+async function storageUpload(blob, folder, ext, contentType) {
+  const { path, token } = await storageFn({ action: 'sign', folder, ext });
+  const { error } = await sb.storage.from(STORAGE_BUCKET).uploadToSignedUrl(path, token, blob, { contentType: contentType || blob.type || 'application/octet-stream', cacheControl: '3600' });
+  if (error) throw error;
+  return { path, url: sb.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl };
+}
 /** อัปโหลดไฟล์ไป Storage bucket sfh-files → { ok, path, url } */
 async function uploadFile(blob, folder = 'uploads', ext = 'webp') {
-  const path = `${folder}/${toInputDate()}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const r = await db(s => s.storage.from(STORAGE_BUCKET).upload(path, blob, { contentType: blob.type || 'image/webp', cacheControl: '3600', upsert: false }),
+  const r = await db(async () => ({ data: await storageUpload(blob, folder, ext, blob.type || 'image/webp') }),
     { loaderText: 'กำลังอัปโหลดไฟล์...', error: 'อัปโหลดไฟล์ไม่สำเร็จ' });
   if (!r.ok) return { ok: false };
-  const { data } = sb.storage.from(STORAGE_BUCKET).getPublicUrl(path);
-  return { ok: true, path, url: data.publicUrl };
+  return { ok: true, path: r.data.path, url: r.data.url };
 }
+/** ลบไฟล์ใน Storage (เซิร์ฟเวอร์ลบเฉพาะไฟล์ที่ไม่มีข้อมูลใดอ้างอิงแล้ว) */
 async function deleteFile(path) {
-  if (!path || !sb) return;
-  try { const { error } = await sb.storage.from(STORAGE_BUCKET).remove([path]); if (error) console.warn('[SFH] remove file', error); }
-  catch (e) { console.warn('[SFH] remove file', e); }
+  const paths = (Array.isArray(path) ? path : [path]).filter(Boolean);
+  if (!paths.length || !sb || !State.session?.token) return;
+  try { await storageFn({ action: 'delete', paths }); } catch (e) { console.warn('[SFH] remove file', e); }
 }
 /** รูปโหลดไม่ได้ → กล่องข้อความแทน (ใช้กับ onerror) */
 function imgError(img) {
@@ -3051,20 +3067,11 @@ async function sarabanLoad() {
     }));
     return true;
   }
-  const u = currentUser();
-  let q = sb.from('saraban_documents')
-    .select('*, saraban_categories(*), organizations(name, short_name), saraban_files(id, file_name, file_path, file_url, mime_type, file_size, sort_order)')
-    .order('created_at', { ascending: false });
-  if (!isSuperAdmin()) {
-    const o = u.org_id;
-    q = hasPermission('saraban.view_all')
-      ? q.or(`access_level.eq.public,org_id.eq.${o}`)
-      : q.or(`access_level.eq.public,and(org_id.eq.${o},access_level.eq.internal),and(org_id.eq.${o},created_by.eq.${u.id})`);
-  }
-  const r = await dbMany([s => s.from('saraban_categories').select('*').order('sort_order'), () => q], { loaderText: 'กำลังโหลดเอกสาร...', error: 'โหลดเอกสารไม่สำเร็จ' });
+  // ฐานข้อมูลกรองเอกสารตามสิทธิ์ของผู้ใช้ (sfh_saraban_list)
+  const r = await db(s => s.rpc('sfh_saraban_list', tk()), { loaderText: 'กำลังโหลดเอกสาร...', error: 'โหลดเอกสารไม่สำเร็จ' });
   if (!r.ok) return false;
-  Saraban.cats = r.data[0];
-  Saraban.docs = r.data[1].map(d => ({
+  Saraban.cats = r.data?.cats || [];
+  Saraban.docs = (r.data?.docs || []).map(d => ({
     ...d, cat: d.saraban_categories, org_name: d.organizations?.name, org_short_name: d.organizations?.short_name,
     files: (d.saraban_files || []).sort((a, b) => a.sort_order - b.sort_order), file_count: (d.saraban_files || []).length,
   }));
@@ -3235,10 +3242,7 @@ async function openSarabanDetail(d) {
 /** อัปโหลดไฟล์เอกสาร (รูปภาพบีบอัดเป็น WebP, ไฟล์อื่นอัปโหลดตามจริง) */
 async function sarabanUpload(item, folder) {
   const ext = item.upload.type === 'image/webp' ? 'webp' : (String(item.name).split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
-  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-  const { error } = await sb.storage.from(STORAGE_BUCKET).upload(path, item.upload, { contentType: item.upload.type || 'application/octet-stream', cacheControl: '3600', upsert: false });
-  if (error) throw error;
-  return { path, url: sb.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl };
+  return storageUpload(item.upload, folder, ext, item.upload.type || 'application/octet-stream');
 }
 
 function openSarabanForm(d, onSaved) {
@@ -3387,29 +3391,17 @@ function openSarabanForm(d, onSaved) {
       return showToast('อัปโหลดไฟล์ไม่สำเร็จ: ' + dbErrorMessage(err), 'error', 6000);
     }
     showLoader(false);
-    // 2) บันทึกเอกสาร
-    const r = d
-      ? await db(s => s.from('saraban_documents').update(payload).eq('id', d.id).select().single(), { loaderText: 'กำลังบันทึกเอกสาร...', error: 'บันทึกเอกสารไม่สำเร็จ' })
-      : await db(s => s.from('saraban_documents').insert({ ...payload, org_id: orgId, created_by: me.id }).select().single(), { loaderText: 'กำลังบันทึกเอกสาร...', error: 'เพิ่มเอกสารไม่สำเร็จ' });
-    if (!r.ok) { uploaded.forEach(u => deleteFile(u.path)); return; }
-    const doc = r.data;
-    // 3) บันทึกรายการไฟล์ใหม่ / ลบไฟล์ที่นำออก
+    // 2) บันทึกเอกสาร + ไฟล์แนบใหม่ + นำไฟล์ออก ในฟังก์ชันเดียว (ตรวจสิทธิ์ + Audit Log ฝั่งฐานข้อมูล)
+    if (!d) payload.org_id = orgId;
     const keepCount = existing.filter(f => !f.removed).length;
-    if (uploaded.length) {
-      const fr = await db(s => s.from('saraban_files').insert(uploaded.map((u, i) => ({
-        doc_id: doc.id, org_id: doc.org_id, file_name: u.f.name, file_path: u.path, file_url: u.url,
-        mime_type: u.f.upload.type || null, file_size: u.f.size, sort_order: keepCount + i, created_by: me.id,
-      }))), { loaderText: 'กำลังบันทึกไฟล์แนบ...', error: 'บันทึกไฟล์แนบไม่สำเร็จ' });
-      if (!fr.ok) uploaded.forEach(u => deleteFile(u.path));
-    }
     const removed = existing.filter(f => f.removed);
-    if (removed.length) {
-      const dr = await db(s => s.from('saraban_files').delete().in('id', removed.map(f => f.id)), { loader: false, error: 'ลบไฟล์แนบไม่สำเร็จ' });
-      if (dr.ok) removed.forEach(f => deleteFile(f.file_path));   // ลบไฟล์เก่าใน Storage
-    }
-    await logAudit(d ? 'update' : 'create', 'saraban_documents', doc.id, {
-      title, doc_no: docNo, files_added: uploaded.length, files_removed: removed.length,
-    });
+    const r = await db(s => s.rpc('sfh_saraban_save', tk({
+      p_id: d?.id || null, p_data: payload,
+      p_files_add: uploaded.map((u, i) => ({ file_name: u.f.name, file_path: u.path, file_url: u.url, mime_type: u.f.upload.type || null, file_size: u.f.size, sort_order: keepCount + i })),
+      p_files_remove: removed.map(f => f.id),
+    })), { loaderText: 'กำลังบันทึกเอกสาร...', error: d ? 'บันทึกเอกสารไม่สำเร็จ' : 'เพิ่มเอกสารไม่สำเร็จ' });
+    if (!r.ok) { deleteFile(uploaded.map(u => u.path)); return; }
+    deleteFile(r.data?.removed_paths || []);   // ลบไฟล์เก่าใน Storage
     showToast(d ? 'บันทึกการแก้ไขเรียบร้อย' : `เพิ่มเอกสาร${docNo ? ' ' + docNo : ''} เรียบร้อย`, 'success', 4500);
     form.reset();
     m.close();
@@ -3422,10 +3414,9 @@ async function deleteSaraban(d, onDone) {
   if (!sarabanCan(d, 'delete')) return showToast('ลบได้เฉพาะเอกสารที่ตนเองบันทึก', 'error');
   const ok = await confirmModal({ title: 'ลบเอกสาร', message: `ต้องการลบเอกสาร <b>${esc(d.title)}</b>${d.doc_no ? ` (เลขที่ ${esc(d.doc_no)})` : ''} ใช่หรือไม่?<br><span class="text-xs text-slate-400">ไฟล์แนบ ${d.file_count || 0} ไฟล์ใน Storage จะถูกลบด้วย</span>`, confirmText: 'ลบเอกสาร' });
   if (!ok) return;
-  const r = await db(s => s.from('saraban_documents').delete().eq('id', d.id), { loaderText: 'กำลังลบ...', success: 'ลบเอกสารเรียบร้อย', error: 'ลบเอกสารไม่สำเร็จ' });
+  const r = await db(s => s.rpc('sfh_saraban_delete', tk({ p_id: d.id })), { loaderText: 'กำลังลบ...', success: 'ลบเอกสารเรียบร้อย', error: 'ลบเอกสารไม่สำเร็จ' });
   if (!r.ok) return;
-  (d.files || []).forEach(f => deleteFile(f.file_path));
-  await logAudit('delete', 'saraban_documents', d.id, { title: d.title, doc_no: d.doc_no, files: (d.files || []).length });
+  deleteFile(r.data?.removed_paths || []);
   onDone && onDone();
 }
 
@@ -3462,8 +3453,8 @@ function openSarabanTypes(onDone) {
       const tr = s.closest('tr'); const v = (f) => $(`[data-f="${f}"]`, tr);
       const payload = { name: v('name').value.trim(), icon: v('icon').value.trim() || 'file-text', color: v('color').value, is_active: v('is_active').checked };
       if (!payload.name) return showToast('กรุณากรอกชื่อประเภท', 'warning');
-      const r = await db(q => q.from('saraban_categories').update(payload).eq('id', s.dataset.saveCat), { success: 'บันทึกประเภทเอกสารแล้ว', error: 'บันทึกไม่สำเร็จ' });
-      if (r.ok) { Object.assign(Saraban.cats.find(c => c.id === s.dataset.saveCat), payload); logAudit('update', 'saraban_categories', s.dataset.saveCat, payload); }
+      const r = await db(q => q.rpc('sfh_saraban_cat_save', tk({ p_id: s.dataset.saveCat, p_data: payload })), { success: 'บันทึกประเภทเอกสารแล้ว', error: 'บันทึกไม่สำเร็จ' });
+      if (r.ok) Object.assign(Saraban.cats.find(c => c.id === s.dataset.saveCat), payload);
       return;
     }
     const del = e.target.closest('[data-del-cat]');
@@ -3472,8 +3463,8 @@ function openSarabanTypes(onDone) {
       const c = Saraban.cats.find(x => x.id === del.dataset.delCat);
       const ok = await confirmModal({ title: 'ลบประเภทเอกสาร', message: `ลบประเภท <b>${esc(c.name)}</b>? (ลบได้เฉพาะประเภทที่ยังไม่มีเอกสาร หากมีเอกสารแล้วให้ปิด "ใช้งาน" แทน)` });
       if (!ok) return;
-      const r = await db(q => q.from('saraban_categories').delete().eq('id', c.id), { success: 'ลบประเภทเอกสารแล้ว', error: 'ลบไม่สำเร็จ' });
-      if (r.ok) { logAudit('delete', 'saraban_categories', c.id, { cat_key: c.cat_key }); Saraban.cats = Saraban.cats.filter(x => x.id !== c.id); del.closest('tr').remove(); }
+      const r = await db(q => q.rpc('sfh_saraban_cat_delete', tk({ p_id: c.id })), { success: 'ลบประเภทเอกสารแล้ว', error: 'ลบไม่สำเร็จ' });
+      if (r.ok) { Saraban.cats = Saraban.cats.filter(x => x.id !== c.id); del.closest('tr').remove(); }
     }
   });
   $('#sbCatForm', m.el).onsubmit = async (e) => {
@@ -3483,10 +3474,9 @@ function openSarabanTypes(onDone) {
     const key = f.cat_key.value.trim().toLowerCase();
     if (!/^[a-z_]{2,30}$/.test(key)) return showToast('รหัสประเภทใช้ได้เฉพาะ a-z และ _', 'warning');
     const g = groups.find(([k]) => k === f.group_key.value);
-    const row = { cat_key: key, name: f.cat_name.value.trim(), group_key: g[0], group_name: g[1], icon: f.icon.value.trim() || 'file-text', sort_order: Saraban.cats.length + 1, created_by: currentUser().id };
-    const r = await db(q => q.from('saraban_categories').insert(row).select().single(), { success: `เพิ่มประเภท ${row.name} แล้ว`, error: 'เพิ่มประเภทไม่สำเร็จ' });
+    const row = { cat_key: key, name: f.cat_name.value.trim(), group_key: g[0], group_name: g[1], icon: f.icon.value.trim() || 'file-text', sort_order: Saraban.cats.length + 1 };
+    const r = await db(q => q.rpc('sfh_saraban_cat_save', tk({ p_id: null, p_data: row })), { success: `เพิ่มประเภท ${row.name} แล้ว`, error: 'เพิ่มประเภทไม่สำเร็จ' });
     if (!r.ok) return;
-    logAudit('create', 'saraban_categories', r.data.id, { cat_key: key });
     Saraban.cats.push(r.data);
     m.close();
     openSarabanTypes(onDone);
@@ -3641,10 +3631,7 @@ async function calLoadUsers() {
 async function calLoadDocs() {
   if (Cal.docs) return Cal.docs;
   if (!hasPermission('saraban.view')) return (Cal.docs = []);
-  const u = currentUser();
-  let q = sb.from('saraban_documents').select('id, doc_no, title, access_level, org_id').neq('access_level', 'restricted').order('created_at', { ascending: false }).limit(800);
-  if (!isSuperAdmin() && u?.org_id) q = q.or(`access_level.eq.public,org_id.eq.${u.org_id}`);
-  const r = await db(() => q, { loader: false, silent: true });
+  const r = await db(s => s.rpc('sfh_saraban_doc_options', tk()), { loader: false, silent: true });
   Cal.docs = (r.data || []).map(d => ({ ...d, label: `${d.doc_no || 'ไม่มีเลขที่'} · ${d.title}` }));
   return Cal.docs;
 }
@@ -4060,10 +4047,13 @@ async function calDocBox(box, r) {
     box.innerHTML = `<div class="mt-3 rounded-2xl bg-slate-50 border border-slate-100 px-3 py-2 text-xs text-slate-500 flex items-center gap-2">${ic('lock', 'w-4 h-4')} มีหนังสือ/คำสั่งที่เกี่ยวข้อง (เอกสารภายใน เฉพาะเจ้าหน้าที่)</div>`;
     refreshIcons(); return;
   }
-  const res = await dbMany([
-    s => pub ? s.from('v_public_saraban').select('id, doc_no, title').eq('id', r.saraban_doc_id).maybeSingle() : s.from('saraban_documents').select('id, doc_no, title').eq('id', r.saraban_doc_id).maybeSingle(),
-    s => (pub ? s.from('v_public_saraban_files') : s.from('saraban_files')).select('id, file_name, file_path, file_size, mime_type').eq('doc_id', r.saraban_doc_id).order('sort_order'),
-  ], { loader: false, silent: true });
+  const res = pub
+    ? await dbMany([
+        s => s.from('v_public_saraban').select('id, doc_no, title').eq('id', r.saraban_doc_id).maybeSingle(),
+        s => s.from('v_public_saraban_files').select('id, file_name, file_path, file_size, mime_type').eq('doc_id', r.saraban_doc_id).order('sort_order'),
+      ], { loader: false, silent: true })
+    : await db(s => s.rpc('sfh_saraban_doc_get', tk({ p_id: r.saraban_doc_id })), { loader: false, silent: true })
+        .then(x => ({ ...x, data: x.data ? [x.data.doc, x.data.files || []] : [null, []] }));
   if (!res.ok || !res.data[0]) return;
   const [doc, files] = res.data;
   box.innerHTML = `<div class="mt-3 rounded-2xl bg-cream-50 border border-cream-200 p-3">
