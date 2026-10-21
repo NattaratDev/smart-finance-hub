@@ -19,8 +19,10 @@
 | `module_security_rollback.sql` | ย้อนผล lockdown กรณีฉุกเฉินเท่านั้น (ระบบจะกลับเป็นแบบไม่ปลอดภัยชั่วคราว) |
 | `module_security_saraban.sql` | ฟังก์ชันที่ตรวจสิทธิ์สำหรับงานสารบรรณ + การอัปโหลด/ลบไฟล์ (ใช้คู่กับ Edge Function `sfh-storage` ในโฟลเดอร์ `supabase/functions`) (รัน **ต่อจาก** `module_security.sql` / รันซ้ำได้) |
 | `module_security_saraban_lockdown.sql` | ปิดการเข้าถึงงานสารบรรณและ Storage โดยตรง (รันหลังหน้าเว็บรุ่นใหม่ขึ้นระบบ / รันซ้ำได้) · ย้อนกลับด้วย `module_security_saraban_rollback.sql` |
+| `module_security_calendar_news.sql` | ฟังก์ชันที่ตรวจสิทธิ์สำหรับปฏิทินกองคลัง ข่าวประกาศ และชุดอัตราไปราชการ (รัน **ต่อจาก** `module_security_saraban.sql` / รันซ้ำได้) |
+| `module_security_calendar_news_lockdown.sql` | ปิดการเขียนตรงของปฏิทิน ข่าว และชุดอัตรา (รันหลังหน้าเว็บรุ่นใหม่ขึ้นระบบ / รันซ้ำได้) · ย้อนกลับด้วย `module_security_calendar_news_rollback.sql` |
 
-> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql` → `module_security_lockdown.sql` → `module_security_saraban.sql` → `module_security_saraban_lockdown.sql`
+> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql` → `module_security_lockdown.sql` → `module_security_saraban.sql` → `module_security_saraban_lockdown.sql` → `module_security_calendar_news.sql` → `module_security_calendar_news_lockdown.sql`
 > อัปเดตจากรุ่นก่อน: รัน `database.sql` ซ้ำ 1 ครั้ง (เพิ่มระบบ session token) แล้วรัน `module_payroll.sql` · ผู้ใช้ที่ Login ค้างไว้จะต้อง Login ใหม่ 1 ครั้ง
 
 ## ทะเบียนคุมต่าง ๆ (register) – ทะเบียนคุมเบิกค่าเช่าบ้าน

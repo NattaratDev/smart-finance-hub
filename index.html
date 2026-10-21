@@ -1629,10 +1629,11 @@ async function dashSuper(body) {
     s => s.from('roles').select('id, role_key, name, color, level').order('level', { ascending: false }),
     s => s.from('organizations').select('id, is_active'),
     s => s.from('modules').select('module_key, name, status, icon, color').order('sort_order'),
-    s => s.from('announcements').select('id', { count: 'exact', head: true }),
+    s => s.rpc('sfh_news_list', tk()),
   ], { loaderText: 'กำลังโหลดแดชบอร์ด...', error: 'โหลดแดชบอร์ดไม่สำเร็จ' });
   if (!r.ok) { body.innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return; }
-  const [dd, roles, orgs, mods, annCount] = r.data;
+  const [dd, roles, orgs, mods, annList] = r.data;
+  const annCount = (annList || []).length;
   const { users = [], logins = [], logs = [] } = dd || {};
   const roleCounts = roles.filter(x => x.role_key !== 'guest').map(ro => ({ ...ro, n: users.filter(u => u.role_id === ro.id).length }));
   body.innerHTML = `
@@ -1673,11 +1674,11 @@ async function dashOrg(body) {
   const since = last14Days()[0].toISOString();
   const r = await dbMany([
     s => s.rpc('sfh_dashboard_data', tk()),
-    s => s.from('announcements').select('*').or(`is_public.eq.true,org_id.eq.${u.org_id}`).lte('published_at', new Date().toISOString())
-      .order('is_pinned', { ascending: false }).order('published_at', { ascending: false }).limit(5),
+    s => s.rpc('sfh_news_list', tk({ p_limit: 5, p_published_only: true })),
   ], { loaderText: 'กำลังโหลดแดชบอร์ด...', error: 'โหลดแดชบอร์ดไม่สำเร็จ' });
   if (!r.ok) { body.innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return; }
-  const [dd, news] = r.data;
+  const [dd, newsRaw] = r.data;
+  const news = newsRaw || [];
   const { users = [], logs = [], logins = [] } = dd || {};
   $('#page-dashboard')._news = news;
   const active = users.filter(x => x.is_active).length;
@@ -1714,9 +1715,7 @@ async function dashStaff(body) {
   const shortcuts = State.menus.filter(m => m.menu_group === 'module');
   let news = [];
   if (hasAnyPermission('announcements.view', 'announcements.view_public')) {
-    let q = sb.from('announcements').select('*').lte('published_at', new Date().toISOString()).order('is_pinned', { ascending: false }).order('published_at', { ascending: false }).limit(5);
-    q = (u.org_id && hasPermission('announcements.view')) ? q.or(`is_public.eq.true,org_id.eq.${u.org_id}`) : q.eq('is_public', true);
-    const r = await db(() => q, { loaderText: 'กำลังโหลดข่าวประกาศ...', error: 'โหลดข่าวไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_news_list', tk({ p_limit: 5, p_published_only: true })), { loaderText: 'กำลังโหลดข่าวประกาศ...', error: 'โหลดข่าวไม่สำเร็จ' });
     news = r.data || [];
   }
   $('#page-dashboard')._news = news;
@@ -2894,14 +2893,9 @@ async function fetchAnnouncements() {
     return db(s => s.from('v_public_announcements').select('*').order('is_pinned', { ascending: false }).order('published_at', { ascending: false }),
       { loaderText: 'กำลังโหลดข่าวสาร...', error: 'โหลดข่าวสารไม่สำเร็จ' });
   }
-  const u = currentUser();
-  let q = sb.from('announcements').select('*, organizations(name, short_name)').order('is_pinned', { ascending: false }).order('published_at', { ascending: false });
-  if (!isSuperAdmin()) q = u.org_id ? q.or(`is_public.eq.true,org_id.eq.${u.org_id}`) : q.eq('is_public', true);
-  const r = await db(() => q, { loaderText: 'กำลังโหลดข่าวสาร...', error: 'โหลดข่าวสารไม่สำเร็จ' });
-  if (r.ok) {
-    r.data = r.data.map(a => ({ ...a, org_name: a.organizations?.name, org_short_name: a.organizations?.short_name }));
-    if (!hasPermission('announcements.manage')) r.data = r.data.filter(a => new Date(a.published_at) <= new Date());
-  }
+  // ฐานข้อมูลกรองข่าวตามสิทธิ์ (ข่าวตั้งเวลาล่วงหน้าเห็นเฉพาะผู้มี announcements.manage)
+  const r = await db(s => s.rpc('sfh_news_list', tk()), { loaderText: 'กำลังโหลดข่าวสาร...', error: 'โหลดข่าวสารไม่สำเร็จ' });
+  if (r.ok) r.data = r.data || [];
   return r;
 }
 async function renderAnnouncements(el, mod) {
@@ -2979,12 +2973,10 @@ function openAnnouncementForm(a, onSaved) {
     const img = await resolveImageChange(cover, a?.cover_path || storagePathFromUrl(a?.cover_url), 'announcements');
     if (!img.ok) return;
     if (img.changed) { payload.cover_url = img.url; payload.cover_path = img.path; }
-    const r = a
-      ? await db(s => s.from('announcements').update(payload).eq('id', a.id), { loaderText: 'กำลังบันทึก...', success: 'บันทึกข่าวสารเรียบร้อย', error: 'บันทึกไม่สำเร็จ' })
-      : await db(s => s.from('announcements').insert({ ...payload, org_id: me.org_id, created_by: me.id }).select().single(), { loaderText: 'กำลังบันทึก...', success: 'เพิ่มข่าวสารเรียบร้อย', error: 'เพิ่มข่าวสารไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_news_save', tk({ p_id: a?.id || null, p_data: payload })),
+      { loaderText: 'กำลังบันทึก...', success: a ? 'บันทึกข่าวสารเรียบร้อย' : 'เพิ่มข่าวสารเรียบร้อย', error: a ? 'บันทึกไม่สำเร็จ' : 'เพิ่มข่าวสารไม่สำเร็จ' });
     if (!r.ok) { if (img.path) deleteFile(img.path); return; }
     if (img.oldToDelete) deleteFile(img.oldToDelete);   // ลบไฟล์เก่าใน Storage เมื่อเปลี่ยน/ลบรูป
-    await logAudit(a ? 'update' : 'create', 'announcements', a?.id || r.data?.id, { title, is_public: payload.is_public, cover_changed: !!img.changed });
     form.reset();
     m.close();
     onSaved && onSaved();
@@ -2995,10 +2987,9 @@ async function deleteAnnouncement(a, onDone) {
   if (!canEditAnnouncement(a)) return showToast('ลบได้เฉพาะข่าวที่ตนเองบันทึก', 'error');
   const ok = await confirmModal({ title: 'ลบข่าวสาร/ประกาศ', message: `ต้องการลบ <b>${esc(a.title)}</b> ใช่หรือไม่?<br><span class="text-xs text-slate-400">ภาพปกใน Storage จะถูกลบด้วย</span>`, confirmText: 'ลบข่าว' });
   if (!ok) return;
-  const r = await db(s => s.from('announcements').delete().eq('id', a.id), { loaderText: 'กำลังลบ...', success: 'ลบข่าวสารเรียบร้อย', error: 'ลบไม่สำเร็จ' });
+  const r = await db(s => s.rpc('sfh_news_delete', tk({ p_id: a.id })), { loaderText: 'กำลังลบ...', success: 'ลบข่าวสารเรียบร้อย', error: 'ลบไม่สำเร็จ' });
   if (!r.ok) return;
   deleteFile(a.cover_path || storagePathFromUrl(a.cover_url));
-  await logAudit('delete', 'announcements', a.id, { title: a.title });
   onDone && onDone();
 }
 /* ===== END MODULE: announcements ===== */
@@ -3635,17 +3626,6 @@ async function calLoadDocs() {
   Cal.docs = (r.data || []).map(d => ({ ...d, label: `${d.doc_no || 'ไม่มีเลขที่'} · ${d.title}` }));
   return Cal.docs;
 }
-/** บันทึกความเคลื่อนไหว (ไม่ทำให้การบันทึกหลักล้มเหลว) */
-async function calLog(type, rec, action, extra = {}) {
-  const u = currentUser();
-  try {
-    const { error } = await sb.from('cal_activity').insert({
-      org_id: rec.org_id || u?.org_id || null, item_type: type, item_id: rec.id || null, action,
-      title: calTitle(type, rec), by_user_id: u?.id || null, by_name: u?.full_name || null, ...extra,
-    });
-    if (error) console.warn('[SFH] cal_activity', error);
-  } catch (e) { console.warn('[SFH] cal_activity', e); }
-}
 function calActivityHtml(a) {
   const m = CAL_TYPES[a.item_type] || CAL_TYPES.event;
   const verb = { create: 'บันทึก', update: 'แก้ไข', delete: 'ลบ', status: 'อัปเดตสถานะ', comment: 'บันทึกความคืบหน้า' }[a.action] || a.action;
@@ -4026,12 +4006,9 @@ function calOpenDetail(type, r, onChanged) {
     $('[data-st-save]', mm.el).addEventListener('click', async () => {
       const note = $('[data-st-note]', mm.el).value.trim();
       if (st === r.status && !note) { showToast('กรุณาเลือกสถานะใหม่หรือบันทึกความคืบหน้า', 'warning'); return; }
-      if (st !== r.status) {
-        const res = await db(s => s.from('cal_tasks').update({ status: st, updated_by_name: currentUser().full_name }).eq('id', r.id), { loaderText: 'กำลังบันทึก...', error: 'อัปเดตสถานะไม่สำเร็จ' });
-        if (!res.ok) return;
-        await logAudit('update_status', 'cal_tasks', r.id, { from: r.status, to: st });
-      }
-      await calLog('task', r, st !== r.status ? 'status' : 'comment', { from_status: st !== r.status ? r.status : null, to_status: st !== r.status ? st : null, detail: note || null });
+      // สถานะ + ความเคลื่อนไหว + Audit Log บันทึกในฟังก์ชันฐานข้อมูล (ตรวจสิทธิ์ผู้บันทึก/ผู้รับผิดชอบ)
+      const res = await db(s => s.rpc('sfh_cal_task_status', tk({ p_id: r.id, p_status: st !== r.status ? st : null, p_note: note || null })), { loaderText: 'กำลังบันทึก...', error: 'อัปเดตสถานะไม่สำเร็จ' });
+      if (!res.ok) return;
       showToast('บันทึกความคืบหน้าแล้ว', 'success');
       mm.close();
       if (onChanged) await onChanged();
@@ -4252,24 +4229,13 @@ async function calOpenForm(type, rec, presetDate, onSaved) {
       if (dup && !(await confirmModal({ title: 'ช่วงวันที่ซ้อนกัน', danger: false, icon: 'alert-triangle', confirmText: 'บันทึกต่อ',
         message: `ตำแหน่ง <b>${esc(payload.position_title)}</b> มีผู้รักษาราชการแทนอยู่แล้ว คือ <b>${esc(dup.acting_name)}</b> (${calRangeText(dup.start_date, dup.end_date)})<br>ต้องการบันทึกต่อหรือไม่?` }))) return;
     }
-    const table = m.table;
-    let res;
-    if (editing) {
-      res = await db(s => s.from(table).update({ ...payload, updated_by_name: u.full_name }).eq('id', r.id).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
-    } else {
-      res = await db(s => s.from(table).insert({ ...payload, org_id: u.org_id || null, created_by: u.id, created_by_name: u.full_name }).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
-    }
+    // บันทึกรายการ + ผู้รับผิดชอบ + ความเคลื่อนไหว + Audit Log ในฟังก์ชันเดียว (ตรวจสิทธิ์ฝั่งฐานข้อมูล)
+    const res = await db(s => s.rpc('sfh_cal_save', tk({
+      p_type: type, p_id: editing ? r.id : null, p_data: payload,
+      p_assignees: type === 'task' ? assignees.map(a => ({ user_id: a.user_id || null, name: a.name, position: a.position || null })) : null,
+      p_title: calTitle(type, { ...r, ...payload }),
+    })), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
     if (!res.ok) return;
-    const saved = res.data;
-    if (type === 'task') {
-      const del = await db(s => s.from('cal_task_assignees').delete().eq('task_id', saved.id), { loader: false, error: 'บันทึกผู้รับผิดชอบไม่สำเร็จ' });
-      if (!del.ok) return;
-      const ins = await db(s => s.from('cal_task_assignees').insert(assignees.map((a, i) => ({ task_id: saved.id, user_id: a.user_id || null, name: a.name, position: a.position || null, sort_order: i }))), { loader: false, error: 'บันทึกผู้รับผิดชอบไม่สำเร็จ' });
-      if (!ins.ok) return;
-      if (editing && r.status !== saved.status) await calLog('task', saved, 'status', { from_status: r.status, to_status: saved.status });
-    }
-    await calLog(type, saved, editing ? 'update' : 'create');
-    await logAudit(editing ? 'update' : 'create', table, saved.id, { title: calTitle(type, saved) });
     showToast(editing ? 'บันทึกการแก้ไขแล้ว' : `เพิ่ม${m.label}แล้ว`, 'success');
     md.close();
     if (onSaved) await onSaved();
@@ -4280,10 +4246,8 @@ async function calDelete(type, r, onDone) {
   const m = CAL_TYPES[type];
   const ok = await confirmModal({ title: `ลบ${m.label}`, message: `ต้องการลบ <b>${esc(calTitle(type, r))}</b> ใช่หรือไม่?<br><span class="text-xs text-slate-400">ลบแล้วไม่สามารถกู้คืนได้</span>`, confirmText: 'ลบ' });
   if (!ok) return;
-  const res = await db(s => s.from(m.table).delete().eq('id', r.id), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
+  const res = await db(s => s.rpc('sfh_cal_delete', tk({ p_type: type, p_id: r.id, p_title: calTitle(type, r) })), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
   if (!res.ok) return;
-  await calLog(type, r, 'delete');
-  await logAudit('delete', m.table, r.id, { title: calTitle(type, r) });
   showToast('ลบรายการแล้ว', 'success');
   if (onDone) await onDone();
 }
@@ -4998,13 +4962,9 @@ function trvOpenRateForm(src, asNew) {
     if (!cfg.day_rules.day_hours || !cfg.training.meal_divisor) { showToast('ชั่วโมงต่อวันและตัวหารมื้ออาหารต้องมากกว่า 0', 'warning'); return; }
     if (!cfg.vehicles.length) { showToast('ต้องมีประเภทพาหนะอย่างน้อย 1 รายการ', 'warning'); return; }
     if (cfg.vehicles.some(v => v.mode === 'km' && !(v.rate > 0))) { showToast('พาหนะที่คิดตาม กม. ต้องระบุอัตรา', 'warning'); return; }
-    const u = currentUser();
     const row = { name, reference: F.reference.value.trim() || null, effective_from: F.effective_from.value || null, is_active: F.is_active.checked, note: F.note.value.trim() || null, config: cfg };
-    const res = asNew
-      ? await db(s => s.from('travel_rate_sets').insert({ ...row, created_by: u.id, created_by_name: u.full_name }).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' })
-      : await db(s => s.from('travel_rate_sets').update({ ...row, updated_by_name: u.full_name }).eq('id', src.id).select().single(), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
+    const res = await db(s => s.rpc('sfh_travel_rate_save', tk({ p_id: asNew ? null : src.id, p_data: row })), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
     if (!res.ok) return;
-    await logAudit(asNew ? 'create' : 'update', 'travel_rate_sets', res.data.id, { name });
     showToast('บันทึกชุดอัตราแล้ว', 'success');
     m.close();
     if (await trvLoadSets()) trvRenderTab($('#page-module'));
@@ -5015,9 +4975,8 @@ async function trvDeleteSet(s) {
   if (Trv.sets.length <= 1) { showToast('ต้องมีชุดอัตราอย่างน้อย 1 ชุด', 'warning'); return; }
   const ok = await confirmModal({ title: 'ลบชุดอัตรา', message: `ต้องการลบ <b>${esc(s.name)}</b> ใช่หรือไม่?` });
   if (!ok) return;
-  const res = await db(q => q.from('travel_rate_sets').delete().eq('id', s.id), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
+  const res = await db(q => q.rpc('sfh_travel_rate_delete', tk({ p_id: s.id })), { loaderText: 'กำลังลบ...', error: 'ลบไม่สำเร็จ' });
   if (!res.ok) return;
-  await logAudit('delete', 'travel_rate_sets', s.id, { name: s.name });
   showToast('ลบชุดอัตราแล้ว', 'success');
   if (await trvLoadSets()) trvRenderTab($('#page-module'));
 }
