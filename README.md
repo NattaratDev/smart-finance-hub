@@ -15,8 +15,10 @@
 | `module_register_insurance.sql` | ทะเบียนคุมครุภัณฑ์ (ประกันภัย ภาษีรถ การเบิกน้ำมันเชื้อเพลิง) รถยนต์ อาคารและทรัพย์สิน (รัน **ต่อจาก** `module_register_tuition.sql` / รันซ้ำได้) |
 | `module_procurement.sql` | งานจัดซื้อจัดจ้าง วงเงินไม่เกิน 5,000 บาท (รัน **ต่อจาก** `module_register_insurance.sql` / รันซ้ำได้) |
 | `module_security.sql` | ฟังก์ชันที่ตรวจ session token + สิทธิ์ สำหรับจัดการผู้ใช้ / Role / สิทธิ์ / หน่วยงาน / โมดูล / เมนูสาธารณะ / ตั้งค่า / Audit Log (รัน **หลังสุด** / รันซ้ำได้ · **จำเป็น** สำหรับหน้าเว็บรุ่นปัจจุบัน) |
+| `module_security_lockdown.sql` | ปิดการเข้าถึงตารางแกนกลางโดยตรง (ข้อมูลผู้ใช้ / สิทธิ์ / ตั้งค่า / Audit Log) และปิดการตั้งรหัสผ่านโดยไม่ตรวจสิทธิ์ (รัน **ต่อจาก** `module_security.sql` / รันซ้ำได้) |
+| `module_security_rollback.sql` | ย้อนผล lockdown กรณีฉุกเฉินเท่านั้น (ระบบจะกลับเป็นแบบไม่ปลอดภัยชั่วคราว) |
 
-> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql`
+> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql` → `module_security_lockdown.sql`
 > อัปเดตจากรุ่นก่อน: รัน `database.sql` ซ้ำ 1 ครั้ง (เพิ่มระบบ session token) แล้วรัน `module_payroll.sql` · ผู้ใช้ที่ Login ค้างไว้จะต้อง Login ใหม่ 1 ครั้ง
 
 ## ทะเบียนคุมต่าง ๆ (register) – ทะเบียนคุมเบิกค่าเช่าบ้าน
