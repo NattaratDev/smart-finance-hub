@@ -1,0 +1,58 @@
+# Deploy GitHub Pages: ระบบจริง (branch main) ที่ราก + เว็บทดลอง (branch dev) ที่ /dev/
+# ทั้งสองเว็บใช้ฐานข้อมูล Supabase เดียวกัน (config.js) – เว็บทดลองแสดงแถบเตือนสีเหลือง
+name: Deploy Pages (main + dev)
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src-main
+
+      - name: Checkout dev (ถ้ามี)
+        id: dev
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          path: src-dev
+
+      - name: Build site
+        run: |
+          set -e
+          copy_site () {   # เฉพาะไฟล์ที่หน้าเว็บใช้ (ไม่เผยแพร่ไฟล์ SQL/README)
+            mkdir -p "$2"
+            cp "$1/index.html" "$1/config.js" "$2/"
+            if [ -d "$1/assets" ]; then cp -r "$1/assets" "$2/"; fi
+          }
+          copy_site src-main site
+          if [ -f src-dev/index.html ]; then copy_site src-dev site/dev; else echo "ยังไม่มี branch dev – ข้ามเว็บทดลอง"; fi
+          touch site/.nojekyll
+          ls -R site | head -50
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
