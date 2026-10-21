@@ -21,8 +21,9 @@
 | `module_security_saraban_lockdown.sql` | ปิดการเข้าถึงงานสารบรรณและ Storage โดยตรง (รันหลังหน้าเว็บรุ่นใหม่ขึ้นระบบ / รันซ้ำได้) · ย้อนกลับด้วย `module_security_saraban_rollback.sql` |
 | `module_security_calendar_news.sql` | ฟังก์ชันที่ตรวจสิทธิ์สำหรับปฏิทินกองคลัง ข่าวประกาศ และชุดอัตราไปราชการ (รัน **ต่อจาก** `module_security_saraban.sql` / รันซ้ำได้) |
 | `module_security_calendar_news_lockdown.sql` | ปิดการเขียนตรงของปฏิทิน ข่าว และชุดอัตรา (รันหลังหน้าเว็บรุ่นใหม่ขึ้นระบบ / รันซ้ำได้) · ย้อนกลับด้วย `module_security_calendar_news_rollback.sql` |
+| `module_backup.sql` | ปุ่มสำรองข้อมูลทั้งระบบ (เฉพาะ Super Admin) ในหน้าตั้งค่าระบบ (รัน **ต่อจาก** `module_security.sql` / รันซ้ำได้) |
 
-> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql` → `module_security_lockdown.sql` → `module_security_saraban.sql` → `module_security_saraban_lockdown.sql` → `module_security_calendar_news.sql` → `module_security_calendar_news_lockdown.sql`
+> **ลำดับการรัน SQL:** `database.sql` → `module_saraban.sql` → `module_payroll.sql` → `module_calendar.sql` → `module_travel.sql` → `module_register.sql` → `module_register_tuition.sql` → `module_register_insurance.sql` → `module_procurement.sql` → `module_security.sql` → `module_security_lockdown.sql` → `module_security_saraban.sql` → `module_security_saraban_lockdown.sql` → `module_security_calendar_news.sql` → `module_security_calendar_news_lockdown.sql` → `module_backup.sql`
 > อัปเดตจากรุ่นก่อน: รัน `database.sql` ซ้ำ 1 ครั้ง (เพิ่มระบบ session token) แล้วรัน `module_payroll.sql` · ผู้ใช้ที่ Login ค้างไว้จะต้อง Login ใหม่ 1 ครั้ง
 
 ## ทะเบียนคุมต่าง ๆ (register) – ทะเบียนคุมเบิกค่าเช่าบ้าน
@@ -246,11 +247,28 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOi...';   // anon public key (หรือ pu
 4. เพิ่มโมดูลใหม่ที่ยังไม่มีในระบบ: เพิ่มแถวใน `modules`, `menus` (menu_group = 'module') และ `permissions`
    แล้วเพิ่ม key ใน `MODULES` → เมนูจะขึ้นเองตามสิทธิ์
 
-## 7) ข้อควรระวัง (PDPA)
-Policy แบบ `USING (true)` ใช้เพื่อ **การสอน/ทดสอบเท่านั้น** ใครมี anon key ก็อ่าน/แก้ข้อมูลผ่าน REST API ได้โดยตรง
-การซ่อนปุ่มในหน้าเว็บไม่ใช่ความปลอดภัยจริง ห้ามใช้กับข้อมูลการเงินและข้อมูลส่วนบุคคลจริง
-หากจะใช้งานจริงให้ย้ายไปใช้ Supabase Auth/JWT + Policy ตาม `org_id`/`created_by` และทำงานเขียนผ่านฟังก์ชันที่ตรวจสิทธิ์ในฐานข้อมูล
-(รายละเอียดอยู่ท้ายไฟล์ `database.sql`) และควรลบกล่อง "บัญชีทดสอบ" ในหน้า Login ออก
+## 7) ความปลอดภัยของข้อมูล (PDPA)
+ระบบใช้งานจริงต้องรันไฟล์ `module_security*.sql` ครบตามลำดับในตารางด้านบน (รวมไฟล์ `*_lockdown.sql`) และ deploy Edge Function `sfh-storage`
+- หน้าเว็บ **ไม่มีสิทธิ์เขียนตารางโดยตรง** ทุกการเพิ่ม/แก้/ลบผ่านฟังก์ชัน `sfh_*` ที่ตรวจ session token + สิทธิ์ และบันทึก Audit Log ในฐานข้อมูล
+- ตารางข้อมูลบุคคล (ผู้ใช้ สิทธิ์ ตั้งค่า Audit Log เอกสารสารบรรณ ข่าวภายใน ฯลฯ) อ่านตรงไม่ได้ · บุคคลทั่วไปอ่านได้เฉพาะ View `v_public_*`
+- Storage: อัปโหลด/ลบผ่าน Edge Function `sfh-storage` เท่านั้น (ลบได้เฉพาะไฟล์ที่ไม่มีข้อมูลใดอ้างอิงแล้ว) · bucket ยังเป็น public จึงเปิดไฟล์ได้ถ้ารู้ลิงก์ตรง
+- กรณีฉุกเฉินให้ใช้ไฟล์ `*_rollback.sql` คืนสิทธิ์แบบเดิมชั่วคราว (ระบบจะกลับเป็นแบบไม่ปลอดภัย) แล้วแก้สาเหตุ จากนั้นรัน lockdown ใหม่
+- ฐานข้อมูลสำหรับสอน/ทดสอบที่ยังไม่รันไฟล์ความปลอดภัย จะใช้ Policy แบบ `USING (true)` ซึ่ง**ห้ามใช้กับข้อมูลจริง**
+
+### 7.1) สำรองข้อมูล / กู้คืน
+- **สำรอง:** Super Admin › ตั้งค่าระบบ › การ์ด "สำรองข้อมูล" › **สำรองข้อมูลตอนนี้** → ได้ไฟล์ `sfh-backup-YYYYMMDD-HHMM.json`
+  (ต้องรัน `module_backup.sql` ก่อน · รวมทุกตาราง ยกเว้นรหัสผ่านและ session · ไฟล์ใน Storage ไม่ถูกรวม แต่มีรายชื่อไฟล์ใน `meta.storage_files`)
+- แนะนำสำรอง **อย่างน้อยสัปดาห์ละ 1 ครั้ง** และเก็บในที่ที่เฉพาะผู้รับผิดชอบเข้าถึงได้ (มีข้อมูลส่วนบุคคล/เงินเดือน)
+- โครงสร้างไฟล์: `{ "meta": { generated_at, counts, storage_files }, "data": { "<ชื่อตาราง>": [ แถวข้อมูล ... ] } }`
+- **กู้คืนรายการที่ถูกลบ** (ตัวอย่าง: เอกสารสารบรรณ) – SQL Editor วางเนื้อหาไฟล์สำรองแทน `<วางไฟล์สำรองที่นี่>` แล้ว Run
+  (`on conflict do nothing` = เพิ่มเฉพาะแถวที่หายไป ไม่ทับข้อมูลปัจจุบัน · ตารางลูก เช่น `saraban_files` ให้กู้หลังตารางแม่)
+  ```sql
+  with b as (select $json$<วางไฟล์สำรองที่นี่>$json$::jsonb as j)
+  insert into public.saraban_documents
+  select * from jsonb_populate_recordset(null::public.saraban_documents, (select j->'data'->'saraban_documents' from b))
+  on conflict (id) do nothing;
+  ```
+- การกู้คืนทั้งระบบ (เช่น สร้างโปรเจกต์ใหม่) ให้รัน SQL ตั้งต้นทุกไฟล์ก่อน แล้วกู้ทีละตารางตามลำดับความสัมพันธ์ (organizations → roles → users → ตารางโมดูล) และตั้งรหัสผ่านผู้ใช้ใหม่
 
 ## 8) แก้ปัญหาที่พบบ่อย
 | อาการ | สาเหตุ / วิธีแก้ |

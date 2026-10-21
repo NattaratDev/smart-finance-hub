@@ -2690,6 +2690,20 @@ async function upsertSettings(orgId, values, isPublic, details = null, opts = {}
   return db(s => s.rpc('sfh_settings_save', tk({ p_org_id: orgId || null, p_values: values, p_public: !!isPublic, p_details: details })),
     { loaderText: 'กำลังบันทึกการตั้งค่า...', success: 'บันทึกการตั้งค่าเรียบร้อย', error: 'บันทึกการตั้งค่าไม่สำเร็จ', ...opts });
 }
+/** สำรองข้อมูลทั้งระบบเป็นไฟล์ JSON (เฉพาะ Super Admin · ฐานข้อมูลตรวจสิทธิ์และบันทึก Audit Log) */
+async function sfhBackupDownload() {
+  if (!isSuperAdmin()) return showToast('สำรองข้อมูลได้เฉพาะ Super Admin', 'error');
+  const r = await db(s => s.rpc('sfh_backup_export', tk()), { loaderText: 'กำลังสำรองข้อมูล...', error: 'สำรองข้อมูลไม่สำเร็จ' });
+  if (!r.ok || !r.data) return;
+  const now = new Date(), stamp = `${toInputDate(now).replace(/-/g, '')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;   // เวลาท้องถิ่น
+  const url = URL.createObjectURL(new Blob([JSON.stringify(r.data)], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = `sfh-backup-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  const c = r.data.meta?.counts || {};
+  showToast(`สำรองข้อมูลเรียบร้อย: ${Object.keys(c).length} ตาราง ${formatNumber(Object.values(c).reduce((x, y) => x + y, 0))} รายการ`, 'success', 6000);
+}
 async function renderSettings(el) {
   if (!hasAnyPermission('settings.manage', 'settings.org')) return requirePermission('settings.org');
   const me = currentUser();
@@ -2713,8 +2727,16 @@ async function renderSettings(el) {
       ${PLATFORM_SETTINGS.map(([k, label, type]) => `<div><label class="label">${label}</label>${type === 'textarea'
         ? `<textarea name="${k}" class="input" rows="3">${esc(val(k))}</textarea>` : `<input name="${k}" class="input" value="${esc(val(k))}">`}</div>`).join('')}
       <div class="flex justify-end"><button class="btn btn-primary" type="submit">${ic('save')} บันทึกตั้งค่า Platform</button></div>
-    </form>`;
+    </form>
+    ${isSuperAdmin() ? `<div class="card p-5 md:p-6 space-y-3 mt-5">
+      <h3 class="section-title">${ic('database-backup', 'w-5 h-5 text-brand-400')} สำรองข้อมูล</h3>
+      <p class="text-sm text-slate-500">ดาวน์โหลดข้อมูลทุกโมดูลเป็นไฟล์เดียว (JSON) เก็บไว้กู้คืนกรณีข้อมูลเสียหาย · ไม่รวมรหัสผ่าน · ไฟล์แนบ/รูปภาพยังอยู่ใน Storage (มีรายชื่อไฟล์แนบไว้ในไฟล์สำรอง)</p>
+      <div class="rounded-2xl bg-cream-50 border border-cream-200 p-3 text-xs text-slate-600 flex gap-2">${ic('shield-alert', 'w-4 h-4 text-cream-500 shrink-0')}
+        <span>ไฟล์สำรองมีข้อมูลส่วนบุคคลและเงินเดือน ให้เก็บในที่ที่เฉพาะผู้รับผิดชอบเข้าถึงได้ (เช่น ไดรฟ์ของหน่วยงาน) · แนะนำให้สำรองอย่างน้อยสัปดาห์ละ 1 ครั้ง</span></div>
+      <div class="flex justify-end"><button class="btn btn-primary" type="button" data-backup>${ic('download')} สำรองข้อมูลตอนนี้</button></div>
+    </div>` : ''}`;
     const logoPicker = bindImagePicker(el, 'logo', { maxSide: 512, quality: 0.8 });
+    const bk = $('[data-backup]', el); if (bk) bk.onclick = () => sfhBackupDownload();
     $('#platformForm', el).onsubmit = async (e) => {
       e.preventDefault();
       if (!requirePermission('settings.manage')) return;
