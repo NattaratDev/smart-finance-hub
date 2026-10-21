@@ -203,12 +203,23 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOi...';   // anon public key (หรือ pu
 ทดสอบบนเครื่อง: เปิดโฟลเดอร์ใน VS Code แล้วใช้ Live Server (หรือ `npx http-server`) แล้วเปิด `http://localhost:xxxx`
 (การดับเบิลคลิกเปิด `index.html` ตรง ๆ ก็ใช้ได้ แต่แนะนำให้เปิดผ่าน server)
 
-## 3) Deploy บน GitHub Pages
-1. สร้าง Repository ใหม่ (Public) แล้วอัปโหลด `index.html`, `config.js` (และ `README.md`)
-2. **Settings › Pages › Build and deployment** เลือก Source = `Deploy from a branch`, Branch = `main` / `(root)` แล้ว Save
-3. รอ 1–2 นาที เปิดลิงก์ `https://<username>.github.io/<repo>/`
+## 3) Deploy บน GitHub Pages (ระบบจริง + เว็บทดลอง)
+ใช้ GitHub Actions (`.github/workflows/pages.yml`) deploy 2 เว็บพร้อมกันทุกครั้งที่ push:
 
-> anon key เป็นค่าสาธารณะ (อยู่ในหน้าเว็บอยู่แล้ว) ความปลอดภัยจริงต้องมาจาก RLS Policy – ดูหัวข้อ "ข้อควรระวัง"
+| เว็บ | ที่อยู่ | มาจาก branch |
+|---|---|---|
+| ระบบจริง | `https://<username>.github.io/<repo>/` | `main` |
+| เว็บทดลอง | `https://<username>.github.io/<repo>/dev/` | `dev` (มีแถบเหลือง "เว็บทดลอง" และชื่อแท็บขึ้นต้นด้วย [ทดลอง]) |
+
+1. **Settings › Pages › Build and deployment** เลือก Source = **`GitHub Actions`** (ตั้งครั้งเดียว)
+2. push เข้า `main` หรือ `dev` → รอ 1–2 นาที (ดูสถานะที่แท็บ Actions › "Deploy Pages (main + dev)")
+3. เผยแพร่เฉพาะ `index.html`, `config.js`, `assets/` (ไฟล์ SQL/README ไม่ถูกเผยแพร่บนเว็บ)
+
+**ขั้นตอนพัฒนา:** แก้โค้ดบน `dev` → ทดลองที่ `/dev/` → ผ่านแล้วค่อย merge เข้า `main`
+> ⚠️ เว็บทดลองใช้ **ฐานข้อมูลเดียวกับระบบจริง** – ข้อมูลที่บันทึก/ลบในเว็บทดลองมีผลจริง (ทดสอบด้วยรายการทดสอบแล้วลบทิ้ง)
+> ไฟล์ SQL ใหม่มีผลกับระบบจริงทันที จึงต้องเป็นแบบ "เพิ่มของใหม่" ที่ไม่ทำให้หน้าเว็บรุ่นเดิมพัง และกด "สำรองข้อมูล" ก่อนทุกครั้ง
+
+> anon key เป็นค่าสาธารณะ (อยู่ในหน้าเว็บอยู่แล้ว) ความปลอดภัยจริงมาจากฟังก์ชันที่ตรวจสิทธิ์ในฐานข้อมูล – ดูหัวข้อ 7
 
 ## 4) บัญชีผู้ใช้เริ่มต้น
 `database.sql` สร้างบัญชีเริ่มต้นให้ (superadmin, orgadmin และบัญชีเจ้าหน้าที่ตัวอย่าง) พร้อมรหัสผ่านเริ่มต้นที่อยู่ในไฟล์ SQL

@@ -1322,7 +1322,7 @@ async function showPage(key, menu = null) {
   State.current = menu?.menu_key || key;
   document.body.classList.toggle('auth-page', key === 'login');
   const title = menu?.label || PAGES[key]?.title || '';
-  document.title = `${title ? title + ' | ' : ''}${State.settings.site_name || 'Smart Finance Hub'} (${State.settings.site_short || 'SFH'})`;
+  document.title = `${IS_DEV_SITE ? '[ทดลอง] ' : ''}${title ? title + ' | ' : ''}${State.settings.site_name || 'Smart Finance Hub'} (${State.settings.site_short || 'SFH'})`;
   updateActiveNav();
   window.scrollTo({ top: 0 });
   try {
@@ -9667,7 +9667,19 @@ const MODULES = {
 /* =====================================================================
    INIT – เริ่มระบบ
    ===================================================================== */
+/** เว็บทดลอง (โฟลเดอร์ /dev/ บน GitHub Pages) – แสดงแถบเตือนว่าใช้ฐานข้อมูลจริง */
+const IS_DEV_SITE = /\/dev(\/|$)/.test(location.pathname);
+function showDevBanner() {
+  if (!IS_DEV_SITE || document.getElementById('devBanner')) return;
+  const b = document.createElement('div');
+  b.id = 'devBanner';
+  b.className = 'text-center text-xs sm:text-sm font-medium px-3 py-1.5';
+  b.style.cssText = 'background:#FDE68A;color:#78350F';
+  b.textContent = 'เว็บทดลอง (dev) · ใช้ฐานข้อมูลจริง – ข้อมูลที่บันทึก/ลบที่นี่มีผลกับระบบจริง';
+  document.body.prepend(b);
+}
 async function init() {
+  showDevBanner();
   renderChrome();
   if (!sb) {
     const prob = configProblem();
