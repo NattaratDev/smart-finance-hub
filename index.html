@@ -2207,7 +2207,7 @@ async function renderRoles(el) {
       body: `<p class="text-sm text-slate-500 mb-3">กำหนดว่า <b>Org Admin</b> สามารถมอบสิทธิ์ใดให้ผู้ใช้ในหน่วยงานได้ และเพิ่ม Permission ใหม่สำหรับโมดูลในอนาคต</p>
         <form id="newPermForm" class="grid sm:grid-cols-4 gap-2 mb-4 rounded-2xl bg-brand-50/60 p-3">
           <select name="module_key" class="input">${[...new Set([...data.mods.map(x => x.module_key), ...Object.keys(PERM_GROUP_LABELS)])].map(k => `<option value="${esc(k)}">${esc(permGroupLabel(k, data.mods))} (${esc(k)})</option>`).join('')}</select>
-          <input name="perm_action" class="input" placeholder="action เช่น approve" pattern="[a-z_]{2,30}" required>
+          <input name="perm_action" class="input" placeholder="action เช่น approve" pattern="[a-z_]{2,30}" title="ใช้ได้เฉพาะ a-z และ _ (2–30 ตัว) เช่น approve" required>
           <input name="perm_name" class="input" placeholder="ชื่อสิทธิ์ (ไทย)" required>
           <button class="btn btn-primary" type="submit">${ic('plus')} เพิ่ม Permission</button>
         </form>
@@ -2255,7 +2255,7 @@ async function renderRoles(el) {
       body: `<form id="roleForm" class="space-y-4">
         ${sys ? `<div class="rounded-2xl bg-slate-50 p-3 text-sm text-slate-500">${ic('lock', 'w-4 h-4 inline')} Role ระบบ: ห้ามเปลี่ยนชื่อและรหัส แก้ได้เฉพาะคำอธิบายและสี</div>` : ''}
         <div class="grid sm:grid-cols-2 gap-4">
-          <div><label class="label">รหัส Role (role_key)</label><input name="role_key" class="input font-mono" value="${esc(role?.role_key || '')}" ${editing ? 'disabled' : 'required'} placeholder="เช่น finance_head" pattern="[a-z_]{3,30}"></div>
+          <div><label class="label">รหัส Role (role_key)</label><input name="role_key" class="input font-mono" value="${esc(role?.role_key || '')}" ${editing ? 'disabled' : 'required'} placeholder="เช่น finance_head, staff01" pattern="[a-z][a-z0-9_]{2,29}" title="ขึ้นต้นด้วย a-z แล้วตามด้วย a-z, 0-9 หรือ _ (3–30 ตัว) เช่น staff01"></div>
           <div><label class="label">ชื่อ Role</label><input name="role_name" class="input" value="${esc(role?.name || '')}" ${sys ? 'disabled' : 'required'}></div>
         </div>
         <div><label class="label">คำอธิบาย</label><textarea name="description" class="input" rows="2">${esc(role?.description || '')}</textarea></div>
@@ -2280,7 +2280,7 @@ async function renderRoles(el) {
       let r;
       if (!editing) {
         const key = f.role_key.value.trim().toLowerCase();
-        if (!/^[a-z_]{3,30}$/.test(key)) return showToast('role_key ใช้ได้เฉพาะ a-z และ _ (3–30 ตัว)', 'warning');
+        if (!/^[a-z][a-z0-9_]{2,29}$/.test(key)) return showToast('รหัส Role ต้องขึ้นต้นด้วย a-z แล้วตามด้วย a-z, 0-9 หรือ _ (3–30 ตัว) เช่น staff01', 'warning');
         r = await db(s => s.rpc('sfh_admin_role_save', tk({ p_id: null, p_data: { ...payload, role_key: key } })), { success: 'เพิ่ม Role เรียบร้อย', error: 'เพิ่ม Role ไม่สำเร็จ' });
         if (r.ok) selectedId = r.data?.id;
       } else {
@@ -3452,7 +3452,7 @@ function openSarabanTypes(onDone) {
         <td class="text-right whitespace-nowrap"><button class="btn btn-soft btn-sm" data-save-cat="${c.id}">${ic('save', 'w-3.5 h-3.5')} บันทึก</button>
           <button class="btn-icon hover:!text-blush-500" data-del-cat="${c.id}" title="ลบ">${ic('trash-2')}</button></td></tr>`).join('')}</tbody></table></div>
       <form id="sbCatForm" class="grid sm:grid-cols-5 gap-2 mt-4 rounded-2xl bg-brand-50/60 p-3">
-        <input name="cat_key" class="input font-mono" placeholder="รหัส เช่น contract" pattern="[a-z_]{2,30}" required>
+        <input name="cat_key" class="input font-mono" placeholder="รหัส เช่น contract" pattern="[a-z_]{2,30}" title="ใช้ได้เฉพาะ a-z และ _ (2–30 ตัว) เช่น contract" required>
         <input name="cat_name" class="input" placeholder="ชื่อประเภท" required>
         <select name="group_key" class="input">${groups.map(([k, n]) => `<option value="${esc(k)}">${esc(n)}</option>`).join('')}</select>
         <input name="icon" class="input font-mono" placeholder="ไอคอน Lucide" value="file-text">

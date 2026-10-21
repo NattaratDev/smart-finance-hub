@@ -245,7 +245,7 @@ begin
   v_actor := public.sfh_payroll_auth(p_token, 'roles.manage');
   if p_id is null then
     v_key := lower(btrim(coalesce(p_data->>'role_key', '')));
-    if v_key !~ '^[a-z_]{3,30}$' then raise exception 'role_key ใช้ได้เฉพาะ a-z และ _ (3–30 ตัว)'; end if;
+    if v_key !~ '^[a-z][a-z0-9_]{2,29}$' then raise exception 'รหัส Role ต้องขึ้นต้นด้วย a-z แล้วตามด้วย a-z, 0-9 หรือ _ (3–30 ตัว)'; end if;
     if nullif(btrim(p_data->>'name'), '') is null then raise exception 'กรุณากรอกชื่อ Role'; end if;
     insert into public.roles (role_key, name, description, level, color)
     values (v_key, btrim(p_data->>'name'), nullif(btrim(p_data->>'description'), ''), least(99, greatest(1, coalesce((p_data->>'level')::int, 10))), coalesce(p_data->>'color', '#5AA9E6'))
