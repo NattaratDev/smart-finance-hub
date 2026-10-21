@@ -1245,8 +1245,7 @@ function updateActiveNav() {
 }
 function renderFooter() {
   const s = State.settings;
-  $('#footer').innerHTML = `${esc(s.footer_text || '© กองคลัง เทศบาลเมืองศรีสัชนาลัย')} · ${esc(s.site_name || 'Smart Finance Hub')} Phase 1
-    ${s.contact_phone ? ` · โทร ${esc(s.contact_phone)}` : ''}${s.contact_email ? ` · ${esc(s.contact_email)}` : ''}`;
+  $('#footer').innerHTML = `${esc(s.footer_text || '© 2569 กองคลัง เทศบาลเมืองศรีสัชนาลัย')} · ${esc(s.site_name || 'Smart Finance Hub')} พัฒนาโดย นายณัฐรัฐ ปัญญาไว`;
 }
 function renderChrome() {
   applyModeClasses(); renderSidebar(); renderTopbar(); renderBottomNav(); renderFooter();
