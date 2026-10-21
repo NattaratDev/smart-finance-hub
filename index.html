@@ -528,7 +528,9 @@ function dbErrorMessage(e) {
     return 'เชื่อมต่อ Supabase ไม่ได้ กรุณาตรวจสอบ SUPABASE_URL / SUPABASE_ANON_KEY ในไฟล์ config.js และการเชื่อมต่ออินเทอร์เน็ต';
   if (/Invalid API key|No API key|JWT|apikey/i.test(msg)) return 'API Key ไม่ถูกต้อง กรุณาตรวจสอบ SUPABASE_ANON_KEY ในไฟล์ config.js';
   if (['PGRST202', 'PGRST205', '42P01', '42883'].includes(e?.code) || /Could not find the|does not exist/i.test(msg))
-    return 'ไม่พบตาราง/ฟังก์ชันในฐานข้อมูล กรุณารันไฟล์ database.sql ใน Supabase SQL Editor';
+    return 'ไม่พบตาราง/ฟังก์ชันในฐานข้อมูล กรุณารันไฟล์ SQL ล่าสุด (เช่น module_security.sql) ใน Supabase SQL Editor';
+  if (/^FORBIDDEN/.test(msg)) { const d = msg.replace(/^FORBIDDEN:?\s*/, ''); return /[ก-๙]/.test(d) ? d : 'คุณไม่มีสิทธิ์ทำรายการนี้'; }
+  if (/SESSION_EXPIRED/.test(msg)) return 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่';
   if (e?.code === '23505') return 'ข้อมูลซ้ำกับที่มีอยู่แล้ว (เช่น ชื่อผู้ใช้หรือรหัสซ้ำ)';
   if (e?.code === '23503') return 'ไม่สามารถดำเนินการได้ เนื่องจากมีข้อมูลอื่นอ้างอิงอยู่';
   if (e?.code === '42501') return 'ไม่มีสิทธิ์เข้าถึงข้อมูล (ตรวจสอบ RLS Policy)';
@@ -551,12 +553,15 @@ async function db(task, { loader = true, loaderText = 'กำลังโหล�
     return { ok: true, data: res ? (res.data ?? null) : null, count: res ? (res.count ?? null) : null };
   } catch (e) {
     console.error('[SFH]', e);
+    if (/SESSION_EXPIRED/.test(String(e?.message || '')) && State.session) { sessionExpired(); return { ok: false, data: null, error: e }; }
     if (!silent) showToast(`${error}: ${dbErrorMessage(e)}`, 'error', 6500);
     return { ok: false, data: null, error: e };
   } finally {
     if (loader) showLoader(false);
   }
 }
+/** พารามิเตอร์สำหรับฟังก์ชันฐานข้อมูลที่ตรวจ session token: s.rpc('sfh_xxx', tk({ ... })) */
+const tk = (params = {}) => ({ p_token: State.session?.token || null, ...params });
 /** เรียกหลาย query พร้อมกัน → data เป็น array (ถ้า query เป็น head:true จะได้ count) */
 async function dbMany(tasks, opts = {}) {
   return db(async (s) => {
@@ -570,13 +575,11 @@ async function dbMany(tasks, opts = {}) {
 /* ===== CORE: Audit Log ===== */
 async function logAudit(action, tableName = null, recordId = null, details = {}) {
   if (!sb) return;
-  const u = currentUser();
-  try {
-    const { error } = await sb.from('audit_logs').insert({
-      action, table_name: tableName, record_id: recordId != null ? String(recordId) : null, details: details || {},
-      user_id: u?.id || null, username: u?.username || 'guest', org_id: u?.org_id || null, created_by: u?.id || null,
-      user_agent: navigator.userAgent.slice(0, 250),
-    });
+  try {   // ผู้ใช้ระบุจาก session token ฝั่งฐานข้อมูล (ไม่มี token = guest)
+    const { error } = await sb.rpc('sfh_log', tk({
+      p_action: action, p_table: tableName, p_record: recordId != null ? String(recordId) : null, p_details: details || {},
+      p_user_agent: navigator.userAgent.slice(0, 250),
+    }));
     if (error) console.warn('[SFH] audit', error);
   } catch (e) { console.warn('[SFH] audit', e); }
 }
@@ -1606,16 +1609,15 @@ async function renderDashboard(el) {
 async function dashSuper(body) {
   const since = last14Days()[0].toISOString();
   const r = await dbMany([
-    s => s.from('users').select('id, is_active, role_id, org_id'),
+    s => s.rpc('sfh_dashboard_data', tk()),
     s => s.from('roles').select('id, role_key, name, color, level').order('level', { ascending: false }),
     s => s.from('organizations').select('id, is_active'),
     s => s.from('modules').select('module_key, name, status, icon, color').order('sort_order'),
     s => s.from('announcements').select('id', { count: 'exact', head: true }),
-    s => s.from('audit_logs').select('created_at').eq('action', 'login').gte('created_at', since),
-    s => s.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(8),
   ], { loaderText: 'กำลังโหลดแดชบอร์ด...', error: 'โหลดแดชบอร์ดไม่สำเร็จ' });
   if (!r.ok) { body.innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return; }
-  const [users, roles, orgs, mods, annCount, logins, logs] = r.data;
+  const [dd, roles, orgs, mods, annCount] = r.data;
+  const { users = [], logins = [], logs = [] } = dd || {};
   const roleCounts = roles.filter(x => x.role_key !== 'guest').map(ro => ({ ...ro, n: users.filter(u => u.role_id === ro.id).length }));
   body.innerHTML = `
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
@@ -1654,14 +1656,13 @@ async function dashOrg(body) {
   const u = currentUser();
   const since = last14Days()[0].toISOString();
   const r = await dbMany([
-    s => s.from('users').select('id, is_active, full_name, position, last_login_at, avatar_url, roles(name, color, role_key)').eq('org_id', u.org_id),
-    s => s.from('audit_logs').select('*').eq('org_id', u.org_id).order('created_at', { ascending: false }).limit(8),
-    s => s.from('audit_logs').select('created_at').eq('org_id', u.org_id).eq('action', 'login').gte('created_at', since),
+    s => s.rpc('sfh_dashboard_data', tk()),
     s => s.from('announcements').select('*').or(`is_public.eq.true,org_id.eq.${u.org_id}`).lte('published_at', new Date().toISOString())
       .order('is_pinned', { ascending: false }).order('published_at', { ascending: false }).limit(5),
   ], { loaderText: 'กำลังโหลดแดชบอร์ด...', error: 'โหลดแดชบอร์ดไม่สำเร็จ' });
   if (!r.ok) { body.innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return; }
-  const [users, logs, logins, news] = r.data;
+  const [dd, news] = r.data;
+  const { users = [], logs = [], logins = [] } = dd || {};
   $('#page-dashboard')._news = news;
   const active = users.filter(x => x.is_active).length;
   body.innerHTML = `
@@ -1821,10 +1822,9 @@ async function renderProfile(el) {
     const img = await resolveImageChange(avatarPicker, oldPath, 'avatars');
     if (!img.ok) return;
     if (img.changed) payload.avatar_url = img.url;
-    const r = await db(s => s.from('users').update(payload).eq('id', u.id), { loaderText: 'กำลังบันทึก...', success: 'บันทึกข้อมูลส่วนตัวเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_profile_save', tk({ p_data: payload })), { loaderText: 'กำลังบันทึก...', success: 'บันทึกข้อมูลส่วนตัวเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
     if (!r.ok) { if (img.path) deleteFile(img.path); return; }
-    if (img.oldToDelete) deleteFile(img.oldToDelete);
-    await logAudit('update', 'users', u.id, { self: true, fields: Object.keys(payload) });
+    if (img.oldToDelete) deleteFile(img.oldToDelete);   // Audit Log บันทึกในฟังก์ชันฐานข้อมูลแล้ว
     await verifySession({ silent: true });
     renderChrome(); renderProfile(el);
   };
@@ -1882,19 +1882,10 @@ async function renderUsers(el) {
   refreshIcons();
 
   const load = async () => {
-    let q = sb.from('users').select('*, roles(id, role_key, name, color, level), organizations(id, name, short_name)').order('created_at');
-    if (!isSuperAdmin()) q = q.eq('org_id', me.org_id);
-    const r = await dbMany([
-      () => q,
-      s => s.from('roles').select('*').neq('role_key', 'guest').order('level', { ascending: false }),
-      s => s.from('organizations').select('id, name, short_name, is_active').order('name'),
-    ], { error: 'โหลดข้อมูลผู้ใช้ไม่สำเร็จ' });
+    // ฐานข้อมูลกรองตามหน่วยงาน/Role ของผู้เรียกให้แล้ว (sfh_admin_users_list)
+    const r = await db(s => s.rpc('sfh_admin_users_list', tk()), { error: 'โหลดข้อมูลผู้ใช้ไม่สำเร็จ' });
     if (!r.ok) { $('#userTable', el).innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return null; }
-    let [users, roles, orgs] = r.data;
-    if (!isSuperAdmin()) {
-      users = users.filter(u => u.roles?.role_key !== 'super_admin');
-      roles = roles.filter(r => r.role_key !== 'super_admin');
-    }
+    const { users = [], roles = [], orgs = [] } = r.data || {};
     return { users, roles, orgs };
   };
   let data = await load();
@@ -1958,16 +1949,16 @@ async function renderUsers(el) {
           message: `${u.is_active ? 'ปิด' : 'เปิด'}การใช้งานบัญชี <b>${esc(u.full_name)}</b> (@${esc(u.username)}) ?${u.is_active ? '<br><span class="text-xs text-slate-400">ผู้ใช้จะเข้าสู่ระบบไม่ได้จนกว่าจะเปิดบัญชีอีกครั้ง</span>' : ''}`,
           confirmText: u.is_active ? 'ปิดบัญชี' : 'เปิดบัญชี' });
         if (!ok) return;
-        const r = await db(s => s.from('users').update({ is_active: !u.is_active }).eq('id', u.id), { loaderText: 'กำลังบันทึก...', success: 'เปลี่ยนสถานะบัญชีเรียบร้อย', error: 'เปลี่ยนสถานะไม่สำเร็จ' });
-        if (r.ok) { await logAudit(u.is_active ? 'deactivate' : 'activate', 'users', u.id, { username: u.username }); refresh(); }
+        const r = await db(s => s.rpc('sfh_admin_user_set_active', tk({ p_id: u.id, p_active: !u.is_active })), { loaderText: 'กำลังบันทึก...', success: 'เปลี่ยนสถานะบัญชีเรียบร้อย', error: 'เปลี่ยนสถานะไม่สำเร็จ' });
+        if (r.ok) refresh();
         break;
       }
       case 'delete': {
         if (!isSuperAdmin() || !requirePermission('users.manage')) return;
         const ok = await confirmModal({ title: 'ลบผู้ใช้งาน', message: `ต้องการลบบัญชี <b>${esc(u.full_name)}</b> (@${esc(u.username)}) ถาวรใช่หรือไม่?<br><span class="text-xs text-slate-400">แนะนำให้ "ปิดบัญชี" แทนการลบ เพื่อเก็บประวัติการใช้งาน</span>`, confirmText: 'ลบผู้ใช้' });
         if (!ok) return;
-        const r = await db(s => s.from('users').delete().eq('id', u.id), { loaderText: 'กำลังลบ...', success: 'ลบผู้ใช้งานเรียบร้อย', error: 'ลบไม่สำเร็จ' });
-        if (r.ok) { await logAudit('delete', 'users', u.id, { username: u.username, full_name: u.full_name }); refresh(); }
+        const r = await db(s => s.rpc('sfh_admin_user_delete', tk({ p_id: u.id })), { loaderText: 'กำลังลบ...', success: 'ลบผู้ใช้งานเรียบร้อย', error: 'ลบไม่สำเร็จ' });
+        if (r.ok) refresh();
         break;
       }
       case 'export': {
@@ -2005,7 +1996,7 @@ function openUserForm(u, data, onSaved) {
       <div class="flex items-center gap-3 pt-7"><label class="switch"><input type="checkbox" name="is_active" ${u?.is_active !== false ? 'checked' : ''} ${self ? 'disabled' : ''}><span class="slider"></span></label><span class="text-sm text-slate-600">เปิดใช้งานบัญชี</span></div>
       ${editing ? '' : `<div><label class="label">รหัสผ่าน *</label><input name="password" type="password" class="input" minlength="6" autocomplete="new-password" required></div>
         <div><label class="label">ยืนยันรหัสผ่าน *</label><input name="password2" type="password" class="input" minlength="6" autocomplete="new-password" required></div>`}
-      <p class="sm:col-span-2 text-xs text-slate-400">${ic('info', 'w-3.5 h-3.5 inline')} รหัสผ่านถูกเก็บแบบ hash (bcrypt) ในตาราง user_credentials ผ่านฟังก์ชัน sfh_set_password</p>
+      <p class="sm:col-span-2 text-xs text-slate-400">${ic('info', 'w-3.5 h-3.5 inline')} รหัสผ่านถูกเก็บแบบ hash (bcrypt) ในตาราง user_credentials (ตั้งผ่านฟังก์ชันที่ตรวจสิทธิ์ผู้ดูแล)</p>
     </form>`,
     footer: `<button class="btn btn-ghost" data-close>ยกเลิก</button><button class="btn btn-primary" type="submit" form="userForm">${ic('save')} บันทึก</button>`,
   });
@@ -2026,16 +2017,14 @@ function openUserForm(u, data, onSaved) {
       if (!/^[a-z0-9._-]{3,30}$/.test(username)) return showToast('username ต้องเป็น a-z, 0-9, . _ - ยาว 3–30 ตัวอักษร', 'warning');
       if (form.password.value.length < 6) return showToast('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร', 'warning');
       if (form.password.value !== form.password2.value) return showToast('ยืนยันรหัสผ่านไม่ตรงกัน', 'warning');
-      const r = await db(s => s.from('users').insert({ ...payload, username, created_by: me.id }).select().single(), { loaderText: 'กำลังสร้างผู้ใช้...', error: 'เพิ่มผู้ใช้ไม่สำเร็จ' });
+      // สร้างบัญชี + ตั้งรหัสผ่าน + Audit Log ในฟังก์ชันเดียว (ตรวจสิทธิ์ฝั่งฐานข้อมูล)
+      const r = await db(s => s.rpc('sfh_admin_user_save', tk({ p_id: null, p_data: { ...payload, username }, p_password: form.password.value })),
+        { loaderText: 'กำลังสร้างผู้ใช้...', error: 'เพิ่มผู้ใช้ไม่สำเร็จ' });
       if (!r.ok) return;
-      const p = await db(s => s.rpc('sfh_set_password', { p_user_id: r.data.id, p_new_password: form.password.value }), { loaderText: 'กำลังตั้งรหัสผ่าน...', error: 'ตั้งรหัสผ่านไม่สำเร็จ' });
-      if (p.ok && !p.data?.success) showToast(p.data?.message || 'ตั้งรหัสผ่านไม่สำเร็จ', 'error');
-      await logAudit('create', 'users', r.data.id, { username, full_name: payload.full_name });
       showToast('เพิ่มผู้ใช้งานเรียบร้อย', 'success');
     } else {
-      const r = await db(s => s.from('users').update(payload).eq('id', u.id), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_user_save', tk({ p_id: u.id, p_data: payload })), { loaderText: 'กำลังบันทึก...', error: 'บันทึกไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('update', 'users', u.id, { username: u.username });
       showToast('บันทึกข้อมูลผู้ใช้เรียบร้อย', 'success');
       if (self) { await verifySession({ silent: true }); renderChrome(); }
     }
@@ -2061,10 +2050,9 @@ function openResetPassword(u) {
     const f = e.target;
     if (f.p1.value.length < 6) return showToast('รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร', 'warning');
     if (f.p1.value !== f.p2.value) return showToast('ยืนยันรหัสผ่านไม่ตรงกัน', 'warning');
-    const r = await db(s => s.rpc('sfh_set_password', { p_user_id: u.id, p_new_password: f.p1.value }), { loaderText: 'กำลังบันทึก...', error: 'รีเซ็ตรหัสผ่านไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_admin_set_password', tk({ p_user_id: u.id, p_new_password: f.p1.value })), { loaderText: 'กำลังบันทึก...', error: 'รีเซ็ตรหัสผ่านไม่สำเร็จ' });
     if (!r.ok) return;
     if (!r.data?.success) return showToast(r.data?.message || 'รีเซ็ตรหัสผ่านไม่สำเร็จ', 'error');
-    await logAudit('reset_password', 'users', u.id, { username: u.username });
     showToast('รีเซ็ตรหัสผ่านเรียบร้อย', 'success');
     m.close();
   };
@@ -2072,16 +2060,11 @@ function openResetPassword(u) {
 
 async function openUserPermissions(u, onSaved) {
   if (!requirePermission('users.manage') || !canManageUser(u)) return;
-  const r = await dbMany([
-    s => s.from('permissions').select('*').order('sort_order'),
-    s => s.from('role_permissions').select('permission_id').eq('role_id', u.role_id),
-    s => s.from('user_permissions').select('permission_id').eq('user_id', u.id),
-    s => s.from('modules').select('module_key, name, status, allow_guest'),
-  ], { error: 'โหลดสิทธิ์ไม่สำเร็จ' });
+  const r = await db(s => s.rpc('sfh_admin_user_perms', tk({ p_user_id: u.id })), { error: 'โหลดสิทธิ์ไม่สำเร็จ' });
   if (!r.ok) return;
-  const [perms, rolePerms, userPerms, mods] = r.data;
-  const fromRole = new Set(rolePerms.map(x => x.permission_id));
-  const original = new Set(userPerms.map(x => x.permission_id));
+  const { perms = [], role_perm_ids = [], user_perm_ids = [], modules: mods = [] } = r.data || {};
+  const fromRole = new Set(role_perm_ids);
+  const original = new Set(user_perm_ids);
   const isTargetSuper = u.roles?.role_key === 'super_admin';
   const locked = (p) => isTargetSuper || fromRole.has(p.id) || (!isSuperAdmin() && !p.org_admin_grantable);
   const m = openModal({
@@ -2109,15 +2092,9 @@ async function openUserPermissions(u, onSaved) {
     const added = editable.filter(id => checked.has(id) && !original.has(id));
     const removed = editable.filter(id => !checked.has(id) && original.has(id));
     if (!added.length && !removed.length) { m.close(); return showToast('ไม่มีการเปลี่ยนแปลง', 'info'); }
-    const me = currentUser();
-    const r = await db(async (s) => {
-      if (added.length) { const x = await s.from('user_permissions').insert(added.map(id => ({ user_id: u.id, permission_id: id, org_id: u.org_id, created_by: me.id }))); if (x.error) return x; }
-      if (removed.length) { const y = await s.from('user_permissions').delete().eq('user_id', u.id).in('permission_id', removed); if (y.error) return y; }
-      return { data: true };
-    }, { loaderText: 'กำลังบันทึกสิทธิ์...', success: 'บันทึกสิทธิ์รายบุคคลเรียบร้อย', error: 'บันทึกสิทธิ์ไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_admin_user_perms_save', tk({ p_user_id: u.id, p_add: added, p_remove: removed })),
+      { loaderText: 'กำลังบันทึกสิทธิ์...', success: 'บันทึกสิทธิ์รายบุคคลเรียบร้อย', error: 'บันทึกสิทธิ์ไม่สำเร็จ' });
     if (!r.ok) return;
-    const keyOf = (id) => perms.find(p => p.id === id)?.perm_key;
-    await logAudit('update_permissions', 'user_permissions', u.id, { username: u.username, added: added.map(keyOf), removed: removed.map(keyOf) });
     m.close();
     onSaved && onSaved();
   };
@@ -2136,15 +2113,9 @@ async function renderRoles(el) {
   refreshIcons();
   let data, selectedId = null, working = new Set();
   const load = async () => {
-    const r = await dbMany([
-      s => s.from('roles').select('*').order('level', { ascending: false }),
-      s => s.from('permissions').select('*').order('sort_order'),
-      s => s.from('role_permissions').select('role_id, permission_id'),
-      s => s.from('users').select('role_id'),
-      s => s.from('modules').select('*').order('sort_order'),
-    ], { error: 'โหลดข้อมูล Role ไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_admin_roles_data', tk()), { error: 'โหลดข้อมูล Role ไม่สำเร็จ' });
     if (!r.ok) { $('#roleMatrix', el).innerHTML = errorState('โหลดข้อมูลไม่สำเร็จ', dbErrorMessage(r.error)); return false; }
-    const [roles, perms, rps, users, mods] = r.data;
+    const { roles = [], perms = [], rps = [], users = [], mods = [] } = r.data || {};
     data = { roles, perms, rps, users, mods };
     if (!selectedId || !roles.some(x => x.id === selectedId)) selectedId = roles[0]?.id;
     return true;
@@ -2232,10 +2203,9 @@ async function renderRoles(el) {
       const t = e.target.closest('[data-grant]');
       if (!t || !requirePermission('roles.manage')) return;
       const p = data.perms.find(x => x.id === t.dataset.grant);
-      const r = await db(s => s.from('permissions').update({ org_admin_grantable: t.checked }).eq('id', p.id), { loader: false, success: 'บันทึกแล้ว', error: 'บันทึกไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_perm_save', tk({ p_id: p.id, p_data: { org_admin_grantable: t.checked } })), { loader: false, success: 'บันทึกแล้ว', error: 'บันทึกไม่สำเร็จ' });
       if (!r.ok) { t.checked = !t.checked; return; }
       p.org_admin_grantable = t.checked;
-      logAudit('update', 'permissions', p.id, { perm_key: p.perm_key, org_admin_grantable: t.checked });
     });
     m.el.addEventListener('click', async (e) => {
       const d = e.target.closest('[data-del-perm]');
@@ -2243,9 +2213,8 @@ async function renderRoles(el) {
       const p = data.perms.find(x => x.id === d.dataset.delPerm);
       const ok = await confirmModal({ title: 'ลบ Permission', message: `ลบ <code>${esc(p.perm_key)}</code> ออกจากระบบ? สิทธิ์นี้จะถูกถอนจากทุก Role และผู้ใช้` });
       if (!ok) return;
-      const r = await db(s => s.from('permissions').delete().eq('id', p.id), { success: 'ลบ Permission เรียบร้อย', error: 'ลบไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_perm_delete', tk({ p_id: p.id })), { success: 'ลบ Permission เรียบร้อย', error: 'ลบไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('delete', 'permissions', p.id, { perm_key: p.perm_key });
       m.close(); await load(); drawList(); drawMatrix();
     });
     $('#newPermForm', m.el).onsubmit = async (e) => {
@@ -2255,9 +2224,8 @@ async function renderRoles(el) {
       const action = f.perm_action.value.trim().toLowerCase();
       if (!/^[a-z_]{2,30}$/.test(action)) return showToast('action ใช้ได้เฉพาะ a-z และ _', 'warning');
       const row = { module_key: f.module_key.value, action, perm_key: `${f.module_key.value}.${action}`, name: f.perm_name.value.trim(), sort_order: 500 };
-      const r = await db(s => s.from('permissions').insert(row).select().single(), { success: `เพิ่ม ${row.perm_key} เรียบร้อย`, error: 'เพิ่ม Permission ไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_perm_save', tk({ p_id: null, p_data: row })), { success: `เพิ่ม ${row.perm_key} เรียบร้อย`, error: 'เพิ่ม Permission ไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('create', 'permissions', r.data.id, { perm_key: row.perm_key });
       f.reset(); m.close(); await load(); drawList(); drawMatrix();
     };
   };
@@ -2296,11 +2264,10 @@ async function renderRoles(el) {
       if (!editing) {
         const key = f.role_key.value.trim().toLowerCase();
         if (!/^[a-z_]{3,30}$/.test(key)) return showToast('role_key ใช้ได้เฉพาะ a-z และ _ (3–30 ตัว)', 'warning');
-        r = await db(s => s.from('roles').insert({ ...payload, role_key: key }).select().single(), { success: 'เพิ่ม Role เรียบร้อย', error: 'เพิ่ม Role ไม่สำเร็จ' });
-        if (r.ok) { selectedId = r.data.id; await logAudit('create', 'roles', r.data.id, { role_key: key }); }
+        r = await db(s => s.rpc('sfh_admin_role_save', tk({ p_id: null, p_data: { ...payload, role_key: key } })), { success: 'เพิ่ม Role เรียบร้อย', error: 'เพิ่ม Role ไม่สำเร็จ' });
+        if (r.ok) selectedId = r.data?.id;
       } else {
-        r = await db(s => s.from('roles').update(payload).eq('id', role.id), { success: 'บันทึก Role เรียบร้อย', error: 'บันทึก Role ไม่สำเร็จ' });
-        if (r.ok) await logAudit('update', 'roles', role.id, { role_key: role.role_key });
+        r = await db(s => s.rpc('sfh_admin_role_save', tk({ p_id: role.id, p_data: payload })), { success: 'บันทึก Role เรียบร้อย', error: 'บันทึก Role ไม่สำเร็จ' });
       }
       if (!r.ok) return;
       m.close(); await load(); drawList(); drawMatrix();
@@ -2332,9 +2299,8 @@ async function renderRoles(el) {
       if (data.users.some(u => u.role_id === role.id)) return showToast('ไม่สามารถลบได้ เนื่องจากยังมีผู้ใช้งานใน Role นี้', 'warning');
       const ok = await confirmModal({ title: 'ลบ Role', message: `ต้องการลบ Role <b>${esc(role.name)}</b> ใช่หรือไม่?` });
       if (!ok) return;
-      const r = await db(s => s.from('roles').delete().eq('id', role.id), { success: 'ลบ Role เรียบร้อย', error: 'ลบ Role ไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_role_delete', tk({ p_id: role.id })), { success: 'ลบ Role เรียบร้อย', error: 'ลบ Role ไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('delete', 'roles', role.id, { role_key: role.role_key });
       selectedId = null; await load(); drawList(); drawMatrix();
       return;
     }
@@ -2346,15 +2312,9 @@ async function renderRoles(el) {
       const added = editable.filter(id => checked.has(id) && !working.has(id));
       const removed = [...working].filter(id => editable.includes(id) && !checked.has(id));
       if (!added.length && !removed.length) return showToast('ไม่มีการเปลี่ยนแปลง', 'info');
-      const me = currentUser();
-      const r = await db(async (s) => {
-        if (added.length) { const x = await s.from('role_permissions').insert(added.map(id => ({ role_id: role.id, permission_id: id, created_by: me.id }))); if (x.error) return x; }
-        if (removed.length) { const y = await s.from('role_permissions').delete().eq('role_id', role.id).in('permission_id', removed); if (y.error) return y; }
-        return { data: true };
-      }, { loaderText: 'กำลังบันทึกสิทธิ์...', success: `บันทึกสิทธิ์ของ ${role.name} เรียบร้อย`, error: 'บันทึกสิทธิ์ไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_role_perms_save', tk({ p_role_id: role.id, p_add: added, p_remove: removed })),
+        { loaderText: 'กำลังบันทึกสิทธิ์...', success: `บันทึกสิทธิ์ของ ${role.name} เรียบร้อย`, error: 'บันทึกสิทธิ์ไม่สำเร็จ' });
       if (!r.ok) return;
-      const keyOf = (id) => data.perms.find(p => p.id === id)?.perm_key;
-      await logAudit('update_permissions', 'role_permissions', role.id, { role_key: role.role_key, added: added.map(keyOf), removed: removed.map(keyOf) });
       await load(); drawList(); drawMatrix();
       if (role.role_key === 'guest' || role.id === currentRole()?.id) { await verifySession({ silent: true }); await reloadNavigation(); }
     }
@@ -2384,10 +2344,9 @@ async function renderOrganizations(el) {
       <button class="btn-icon hover:!text-blush-500 hover:!bg-blush-50" data-act="delete" data-id="${o.id}" title="ลบ">${ic('trash-2')}</button>`,
   });
   const refresh = async () => {
-    const r = await dbMany([s => s.from('organizations').select('*').order('code'), s => s.from('users').select('org_id')], { error: 'โหลดหน่วยงานไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_admin_orgs_list', tk()), { error: 'โหลดหน่วยงานไม่สำเร็จ' });
     if (!r.ok) return;
-    const [orgs, users] = r.data;
-    rows = orgs.map(o => ({ ...o, user_count: users.filter(u => u.org_id === o.id).length }));
+    rows = r.data || [];
     table.setRows(rows);
   };
   await refresh();
@@ -2416,11 +2375,9 @@ async function renderOrganizations(el) {
         description: form.description.value.trim() || null, is_active: form.is_active.checked,
       };
       if (!payload.code || !payload.name) return showToast('กรุณากรอกรหัสและชื่อหน่วยงาน', 'warning');
-      const r = o
-        ? await db(s => s.from('organizations').update(payload).eq('id', o.id), { loaderText: 'กำลังบันทึก...', success: 'บันทึกหน่วยงานเรียบร้อย', error: 'บันทึกไม่สำเร็จ' })
-        : await db(s => s.from('organizations').insert({ ...payload, created_by: currentUser().id }).select().single(), { loaderText: 'กำลังบันทึก...', success: 'เพิ่มหน่วยงานเรียบร้อย', error: 'เพิ่มไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_org_save', tk({ p_id: o?.id || null, p_data: payload })),
+        { loaderText: 'กำลังบันทึก...', success: o ? 'บันทึกหน่วยงานเรียบร้อย' : 'เพิ่มหน่วยงานเรียบร้อย', error: o ? 'บันทึกไม่สำเร็จ' : 'เพิ่มไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit(o ? 'update' : 'create', 'organizations', o?.id || r.data?.id, { code: payload.code, name: payload.name });
       form.reset(); m.close(); refresh();
     };
   };
@@ -2435,8 +2392,8 @@ async function renderOrganizations(el) {
       if (o.user_count > 0) return showToast(`ไม่สามารถลบได้ เนื่องจากมีผู้ใช้งาน ${o.user_count} คนในหน่วยงานนี้ (แนะนำให้ปิดใช้งานแทน)`, 'warning', 5000);
       const ok = await confirmModal({ title: 'ลบหน่วยงาน', message: `ต้องการลบ <b>${esc(o.name)}</b> ใช่หรือไม่?` });
       if (!ok) return;
-      const r = await db(s => s.from('organizations').delete().eq('id', o.id), { loaderText: 'กำลังลบ...', success: 'ลบหน่วยงานเรียบร้อย', error: 'ลบไม่สำเร็จ' });
-      if (r.ok) { await logAudit('delete', 'organizations', o.id, { code: o.code, name: o.name }); refresh(); }
+      const r = await db(s => s.rpc('sfh_admin_org_delete', tk({ p_id: o.id })), { loaderText: 'กำลังลบ...', success: 'ลบหน่วยงานเรียบร้อย', error: 'ลบไม่สำเร็จ' });
+      if (r.ok) refresh();
     }
   };
 }
@@ -2527,9 +2484,8 @@ async function renderModulesAdmin(el) {
         planned_features: form.features.value.split('\n').map(x => x.trim()).filter(Boolean),
       };
       if (!payload.name) return showToast('กรุณากรอกชื่อโมดูล', 'warning');
-      const r = await db(s => s.from('modules').update(payload).eq('id', m.id), { loaderText: 'กำลังบันทึก...', success: 'บันทึกโมดูลเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_module_save', tk({ p_id: m.id, p_data: payload })), { loaderText: 'กำลังบันทึก...', success: 'บันทึกโมดูลเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('update', 'modules', m.module_key, { name: payload.name });
       modal.close(); afterChange();
     };
   };
@@ -2545,9 +2501,8 @@ async function renderModulesAdmin(el) {
         const ok = await confirmModal({ title: 'ปิดใช้งานโมดูล', message: `โมดูล <b>${esc(m.name)}</b> จะถูกซ่อนจากเมนูของทุกคน (รวมถึงบุคคลทั่วไป) ต้องการดำเนินการต่อหรือไม่?`, confirmText: 'ปิดใช้งาน', confirmIcon: 'ban' });
         if (!ok) return;
       }
-      const r = await db(s => s.from('modules').update({ status }).eq('id', m.id), { loaderText: 'กำลังเปลี่ยนสถานะ...', success: `เปลี่ยนสถานะเป็น ${status} เรียบร้อย`, error: 'เปลี่ยนสถานะไม่สำเร็จ' });
+      const r = await db(s => s.rpc('sfh_admin_module_save', tk({ p_id: m.id, p_data: { status } })), { loaderText: 'กำลังเปลี่ยนสถานะ...', success: `เปลี่ยนสถานะเป็น ${status} เรียบร้อย`, error: 'เปลี่ยนสถานะไม่สำเร็จ' });
       if (!r.ok) return;
-      await logAudit('update_status', 'modules', m.module_key, { from: m.status, to: status });
       afterChange();
     }
   };
@@ -2556,9 +2511,8 @@ async function renderModulesAdmin(el) {
     if (!t) return;
     const m = mods.find(x => x.module_key === t.dataset.actGuest);
     if (!requirePermission('modules.manage') || m.guest_locked) { t.checked = m.allow_guest; return; }
-    const r = await db(s => s.from('modules').update({ allow_guest: t.checked }).eq('id', m.id), { loaderText: 'กำลังบันทึก...', success: t.checked ? 'อนุญาตให้บุคคลทั่วไปแล้ว (เปิดเมนูได้ที่หน้า "เมนูสาธารณะ")' : 'ปิดการเข้าถึงของบุคคลทั่วไปแล้ว', error: 'บันทึกไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_admin_module_save', tk({ p_id: m.id, p_data: { allow_guest: t.checked } })), { loaderText: 'กำลังบันทึก...', success: t.checked ? 'อนุญาตให้บุคคลทั่วไปแล้ว (เปิดเมนูได้ที่หน้า "เมนูสาธารณะ")' : 'ปิดการเข้าถึงของบุคคลทั่วไปแล้ว', error: 'บันทึกไม่สำเร็จ' });
     if (!r.ok) { t.checked = m.allow_guest; return; }
-    await logAudit('update', 'modules', m.module_key, { allow_guest: t.checked });
     afterChange();
   };
 }
@@ -2693,21 +2647,13 @@ async function renderPublicMenu(el) {
       const toAdd = items.filter(i => !i.lock && i.permId && i.guestOn && !guestPermIds.has(i.permId)).map(i => i.permId);
       const toRemove = items.filter(i => !i.lock && i.permId && !i.guestOn && guestPermIds.has(i.permId)).map(i => i.permId);
       if (!menuUpdates.length && !toAdd.length && !toRemove.length) return showToast('ไม่มีการเปลี่ยนแปลง', 'info');
-      const r = await db(async (s) => {
-        for (const { i, sort_order } of menuUpdates) {
-          const x = await s.from('menus').update({ label: i.label, icon: i.icon || 'circle', sort_order }).eq('id', i.id);
-          if (x.error) return x;
-        }
-        if (toAdd.length) { const x = await s.from('role_permissions').insert(toAdd.map(id => ({ role_id: guestRole.id, permission_id: id, created_by: currentUser().id }))); if (x.error) return x; }
-        if (toRemove.length) { const x = await s.from('role_permissions').delete().eq('role_id', guestRole.id).in('permission_id', toRemove); if (x.error) return x; }
-        return { data: true };
-      }, { loaderText: 'กำลังบันทึกเมนูสาธารณะ...', success: 'บันทึกการตั้งค่าเมนูสาธารณะเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
-      if (!r.ok) return;
       const keyOf = (id) => perms.find(p => p.id === id)?.perm_key;
-      await logAudit('update_public_menu', 'menus', null, {
-        updated_menus: menuUpdates.map(({ i }) => i.menu_key), guest_enabled: toAdd.map(keyOf), guest_disabled: toRemove.map(keyOf),
-        order: items.map(i => i.menu_key),
-      });
+      const r = await db(s => s.rpc('sfh_admin_public_menu_save', tk({
+        p_menus: menuUpdates.map(({ i, sort_order }) => ({ id: i.id, label: i.label, icon: i.icon || 'circle', sort_order })),
+        p_guest_add: toAdd, p_guest_remove: toRemove,
+        p_details: { updated_menus: menuUpdates.map(({ i }) => i.menu_key), guest_enabled: toAdd.map(keyOf), guest_disabled: toRemove.map(keyOf), order: items.map(i => i.menu_key) },
+      })), { loaderText: 'กำลังบันทึกเมนูสาธารณะ...', success: 'บันทึกการตั้งค่าเมนูสาธารณะเรียบร้อย', error: 'บันทึกไม่สำเร็จ' });
+      if (!r.ok) return;
       await load(); redraw(); await reloadNavigation();
     }
   };
@@ -2722,18 +2668,10 @@ const PLATFORM_SETTINGS = [
 ];
 const ORG_SETTINGS = [['signer_name', 'ชื่อผู้ลงนามในเอกสาร'], ['signer_position', 'ตำแหน่งผู้ลงนาม'], ['doc_footer', 'ข้อความท้ายเอกสาร/รายงาน', 'textarea']];
 
-async function upsertSettings(orgId, values, rows, isPublic) {
-  const me = currentUser();
-  return db(async (s) => {
-    for (const [key, value] of Object.entries(values)) {
-      const ex = rows.find(r => r.setting_key === key && (r.org_id || null) === (orgId || null));
-      const x = ex
-        ? await s.from('system_settings').update({ setting_value: value }).eq('id', ex.id)
-        : await s.from('system_settings').insert({ org_id: orgId || null, setting_key: key, setting_value: value, is_public: isPublic, created_by: me.id });
-      if (x.error) return x;
-    }
-    return { data: true };
-  }, { loaderText: 'กำลังบันทึกการตั้งค่า...', success: 'บันทึกการตั้งค่าเรียบร้อย', error: 'บันทึกการตั้งค่าไม่สำเร็จ' });
+/** บันทึกค่าตั้ง (เพิ่ม/แก้ตาม org_id + setting_key) ผ่านฟังก์ชันที่ตรวจสิทธิ์ · Audit Log บันทึกในฐานข้อมูล */
+async function upsertSettings(orgId, values, isPublic, details = null, opts = {}) {
+  return db(s => s.rpc('sfh_settings_save', tk({ p_org_id: orgId || null, p_values: values, p_public: !!isPublic, p_details: details })),
+    { loaderText: 'กำลังบันทึกการตั้งค่า...', success: 'บันทึกการตั้งค่าเรียบร้อย', error: 'บันทึกการตั้งค่าไม่สำเร็จ', ...opts });
 }
 async function renderSettings(el) {
   if (!hasAnyPermission('settings.manage', 'settings.org')) return requirePermission('settings.org');
@@ -2743,7 +2681,7 @@ async function renderSettings(el) {
     `<div class="grid lg:grid-cols-2 gap-5 items-start"><div id="setPlatform"></div><div id="setOrg"></div></div>`;
   refreshIcons();
   const r = await dbMany([
-    s => s.from('system_settings').select('*'),
+    s => s.rpc('sfh_settings_list', tk()),
     s => isSuperAdmin() ? s.from('organizations').select('*').order('code') : s.from('organizations').select('*').eq('id', me.org_id),
   ], { error: 'โหลดการตั้งค่าไม่สำเร็จ' });
   if (!r.ok) return;
@@ -2769,11 +2707,10 @@ async function renderSettings(el) {
       if (!img.ok) return;
       if (img.changed) { values.logo_url = img.url || ''; values.logo_path = img.path || ''; }
       const pub = { ...values }; delete pub.logo_path;
-      const s1 = await upsertSettings(null, pub, rows, true);
+      const s1 = await upsertSettings(null, pub, true, { scope: 'platform', keys: Object.keys(values) });
       if (!s1.ok) { if (img.path) deleteFile(img.path); return; }
-      if ('logo_path' in values) await upsertSettings(null, { logo_path: values.logo_path }, rows, false);
+      if ('logo_path' in values) await upsertSettings(null, { logo_path: values.logo_path }, false, { scope: 'platform', keys: ['logo_path'] }, { loader: false, success: '' });
       if (img.oldToDelete) deleteFile(img.oldToDelete);
-      await logAudit('update_settings', 'system_settings', null, { scope: 'platform', keys: Object.keys(values) });
       await loadSettings(); renderChrome(); renderSettings(el);
     };
   } else {
@@ -2808,13 +2745,12 @@ async function renderSettings(el) {
       if (!isSuperAdmin() && orgId !== me.org_id) return showToast('แก้ไขได้เฉพาะหน่วยงานของตนเอง', 'error');
       const f = e.target;
       const orgPayload = { phone: f.phone.value.trim() || null, email: f.email.value.trim() || null, address: f.address.value.trim() || null, description: f.description.value.trim() || null };
-      const r1 = await db(s => s.from('organizations').update(orgPayload).eq('id', orgId), { loaderText: 'กำลังบันทึก...', error: 'บันทึกข้อมูลหน่วยงานไม่สำเร็จ' });
+      const r1 = await db(s => s.rpc('sfh_org_profile_save', tk({ p_org_id: orgId, p_data: orgPayload })), { loaderText: 'กำลังบันทึก...', error: 'บันทึกข้อมูลหน่วยงานไม่สำเร็จ' });
       if (!r1.ok) return;
       const values = Object.fromEntries(ORG_SETTINGS.map(([k]) => [k, f[k].value.trim()]));
-      const r2 = await upsertSettings(orgId, values, rows, false);
+      const r2 = await upsertSettings(orgId, values, false, { scope: 'organization', keys: [...Object.keys(orgPayload), ...Object.keys(values)] });
       if (!r2.ok) return;
-      await logAudit('update_settings', 'system_settings', orgId, { scope: 'organization', keys: [...Object.keys(orgPayload), ...Object.keys(values)] });
-      const again = await db(s => s.from('system_settings').select('*'), { loader: false, silent: true });
+      const again = await db(s => s.rpc('sfh_settings_list', tk()), { loader: false, silent: true });
       if (again.ok) rows = again.data;
       Object.assign(o, orgPayload);
     };
@@ -2835,9 +2771,7 @@ async function renderAudit(el) {
   refreshIcons();
   let rows = [];
   const fetchRows = async () => {
-    let q = sb.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(1000);
-    if (!isSuperAdmin()) q = q.eq('org_id', me.org_id);
-    const r = await db(() => q, { error: 'โหลด Audit Log ไม่สำเร็จ' });
+    const r = await db(s => s.rpc('sfh_audit_list', tk({ p_limit: 1000 })), { error: 'โหลด Audit Log ไม่สำเร็จ' });
     return r.ok ? r.data : null;
   };
   rows = await fetchRows();
@@ -3697,10 +3631,9 @@ async function calLoad({ loader = true } = {}) {
 /** ผู้ใช้ในหน่วยงาน (ใช้เป็นรายการแนะนำชื่อ/ตำแหน่ง) */
 async function calLoadUsers() {
   if (Cal.users) return Cal.users;
-  const u = currentUser();
-  let q = sb.from('users').select('id, full_name, position, org_id').eq('is_active', true).order('full_name');
-  if (!isSuperAdmin() && u?.org_id) q = q.eq('org_id', u.org_id);
-  const r = await db(() => q, { loader: false, silent: true });
+  if (!isLoggedIn()) return (Cal.users = []);
+  // ฐานข้อมูลกรองเฉพาะผู้ใช้ที่ใช้งานอยู่ในหน่วยงานเดียวกัน (Super Admin เห็นทุกหน่วยงาน)
+  const r = await db(s => s.rpc('sfh_user_directory', tk()), { loader: false, silent: true });
   Cal.users = r.data || [];
   return Cal.users;
 }
@@ -7813,22 +7746,17 @@ async function payrollSignerDefaults() {
   try { const local = JSON.parse(localStorage.getItem(PAYROLL_SIGNER_KEY) || 'null'); if (local?.name) return local; } catch { /* ignore */ }
   const org = currentUser()?.org_id;
   if (!org) return { name: '', position: '' };
-  const r = await db(s => s.from('system_settings').select('id, setting_key, setting_value').eq('org_id', org).in('setting_key', ['signer_name', 'signer_position']), { loader: false, silent: true });
-  const m = Object.fromEntries((r.data || []).map(x => [x.setting_key, x.setting_value]));
+  const r = await db(s => s.rpc('sfh_org_settings_get', tk({ p_keys: ['signer_name', 'signer_position'] })), { loader: false, silent: true });
+  const m = r.data || {};
   return { name: m.signer_name || '', position: m.signer_position || '' };
 }
 async function payrollSaveSignerDefault(sig) {
   const org = currentUser()?.org_id;
   if (hasPermission('settings.org') && org) {
-    const r = await db(s => s.from('system_settings').select('id, setting_key').eq('org_id', org).in('setting_key', ['signer_name', 'signer_position']), { loader: false, silent: true });
-    const rows = r.data || [];
-    for (const [key, value] of [['signer_name', sig.name], ['signer_position', sig.position]]) {
-      const ex = rows.find(x => x.setting_key === key);
-      await db(s => ex ? s.from('system_settings').update({ setting_value: value }).eq('id', ex.id)
-        : s.from('system_settings').insert({ org_id: org, setting_key: key, setting_value: value, is_public: false, created_by: currentUser().id }), { loader: false, silent: true });
-    }
+    const r = await upsertSettings(org, { signer_name: sig.name, signer_position: sig.position }, false,
+      { scope: 'organization', keys: ['signer_name', 'signer_position'], from: 'payroll' }, { loader: false, success: '' });
+    if (!r.ok) return;
     try { localStorage.removeItem(PAYROLL_SIGNER_KEY); } catch { /* ignore */ }
-    logAudit('update_settings', 'system_settings', org, { scope: 'organization', keys: ['signer_name', 'signer_position'], from: 'payroll' });
     showToast('บันทึกผู้ลงนามเป็นค่าเริ่มต้นของหน่วยงานแล้ว', 'success');
   } else {
     try { localStorage.setItem(PAYROLL_SIGNER_KEY, JSON.stringify(sig)); } catch { /* ignore */ }
