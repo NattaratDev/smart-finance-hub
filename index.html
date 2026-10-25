@@ -6454,8 +6454,43 @@ function rgPrintRoot() {
   let root = $('#rgPrintRoot'); if (!root) { root = document.createElement('div'); root.id = 'rgPrintRoot'; document.body.appendChild(root); }
   return root;
 }
+/** จัดหน้าใหม่ตามความสูงจริงก่อนพิมพ์: ถ้าเนื้อหาล้นถึงข้อความท้ายหน้า (พิมพ์เมื่อ/หน้า)
+ *  ย้ายแถวท้ายตารางไปหน้าต่อ (หัวรายงาน/หัวตารางเดิม) และเว้นระยะเหนือท้ายหน้า 3 มม.
+ *  ส่วนท้ายรายงาน (ยอดรวมแบบข้อความ หมายเหตุ ช่องลงนาม) ย้ายตามไปหน้าสุดท้าย · หน้าที่ไม่ล้นไม่เปลี่ยน */
+async function rgReflowPages(root) {
+  try { await document.fonts?.ready; } catch { /* ignore */ }
+  const gap = 3 * 96 / 25.4;
+  const pages = () => [...root.children].filter(c => c.classList?.contains('rg-page'));
+  const rel = (pg, el) => el.getBoundingClientRect().bottom - pg.getBoundingClientRect().top;
+  const limit = (pg) => { const f = [...pg.children].find(c => c.classList.contains('foot'));
+    return (f ? f.getBoundingClientRect().top - pg.getBoundingClientRect().top : pg.clientHeight - parseFloat(getComputedStyle(pg).paddingBottom)) - gap; };
+  let changed = false;
+  for (let i = 0; i < pages().length && i < 300; i++) {
+    const pg = pages()[i], tables = [...pg.children].filter(c => c.tagName === 'TABLE');
+    if (tables.length !== 1 || !tables[0].tBodies[0]) continue;
+    const tbl = tables[0], tb = tbl.tBodies[0];
+    const trailers = () => { const kids = [...pg.children], at = kids.indexOf(tbl); return kids.slice(at + 1).filter(c => !c.classList.contains('foot')); };
+    const bottom = () => Math.max(rel(pg, tbl), ...trailers().map(c => rel(pg, c)));
+    if (bottom() <= limit(pg)) continue;
+    // หน้าต่อ: คัดลอกหัวรายงาน/หัวตาราง/ท้ายหน้า แล้วย้ายส่วนท้ายรายงานไปไว้หน้าใหม่
+    const cont = pg.cloneNode(true), cTbl = [...cont.children].find(c => c.tagName === 'TABLE'), cTb = cTbl.tBodies[0];
+    cTb.innerHTML = '';
+    [...cont.children].slice([...cont.children].indexOf(cTbl) + 1).filter(c => !c.classList.contains('foot')).forEach(c => c.remove());
+    const cFoot = [...cont.children].find(c => c.classList.contains('foot'));
+    trailers().forEach(c => cont.insertBefore(c, cFoot || null));
+    pg.after(cont);
+    if (rel(pg, tbl) <= limit(pg)) cTbl.remove();   // ตารางพอดีหน้า ล้นเฉพาะส่วนท้าย → หน้าต่อไม่ต้องมีตาราง
+    else while (rel(pg, tbl) > limit(pg) && tb.rows.length > 1) cTb.prepend(tb.rows[tb.rows.length - 1]);
+    changed = true;
+  }
+  if (changed) {   // เลขหน้าใหม่ทั้งรายงาน
+    const all = pages();
+    all.forEach((pg, n) => [...pg.querySelectorAll('.foot span')].forEach(sp => { if (/หน้า\s*\d+\s*\/\s*\d+/.test(sp.textContent)) sp.textContent = sp.textContent.replace(/หน้า\s*\d+\s*\/\s*\d+/, `หน้า ${n + 1}/${all.length}`); }));
+  }
+}
 /** แสดงหน้าเอกสารที่สร้างแล้ว: พิมพ์ หรือ ดาวน์โหลด PDF */
 async function rgOutput(root, orientation, mode, filename) {
+  await rgReflowPages(root);
   if (mode === 'pdf') { await sfhPagesToPdf($$('.rg-page', root), filename, orientation); root.innerHTML = ''; return; }
   let pg = $('#rg-page-size'); if (!pg) { pg = document.createElement('style'); pg.id = 'rg-page-size'; document.head.appendChild(pg); }
   pg.textContent = `@media print{@page{size:A4 ${orientation};margin:0}}`;
@@ -7250,7 +7285,7 @@ async function insPrintFuelByUnit(mode, opts = {}) {
   const gs = sum(grand);
   if (!opts.unit) lines.push(`<tr class="tot"><td colspan="3" style="text-align:right">รวมทั้งสิ้น ${units.size} กอง · ${gs.n} ครั้ง</td><td class="n">${n2(gs.liters)}</td><td class="n">${rentMoney(gs.amount)}</td></tr>`);
   lines.push(`<tr><td colspan="5" style="text-align:right">(${esc(bahtText(Math.round(gs.amount * 100) / 100))})</td></tr>`);
-  const per = 34, pages = []; for (let i = 0; i < lines.length; i += per) pages.push(lines.slice(i, i + per));
+  const per = Math.max(lines.length, 1), pages = [lines];   // แบ่งหน้าตามความสูงจริงตอนพิมพ์ (rgReflowPages)
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true });
   root.innerHTML = pages.map((pg, pi) => `<div class="rg-page port"><h1>สรุปการใช้น้ำมันเชื้อเพลิง${opts.unit ? ' ' + esc(opts.unit) : 'แยกตามกอง'} ${period}</h1><div class="sub">${org} · ${d(from)} – ${d(to)}</div>
     <table><thead><tr><th style="width:9mm">ที่</th><th>วันที่เบิก</th><th style="width:40mm">ประเภทน้ำมัน</th><th style="width:28mm">จำนวนลิตร</th><th style="width:32mm">จำนวนบาท</th></tr></thead><tbody>${pg.join('')}</tbody></table>
@@ -7296,7 +7331,7 @@ async function insPrintTax(kind, mode, opts = {}) {
     title = 'ทะเบียนคุมภาษีรถประจำปี'; filename = 'ทะเบียนภาษีรถ.pdf';
   }
   if (!rows.length) { showToast(kind === 'current' ? 'ไม่มีรถในทะเบียน' : 'ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
-  const total = rows.reduce((s, r) => s + (+(r.t?.amount || 0)), 0), per = 16, pages = []; for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  const total = rows.reduce((s, r) => s + (+(r.t?.amount || 0)), 0), per = Math.max(rows.length, 1), pages = [rows];   // แบ่งหน้าตามความสูงจริงตอนพิมพ์
   const stCell = ({ t, s }) => s ? `<td style="font-size:10px${s === 'expired' ? ';color:#b8456f' : ''}">${INS_TAX_STATE[s].label}${t && s !== 'active' ? ` (${s === 'soon' ? 'อีก ' + calDaysBetween(today, t.due_date) : -calDaysBetween(today, t.due_date)} วัน)` : ''}</td>`
     : `<td style="font-size:10px">${RENT_STATUS[t.pay_status].label}</td>`;
   root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>${title}</h1><div class="sub">${org} · ข้อมูล ณ ${formatThaiDate(new Date(), { long: true })}</div>
@@ -7351,7 +7386,7 @@ async function insPrint(kind, mode, opts = {}) {
     title = `สรุปการเบิกจ่ายเบี้ยประกันภัย ปีงบประมาณ ${opts.fy}`; filename = `ทะเบียนประกันภัย_เบี้ยประกันปีงบ${opts.fy}.pdf`;
   }
   if (!rows.length) { showToast('ไม่มีข้อมูลสำหรับพิมพ์', 'warning'); return; }
-  const total = rows.reduce((s, r) => s + (+(r.p?.premium || 0)), 0), per = 16, pages = chunk(rows, per);
+  const total = rows.reduce((s, r) => s + (+(r.p?.premium || 0)), 0), per = Math.max(rows.length, 1), pages = chunk(rows, per);   // แบ่งหน้าตามความสูงจริงตอนพิมพ์
   root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>${title}</h1><div class="sub">${org} · ข้อมูล ณ ${formatThaiDate(new Date(), { long: true })}</div>
     <table><thead><tr><th style="width:7mm">ที่</th><th>ทรัพย์สิน</th><th style="width:30mm">ประเภทกรมธรรม์</th><th style="width:38mm">บริษัท / เลขที่กรมธรรม์</th><th style="width:40mm">ระยะเวลาคุ้มครอง</th><th style="width:22mm">ทุนประกัน</th><th style="width:20mm">เบี้ยประกัน</th><th style="width:28mm">ฎีกา</th><th style="width:20mm">สถานะ</th></tr></thead><tbody>
       ${pg.map(({ a, p, s, renewed }, i) => `<tr><td class="n" style="text-align:center">${pi * per + i + 1}</td><td>${esc(insAssetLabel(a))}<div style="color:#6b7280;font-size:9.5px">${esc([a?.vehicle_kind || INS_TYPE[a?.asset_type]?.label, a?.brand_model, a?.asset_code, a?.custodian_name ? 'ผู้รับผิดชอบ ' + a.custodian_name : ''].filter(Boolean).join(' · '))}</div></td>
@@ -7383,7 +7418,7 @@ async function insPrintPrepaid(mode, fy) {
   if (!rows.length) { showToast(`ไม่มีกรมธรรม์ที่คุ้มครองเกิน 30 ก.ย. ${fy}`, 'warning'); return; }
   const root = rgPrintRoot(), org = esc(State.settings.org_name || 'กองคลัง เทศบาลเมืองศรีสัชนาลัย'), printed = formatThaiDate(new Date(), { time: true }), d = (k) => formatThaiDate(calDate(k));
   const sum = (arr) => arr.reduce((s, r) => ({ amount: s.amount + r.amount, prepaid: s.prepaid + r.prepaid, expense: s.expense + r.expense }), { amount: 0, prepaid: 0, expense: 0 });
-  const per = 15, pages = []; for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  const per = Math.max(rows.length, 1), pages = [rows];   // แบ่งหน้าตามความสูงจริงตอนพิมพ์ (rgReflowPages)
   const totRow = (label, t, n) => `<tr class="tot"><td colspan="8" style="text-align:right">${label} (${n} รายการ)</td><td class="n">${rentMoney(t.amount)}</td><td class="n">${rentMoney(t.expense)}</td><td class="n">${rentMoney(t.prepaid)}</td></tr>`;
   const all = sum(rows);
   root.innerHTML = pages.map((pg, pi) => `<div class="rg-page land"><h1>รายงานค่าใช้จ่ายจ่ายล่วงหน้า (เบี้ยประกันภัย) ณ วันที่ ${formatThaiDate(calDate(fyEnd), { long: true })}</h1>
